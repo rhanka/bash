@@ -1,0 +1,15 @@
+{
+  "id": "bash",
+  "forbiddenPathDefaults": [
+    "Makefile",
+    "package.json",
+    "LICENSE",
+    ".githooks/**",
+    ".github/workflows/**",
+    "docker-compose*.yml",
+    "Dockerfile*"
+  ],
+  "exceptionIdPattern": "^BR\\d+[a-z]?-EX\\d+$",
+  "conditionalRequiresException": true,
+  "branchMatch": "exact"
+}

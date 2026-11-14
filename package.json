@@ -1,0 +1,11 @@
+{
+  "name": "@sentropic/bash",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A zero-dependency, WASM-first, security- and performance-focused bash sandbox (clean-room reimplementation with functional parity to vercel-labs/just-bash).",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": {},
+  "devDependencies": {}
+}
