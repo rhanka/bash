@@ -1,4 +1,4 @@
-# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.1)
+# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.2)
 
 Status: normative. Derived from `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 (called "the study" below), which
 holds the evidence, measurements and alternatives; this document holds the decisions. Where both speak,
@@ -11,8 +11,8 @@ Conventions:
 - "Posed by" is `Owner` or `Fable 5.2 + Carbon (consensus)`. Track ids are decision aggregate ids in
   `.track/events.jsonl`; "—" means the decision is recorded in the study and `BRANCH.md` only.
 - Lot ids are those of study section 7.
-- v1.1 reconciles the adversarial review of v1 (Annex J). Items marked **pending owner Q1/Q2** are written
-  with the proposal under review and wait for an owner answer (section 3).
+- v1.1 reconciles the adversarial review of v1 (Annex J). v1.2 applies the owner answers of 15/11 on
+  runtimes, tracing and defense-in-depth (section 3).
 - A build lane reads this document without the reference: every behaviour it needs is stated here or in a
   lot spec, never by a bare `JB:` pointer. `JB:` paths are kept only as provenance for reviewers.
 
@@ -44,6 +44,7 @@ Conventions:
 | D22 | Benchmark protocol and budgets | Owner / Consensus |
 | D23 | Divergence list | Owner |
 | D24 | Go/no-go points | Consensus |
+| D25 | Evolution path: runtime companions `@sentropic/python` and `@sentropic/js` | Owner / Consensus |
 
 ## 2. Decisions
 
@@ -226,13 +227,16 @@ Conventions:
 - **Decision.** One kernel component contains every command; companions are JS facades over it. Tier 1
   ships first, then `awk`/`jq`, then tier 3 (lists: study 3.1). `yq` supports all six reference formats
   (YAML, JSON, XML, TOML, INI, CSV). Not in v1: `python3`/`python`, `js-exec`/`node`, `sqlite3`, `xan`,
-  `html-to-markdown`, `@just-bash/executor`. `new Bash()` throws a `TypeError` iff `python === true` or
-  `javascript` is truthy (`true` or a config object); `false` and `undefined` are no-ops;
-  `getPythonCommandNames()` and `getJavaScriptCommandNames()` return empty lists (**pending owner Q1**).
+  `html-to-markdown`, `@just-bash/executor`. `python` and `javascript` options never make the constructor
+  throw: while the runtimes are not installed (D25), the commands `python3`, `python`, `js-exec`, `node`
+  are absent and running them returns exit 127 with the "command not found" message, as in the
+  reference's browser bundle; `getPythonCommandNames()` and `getJavaScriptCommandNames()` return the
+  names in all cases.
   A `slim` build is decided after L2.
 - **Rationale.** A second binary would copy data across memories; unused code costs only validation.
-- **Posed by.** Owner (scope, `yq`) and Fable 5.2 + Carbon (single binary). **Track.**
-  `01M7FTJ9RGM778N1T0NNKFP8EF` (`yq`), `01M7E4ZA5A1YDQD0N3459M3XN6` (packages).
+- **Posed by.** Owner (scope, `yq`, runtime options) and Fable 5.2 + Carbon (single binary). **Track.**
+  `01M7FTJ9RGM778N1T0NNKFP8EF` (`yq`), `01M7E4ZA5A1YDQD0N3459M3XN6` (packages),
+  `01M7G0VX8G4BS24QJT4PSN8SVD` (runtime options).
 - **Acceptance.** `getCommandNames()` equals the reference list minus the excluded commands; the parity
   table marks each command `covered`, `partial` or `not covered`; each `yq` format has read and write
   snapshots.
@@ -241,15 +245,18 @@ Conventions:
 ### D14 — JS facade API surface and tiers
 - **Decision.** Annex D. The facade is hand-written ESM JavaScript with JSDoc and hand-written `.d.ts`,
   with no dependency; declarations are checked with `tsc --noEmit` on consumer fixtures. Tier A and B are
-  v1. `exec` never throws for script errors (Annex D.2). `logger` is implemented in v1; `trace` and
-  `coverage` are accepted and have no effect until tier C (**pending owner Q1**). `execSync` is an addition on Node that
+  v1. `exec` never throws for script errors (Annex D.2). `logger`, `trace` and `coverage` are all implemented in v1 (Annex D.1, D.6, D.7; Track
+  `01M7G0VWT8J66MCBVN8281Z3J5`); trace events and coverage hits are produced by the kernel as plain
+  records and identifiers, without exposing any AST API. `execSync` is an addition on Node that
   throws a typed error when an async capability is configured. `parse()`, AST types and the transform
   pipeline are not in v1.
 - **Rationale.** Drop-in for `Bash.exec` users; no build step for the host.
 - **Posed by.** Fable 5.2 + Carbon (consensus). **Track.** —.
-- **Acceptance.** API tests per row of Annex D; `tsc --noEmit` on fixtures that import the reference's
+- **Acceptance.** API tests per row of Annex D; trace and coverage streams compared with oracle snapshots
+  (event names, detail keys and counters for trace; the ordered hit sequence for coverage); `tsc --noEmit` on fixtures that import the reference's
   type names; the type check fails closed when the tool is absent.
-- **Binds.** L1b, L7a, L10a, L17a.
+- **Binds.** L1b, L7a, L10a, L17a; coverage instrumentation in L4, L5, L6a, L6b, L13, L14, L15a and every
+  command lot; trace in L9a-2.
 
 ### D15 — Runtimes: Node, browser, wasmCloud
 - **Decision.**
@@ -365,6 +372,33 @@ Conventions:
 - **Acceptance.** A written report per point, reviewed, before the next lots start.
 - **Binds.** L0, L2, L1c.
 
+### D25 — Evolution path: runtime companions `@sentropic/python` and `@sentropic/js`
+- **Decision.** After parity, `python3`/`python` and `js-exec`/`node` ship as companion packages,
+  `@sentropic/python` and `@sentropic/js`. Each embeds a third-party engine compiled to WebAssembly
+  (CPython, QuickJS) as a **separate component**, loaded and composed on demand; installing a companion is
+  what makes the `python` / `javascript` options register the commands. The zero-dependency rule keeps
+  applying to the kernel and to `@sentropic/bash`; the exception is limited to those two packages, whose
+  engines are pinned, hashed and built in their own release lane. The kernel reaches a runtime only
+  through its existing host-call path: no new kernel import.
+  Build form, to be settled by a companion study after parity: (a) a WASI component with no host-JS glue,
+  whose filesystem and stdio imports are served from the kernel VFS by a bridge, usable unchanged in
+  wasmCloud; (b) Emscripten output with JS glue in a host worker, as the reference does. Position of the
+  design lane: (a), with (b) only if (a) cannot run the reference's snapshots; Carbon's position is taken
+  at the review of that study.
+  The reference's security exports (`DefenseInDepthBox`, `SecurityViolationError`,
+  `SecurityViolationLogger`, `createConsoleViolationCallback` and their types) ship with the companions
+  when a companion exposes a host-JS surface (form (b), or any host-side glue), where that protection has
+  something to guard. In the v1 kernel `defenseInDepth` is accepted and has no effect.
+- **Rationale.** The engines are large third-party code; isolating them in separate components and
+  packages keeps the kernel's guarantees (zero import, zero dependency, size budget) intact.
+- **Posed by.** Owner (companions, exception scope, deferred security exports); Fable 5.2 + Carbon (build
+  form, pending the companion study). **Track.** `01M7G0VX1KEG93PCF546Q159RV`,
+  `01M7G0VXFVBY599X0S6SF1AXD7`.
+- **Acceptance.** Before the companions exist: tests of D13's option behaviour. For each companion: its
+  own study and EVOL; kernel gates G1 and G6 unchanged with the companion installed; oracle snapshots of
+  the reference's runtime commands.
+- **Binds.** New post-parity lots (plan rung): companion study, `@sentropic/python`, `@sentropic/js`.
+
 ---
 
 ## Annex A — WIT contract (`0.1.0-draft`)
@@ -395,6 +429,8 @@ interface types {
     cwd: option<bytes>,
     process-info: option<process-info>,
     default-layout: bool,
+    trace: bool,                          // collect trace events (D.6)
+    coverage: bool,                       // collect coverage hits (D.7)
   }
   record script-overflow { utf16-units: u64, utf8-bytes: u64 }
   record exec-opts {
@@ -467,6 +503,7 @@ interface types {
   variant host-req {
     fs-batch(fs-batch-req), lazy-file(bytes), custom-command(command-call),
     fetch(fetch-req), sleep(u64), clock, entropy(u32),
+    trace-clock,                          // monotonic time for trace durations only
   }
   variant host-outcome {
     fs(list<fs-result>), data(bytes), command-exit(s32), fetched(fetch-resp),
@@ -483,6 +520,11 @@ interface types {
   record kernel-error { code: kernel-error-code, detail: string }
   record memory-usage { used: u64, ceiling: u64, high-water: u64 }
 
+  variant trace-value { number(f64), text(bytes) }
+  record trace-detail { key: string, value: trace-value }
+  record trace-event { category: string, name: string, duration-ms: f64,
+                       details: list<trace-detail> }
+
   record oneshot-file { path: bytes, data: bytes, mode: u32 }
   record oneshot-req { files: list<oneshot-file>, config: shell-config, opts: exec-opts,
                        stdin: bytes, fuel: u64 }
@@ -491,13 +533,14 @@ interface types {
 }
 
 interface engine {
-  use types.{bytes, env-var, shell-config, exec-opts, exec-result, step, host-outcome,
+  use types.{bytes, env-var, shell-config, exec-opts, exec-result, step, host-outcome, trace-event,
              cancel-reason, out-channel, fs-op, fs-result, fs-error, changed-file,
              kernel-error, memory-usage, oneshot-req, oneshot-result};
 
   configure: func(memory-ceiling-bytes: u64) -> result<_, kernel-error>;     // once, first call
   raise-ceiling: func(memory-ceiling-bytes: u64) -> result<_, kernel-error>; // monotonic
   usage: func() -> memory-usage;
+  coverage-features: func() -> list<string>;   // identifier table; index = feature id
 
   resource vfs {
     create: static func(max-bytes: u64) -> result<vfs, kernel-error>;
@@ -532,6 +575,8 @@ interface engine {
     cancel: func(reason: cancel-reason) -> exec-result;
     take-stdout: func(max: u32) -> bytes;
     take-stderr: func(max: u32) -> bytes;
+    take-trace: func(max: u32) -> list<trace-event>;
+    take-coverage: func(max: u32) -> list<u16>;   // feature ids, in hit order
   }
 
   exec-oneshot: func(req: oneshot-req) -> result<oneshot-result, kernel-error>;
@@ -561,6 +606,11 @@ Rules attached to the contract:
 - `mount-id` values are allocated by the driver and identify a host-backed filesystem in `fs-batch`.
   `mount-vfs` rejects a source from another instance and any cycle.
 - `net-error` codes map to the facade's typed errors and to `curl` exit codes in the `curl` lot spec.
+- Trace and coverage are collected only when enabled in `shell-config`. Their buffers are bounded: when one
+  is full the fiber returns `out-of-fuel` so that the driver drains it. All events and hits of an exec are
+  drained, in order, before its result is delivered. `trace-clock` is answered by the driver with a
+  monotonic reading (`clock` outcome) even without the `real-clock` grant; the kernel uses it only to fill
+  trace durations and never makes it observable to the script.
 - `exec-oneshot` returns `bad-state` if the script needs a host call.
 - The session drivers live in a second package, `sentropic:bash-session@0.1.0-draft`: each world imports
   `sentropic:bash/engine` and exports one `session` resource (`create`, `exec`, `read-file`, `write-file`).
@@ -656,20 +706,19 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 
 | Tier | just-bash surface | Ours |
 |---|---|---|
-| A | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, maxCallDepth, maxCommandCount, maxLoopIterations, commands, customCommands, sleep, network, fetch, processInfo, logger})` | Same; profile names extended with `contain`, `micro` |
+| A | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, maxCallDepth, maxCommandCount, maxLoopIterations, commands, customCommands, sleep, network, fetch, processInfo, logger, trace, coverage})` | Same; profile names extended with `contain`, `micro` |
 | A | `bash.exec(cmd, {env, replaceEnv, cwd, rawScript, stdin, stdinKind, signal, args})` -> `{stdout, stderr, exitCode, env, stdoutKind?}` | Same (D.2) |
 | A | `bash.fs`, `readFile`, `writeFile`, `getCwd`, `getEnv` (synchronous), `registerCommand` | Same |
-| A | `defineCommand`, `LazyCommand`, `createCommandContext`; context `fs`, `cwd`, `env`, `exportedEnv`, `assignShellVariable`, `stdin`, `limits`, `exec`, `origCommand`, `execWithInheritedStdin`, `fetch`, `sleep`, `signal`, `fileDescriptors`, `getRegisteredCommands` | Same, behind the membrane |
+| A | `defineCommand`, `LazyCommand`, `createCommandContext`; context `fs`, `cwd`, `env`, `exportedEnv`, `assignShellVariable`, `stdin`, `limits`, `exec`, `origCommand`, `execWithInheritedStdin`, `fetch`, `sleep`, `signal`, `fileDescriptors`, `getRegisteredCommands`, `trace` | Same, behind the membrane |
 | A | `InMemoryFs` and the `IFileSystem` contract (D.3) | Same |
 | A | `getCommandNames`, `getNetworkCommandNames`; byte helpers (D.5) | Same |
 | B | `OverlayFs`, `ReadWriteFs`, `MountableFs` | Same options, own implementation (D10) |
 | B | `NetworkConfig` and typed network errors (D.4) | Same (D11) |
 | B | ESM and CJS entries, `./browser` entry | Same; browser runs every kernel command |
 | C (after parity) | `Sandbox`, `SandboxCommand`; CLI binaries | Later lot (L17a) |
-| C | `trace`, `coverage` options | Accepted, no effect in v1 (**pending owner Q1**) |
 | Not in v1 | `parse`, AST types, `BashTransformPipeline`, plugins, `serialize`, `registerTransformPlugin`, `transform` | Absent; the two methods throw "not supported" |
-| Not reproduced | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | Option accepted, no effect; exports absent (**pending owner Q2**) |
-| Not in v1 | `python`, `javascript` options; `getPythonCommandNames`, `getJavaScriptCommandNames` | `TypeError` iff `python === true` or `javascript` truthy; helpers return `[]` (**pending owner Q1**) |
+| Deferred to companions (D25) | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | In v1 the option is accepted and has no effect and the exports are absent; they ship with a companion that exposes a host-JS surface |
+| Companions (D25) | `python`, `javascript` options; `getPythonCommandNames`, `getJavaScriptCommandNames` | Options accepted; without the companion the commands are absent (exit 127); helpers return the names |
 | Additions | — | `execSync`, `Bash.precompile()`, `bash.compact()`, journal option |
 
 `logger` is an object with `info(message, data)` and `debug(message, data)`. For each `exec` it receives
@@ -761,6 +810,48 @@ text and byte strings (decoding keeps invalid bytes as single characters); `lati
 `textOutput(text)` build a command result with the matching `stdoutKind`; `stdoutKind(result)` and
 `stdoutAsBytes(result)` read it back. Conversions above 512 MiB throw a `RangeError`.
 
+### D.6 `trace`
+
+`trace` is a callback receiving events `{category, name, durationMs, details?}`: `category` and `name` are
+strings, `durationMs` a number of milliseconds, `details` a flat object of numbers and strings. Custom
+commands receive the same callback as `ctx.trace` and may emit their own events. Built-in events exist
+for `find` only, two per search path given on the command line, in this order:
+
+| category / name | `durationMs` | `details` |
+|---|---|---|
+| `find` / `summary` | time spent on that search path | `readdirCalls`, `readdirTimeMs`, `statCalls`, `statTimeMs`, `evalCalls`, `evalTimeMs`, `nodeCount`, `batchCount`, `batchTimeMs`, `earlyPrunes`, `otherTimeMs` |
+| `find` / `searchPath` | same value | `path` (the search path as given), `resultsFound` (results produced for it, diagnostics excluded) |
+
+Counters: `nodeCount` entries visited; `readdirCalls` directory listings; `statCalls` stat operations;
+`evalCalls` evaluations of the expression on an entry; `earlyPrunes` entries for which a pre-check on name
+and type decided that the subtree need not be descended; `batchCount` traversal batches, a batch being up
+to 500 queued entries processed together (the count depends on that size, so the kernel uses the same
+one). `batchTimeMs` covers whole batches and overlaps the other three phase times; `otherTimeMs` is
+`durationMs` minus the four phase times and may be negative. Times are measurements and are not compared
+with the oracle; names, keys and counters are, and a counter that proves to depend on the reference's
+internal scheduling is reported as an `upstream-defect` candidate instead of being matched. The kernel
+reads the monotonic clock at the start and end of each search path and apportions the phase times by the
+fuel spent in each phase (**new in v1.2**, for review: the reference times each operation directly).
+
+### D.7 `coverage`
+
+`coverage` is an object with `hit(feature)`. During an exec, `hit` is called once per occurrence, in
+execution order, with one of these identifiers:
+
+| Family | Identifier | Hit when |
+|---|---|---|
+| Command kinds | `bash:cmd:<Kind>`, Kind in `SimpleCommand`, `If`, `For`, `CStyleFor`, `While`, `Until`, `Case`, `Subshell`, `Group`, `FunctionDef`, `ArithmeticCommand`, `ConditionalCommand` | a command of that kind starts executing |
+| Builtins | `bash:builtin:<name>`, name in `export unset exit local set break continue return eval shift getopts compgen complete compopt pushd popd dirs source . read mapfile readarray declare typeset readonly cd : true false let command builtin shopt exec wait type hash help [ test` | the builtin is dispatched |
+| Expansions | `bash:expansion:<op>`, op in `default_value` (`${v:-w}`), `assign_default` (`${v:=w}`), `error_if_unset` (`${v:?w}`), `use_alternative` (`${v:+w}`), `pattern_removal` (`#`, `##`, `%`, `%%`), `pattern_replacement` (`/`, `//`), `length` (`${#v}`), `substring` (`${v:o:l}`), `case_modification` (`^`, `^^`, `,`, `,,`), `transform` (`${v@op}`), `indirection` (`${!v}`), `array_keys` (`${!a[@]}`), `var_name_prefix` (`${!p*}`), `tilde`, `word_glob`, `word_split` | the operation is applied |
+| awk statements | `awk:stmt:<kind>`, kind in `expr_stmt print printf if while do_while for for_in break continue next nextfile exit return delete block` | the statement executes |
+| awk expressions | `awk:expr:<kind>`, kind in `number string regex field variable array_access binary unary ternary call assignment pre_increment pre_decrement post_increment post_decrement in getline tuple` | the expression is evaluated |
+| sed commands | `sed:cmd:<kind>`, kind in `substitute print printFirstLine delete deleteFirstLine append insert change hold holdAppend get getAppend exchange next nextAppend quit quitSilent transliterate lineNumber branch branchOnSubst branchOnNoSubst label zap group list printFilename version readFile readFileLine writeFile writeFirstLine execute` | the command executes on a line |
+| jq nodes | `jq:node:<Kind>`, Kind in `Identity Field Index Slice Iterate Pipe Comma Literal Array Object Paren BinaryOp UnaryOp Cond Try Call VarBind VarRef Recurse Optional StringInterp UpdateOp Reduce Foreach Label Break Def` | the filter node is evaluated |
+| Command flags | `cmd:flag:<command>:<flag>` | an argument of the command equals a flag of that command's coverage flag table (the table is part of each command's lot spec) |
+
+These identifiers are a vocabulary of strings; they do not give access to a syntax tree. The exact hit
+sequence of a script is fixed by the oracle snapshots.
+
 ## Annex E — Oracle and parity protocol
 
 1. **Oracle.** `just-bash@3.6.0` from npm, installed with `npm ci --ignore-scripts` from a committed
@@ -816,7 +907,7 @@ text and byte strings (decoding keeps invalid bytes as single characters); `lati
 | S8 | Network requests go only to validated, pinned addresses within the allow-list | adapter suite (D11) |
 | S9 | Regex matching and compilation are bounded | D12 tests |
 | S10 | The driver never evaluates sandbox data, never passes it to `import()`, `require`, `Function` or `RegExp`, and stores sandbox-keyed data only in `Map` or null-prototype objects | source scan + adversarial tests with `__proto__`, `constructor`, `prototype`, `toString` as env names, array keys, file names, header names and command names |
-| S11 | Clock, timezone, entropy, pid/uid, hostname and host env are virtual unless granted | capability tests |
+| S11 | Clock, timezone, entropy, pid/uid, hostname and host env are virtual unless granted; the trace clock is never observable by a script | capability tests; a script run with `trace` on cannot distinguish two different trace-clock sequences |
 | S12 | A trap poisons the instance; no state is read from it afterwards | D8 tests |
 | S13 | The published package has no dependency and no install script | package-content test |
 | S14 | Shells sharing one instance or one `InMemoryFs` share files only: a shell cannot reach another shell's grants, custom commands, registry, env or budgets | two-shell tests with different grants and limits |
@@ -851,44 +942,31 @@ above is put to the owner at L2 with the numbers; it is not adopted before.
 | # | Difference from just-bash 3.6.0 | Source of the decision |
 |---|---|---|
 | V1 | Default limit profile is `contain` (reference: `normal`); `contain` and `micro` exist | Owner, O1 |
-| V2 | Not available in v1: `python3`/`python`, `js-exec`/`node`, `sqlite3`, `xan`, `html-to-markdown`, `@just-bash/executor`. Consequently `python: true` or a truthy `javascript` throws at construction and the two name helpers return empty lists (**pending owner Q1**); the limits specific to those runtimes are accepted and unused | Owner, A4 |
+| V2 | Not available in v1: `python3`/`python`, `js-exec`/`node` (until their companions, D25), `sqlite3`, `xan`, `html-to-markdown`, `@just-bash/executor`. With `python` or `javascript` set, construction succeeds and the commands return exit 127, as in the reference's browser bundle; the limits specific to those runtimes are accepted and unused | Owner, A4 and 15/11 |
 | V3 | Not available in v1: `parse`, AST types, transform pipeline and plugins | Consensus, B3 |
 | V4 | The browser entry runs `tar` and `yq`, which the reference's browser bundle excludes, and `gzip`/`gunzip`/`zcat`, which the reference registers but which fail at run time in a browser | Owner, P1 |
-| V5 | `defenseInDepth` is accepted and has no effect; `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported (**pending owner Q2**) | proposal by Fable 5.2 + Carbon |
-| V7 | `trace` and `coverage` are accepted and have no effect in v1 (**pending owner Q1**) | proposal by Fable 5.2 + Carbon |
+| V5 | Deferred to companions: in the v1 kernel `defenseInDepth` is accepted and has no effect, and `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported; they ship with a companion that exposes a host-JS surface (D25) | Owner, 15/11 |
 | V6 | Additions that do not alter existing behaviour and add no oracle exclusion: `execSync`, `precompile`, `compact`, journal, profiles `contain`/`micro`, byte helpers and `MethodNotAllowedError` exported from `./browser` as well, the component and its WIT | Consensus |
 
 ## 3. Questions for the owner
 
-Both concern upstream features. The spec is written with the proposal and marked pending.
+None open. Both questions of v1.1 were answered by the owner on 15/11.
 
-**Q1 — Options of excluded runtimes; `trace` and `coverage`.**
-What just-bash does: `new Bash({ python, javascript })` registers `python3`/`python` and `js-exec`/`node`
-when the option is truthy (`JB:src/Bash.ts:185-190,523-546`). When it is not, or in the browser bundle
-where those runtimes do not exist (`JB:src/commands/registry.ts:514-538`), construction does not throw and
-running the command returns exit 127 (`JB:src/interpreter/builtin-dispatch.ts:819-826`); the helpers
-`getPythonCommandNames()` / `getJavaScriptCommandNames()` return the names in all cases
-(`JB:src/commands/registry.ts:639-657`). `trace` delivers timing events to a callback
-(`JB:src/Bash.ts:232`, `JB:src/types.ts:141-155`) and `coverage` records feature hits
-(`JB:src/types.ts:11`).
-Proposal in this spec: (i) `TypeError` at construction iff `python === true` or `javascript` is truthy,
-no-op otherwise, helpers returning `[]`; (ii) `trace` and `coverage` accepted with no effect until tier C,
-`logger` implemented in v1.
-Positions: (ii) Fable 5.2 + Carbon (consensus). (i) is **disputed**: Carbon poses the throwing variant
-(fail fast, no silent loss of a requested runtime); Fable 5.2 poses the variant that mirrors the
-reference's own behaviour when a runtime is unavailable: no throw, the commands are absent and return 127,
-the helpers keep returning the names. Under D1 that variant adds no API divergence beyond V2, and a shared
-configuration object keeps constructing in every environment.
+**Q1 — Options of excluded runtimes; `trace` and `coverage`. ANSWERED (Owner, 15/11).**
+(i) `python: true` / `javascript: true` construct normally; until the companions exist the commands are
+absent and exit 127, as in the reference's browser bundle; the name helpers keep returning the names
+(the design lane's variant; the throwing variant is rejected). Track `01M7G0VX8G4BS24QJT4PSN8SVD`.
+(ii) `logger`, `trace` and `coverage` are all in v1. Track `01M7G0VWT8J66MCBVN8281Z3J5`.
+Related decision: `python3` and `node`/`js-exec` ship after parity as companion packages (D25). Track
+`01M7G0VX1KEG93PCF546Q159RV`.
+Reference facts used: `JB:src/Bash.ts:185-190,523-546`, `JB:src/commands/registry.ts:514-538,639-657`,
+`JB:src/interpreter/builtin-dispatch.ts:819-826`, `JB:src/types.ts:8-13,138-155`,
+`JB:src/commands/find/find.ts:49-75,880-893`, `JB:src/security/fuzzing/coverage/known-features.ts`.
 
-**Q2 — `defenseInDepth` and the security exports (V5).**
-What just-bash does: `defenseInDepth` (on by default) patches host globals (`Function`, `eval`, `process`
-members, ...) while a script runs (`JB:src/Bash.ts:262`, `JB:src/security/defense-in-depth-box.ts`), and
-the root entry exports `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`,
-`createConsoleViolationCallback` and their types (`JB:src/index.ts:106-119`).
-Proposal — Fable 5.2 + Carbon (consensus): accept the option with no effect and do not export those
-symbols. The kernel runs in a zero-import component and never executes script-controlled JavaScript, so
-there is nothing for the patching to protect; an inert class with a security name would misstate what it
-does. Consequence: code importing those symbols fails at load time with a missing-export error.
+**Q2 — `defenseInDepth` and the security exports (V5). ANSWERED (Owner, 15/11).**
+In the v1 kernel `defenseInDepth` is accepted as a no-op. The security exports are not dropped: they ship
+with the companion packages when those expose a host-JS surface, where the protection has a real surface
+(the reference's python runs Emscripten glue in a host worker). Track `01M7G0VXFVBY599X0S6SF1AXD7`.
 
 ## Annex J — Reconciliation of the review of v1
 
@@ -902,14 +980,35 @@ does. Consequence: code importing those symbols fails at load time with a missin
 | B2.2 L10a deadlock | accepted | consensus | Annex E.4: runner and recorder built by the build room, engine adapter for the oracle written by the reference-reading room |
 | M1 unenforceable scan, allocation traps | accepted, amended | consensus | D6.2 and G6: single `kernel::mem` module with fallible containers and an import gate; `core::fmt` allowed; allocator reserve for the unwinding path. L1a grows accordingly (plan rung) |
 | M2 (a) lazy network adapter | accepted | consensus | D11: synchronous `NetworkConfig` validation |
-| M2 (b) `python`/`javascript` | amended, **dispute on the variant** | Carbon: throw; Fable 5.2: mirror the reference (no throw, exit 127) | D13, Annex D.1, V2, written with Carbon's proposal, pending Q1 |
-| M2 (c) `logger`, `trace`, `coverage` | accepted | consensus | `logger` in L1b; V7; pending Q1 |
+| M2 (b) `python`/`javascript` | settled by the owner (15/11): no throw, exit 127, helpers return the names | Owner | D13, Annex D.1, V2 |
+| M2 (c) `logger`, `trace`, `coverage` | settled by the owner (15/11): all three in v1 | Owner | D14, Annex A, D.6, D.7; V7 removed |
 | M3 invariants and gate holes | accepted | consensus | S10 hardened, S14, S15; Annex C: session drivers built, G2 browser graph, G3 scope, G8 staging, exact pins |
 | M4 drift from the study and owner answers | accepted | consensus | V4 (`gzip` family; verified in the reference's browser entry notes), D1 (both size checks: exit 126 then exit 2), Annex H (60 KB target kept, split provisional, minify fallback restored, owner asked at L2) |
 | m1 pass bounds | accepted | consensus | D6 (1.25x bound), D18 (PR versus release checks), D21 (URL/IP target, duration floor) |
 | m2 synchronous `getEnv`/`getCwd` | accepted, amended | consensus | `shell.env` and `shell.cwd` getters in Annex A instead of a facade mirror |
-| Table: V5 | agreed, pending Q2 | consensus | V5 |
+| Table: V5 | settled by the owner (15/11): deferred to companions | Owner | V5, D25 |
 | Table: V6 | agreed | consensus | V6, D23 |
 | Table: Annex H | accepted | consensus | Annex H |
 
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
+
+## Annex K — Lot impact of v1.1 and v1.2 for the plan rung
+
+Sizes are deltas against study section 7 (estimates).
+
+| Change | Lots | Delta |
+|---|---|---|
+| `kernel::mem` with fallible containers (v1.1, M1) | L1a | 4 -> 6 points |
+| WIT additions of v1.1 (custom-command calls, chunked lazy files, redirects, cancel result) | L1b | +1 |
+| `logger`; trace and coverage buffers, drain, feature table, facade delivery | L1b | +1 |
+| Trace events of `find` | L9a-2 | +0.5 |
+| Coverage instrumentation: command kinds, builtins, expansions | L4, L5, L6a, L6b | +1 in total |
+| Coverage instrumentation: `sed`, `awk`, `jq` | L13, L14, L15a | +0.5 each |
+| Coverage flag tables and `cmd:flag` hits | every command lot (L9a-1, L9a-2, L9b, L16a-1, L16a-2, L16c, L16d, L15b-1) | +1.5 in total, Cheap tier |
+| Trace and coverage fields in snapshots and recorder | L10a | +0.5 |
+| Specs: coverage flag table per command, trace and coverage sections | design overhead | within the 40% line, upper half of its range |
+| Runtime companions (post-parity, outside v1 parity totals) | new: companion study (3), `@sentropic/python` (8), `@sentropic/js` (8), all Strong | +19 |
+
+v1 parity build points move from 180 to about 189; the critical path grows by 3 points (L1a +2, L1b +1,
+if the L1b additions are not split off).
+
