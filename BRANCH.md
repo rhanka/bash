@@ -43,9 +43,10 @@ Produce the reviewed design ladder of `@sentropic/bash`: STUDY, then EVOL spec, 
 - [x] **Lot 2 — STUDY review (Carbon) + owner gates**
   - [x] Adversarial review reconciled into the STUDY (v1 -> v3.2, consensus Fable 5.2 + Carbon).
   - [x] Owner answers (A1, A2, A4, O1-O8, B1, P1, P2) recorded in Track.
-- [ ] **Lot 3 — EVOL spec (Fable 5.2) + review (Carbon)**
-  - [ ] `spec/SPEC_EVOL_BASH_SANDBOX.md` with numbered decisions D1..Dn.
-- [ ] **Lot 4 — Plan (Fable 5.2) + review (Carbon)**
-  - [ ] Lot-based plan with per-lot cost estimate, model routing and benchmark protocol.
+- [x] **Lot 3 — EVOL spec (Fable 5.2) + review (Carbon)**
+  - [x] `spec/SPEC_EVOL_BASH_SANDBOX.md` v1.5 with decisions D1..D26 (two Carbon review rounds, consensus).
+- [x] **Lot 4 — Plan (Fable 5.2) + review (Carbon)**
+  - [x] `plan/PLAN_BASH_SANDBOX_V1.md` v1.3: 41 lots, 187 pts, 887.65 units, waves W0-W14, benchmark protocol (two Carbon review rounds, consensus).
+  - [ ] `spec/lots/L0.md` reviewed by Carbon (first Room-1 handoff).
 - [ ] **Lot N — Final validation**
   - [ ] `make check`; owner sign-off; remove `BRANCH.md` in the last commit before merge.
