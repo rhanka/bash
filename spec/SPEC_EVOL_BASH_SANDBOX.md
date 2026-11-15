@@ -877,7 +877,8 @@ reported as an `upstream-defect` candidate instead of being matched.
 1. **Oracle.** `just-bash@3.6.0` from npm, installed with `npm ci --ignore-scripts` from a committed
    lockfile into git-ignored `tmp/bench-engines/just-bash/`. Run in a child process, in-memory filesystem,
    network, python and javascript disabled, `LC_ALL=C`, `TZ=UTC`, fixed virtual clock where the reference
-   allows it.
+   allows it. Only exception: `curl` cases are recorded with the network allow-list restricted to a
+   loopback fixture server whose definition is committed with the snapshots.
 2. **Where it runs.** Only in the oracle job and in reference-reading lanes (Annex F). Never in a build or
    test-writing worktree.
 3. **Case format.** A case is our own script plus initial files, env, stdin and options, written from the
@@ -1017,6 +1018,7 @@ with the companion packages when those expose a host-JS surface, where the prote
 | R3.2 `exec-oneshot`, session drivers | accepted | consensus | Annex A rules |
 | R4 `find` trace details, `logger`, types, G6, security exports | accepted | consensus | D.6, D.1, G6, D25, V5 |
 | R5 lot deltas | accepted | consensus | Annex K replaced by the plan |
+| Plan review B2.2 (oracle and `curl`) | accepted | consensus | Annex E.1: loopback fixture server for `curl` cases |
 
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
 
