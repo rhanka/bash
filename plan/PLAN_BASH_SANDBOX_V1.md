@@ -1,9 +1,10 @@
-# PLAN — @sentropic/bash v1 (rung 3: lot plan, v1.2)
+# PLAN — @sentropic/bash v1 (rung 3: lot plan, v1.3)
 
-Status: executable plan for v1 parity, derived from `spec/SPEC_EVOL_BASH_SANDBOX.md` v1.3 ("EVOL") and
+Status: executable plan for v1 parity, derived from `spec/SPEC_EVOL_BASH_SANDBOX.md` v1.5 ("EVOL") and
 `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 ("the study"). Decisions are in EVOL; this document schedules and
 prices the work. v1.1 reconciles the adversarial review of v1 (section 13). Post-parity work is section 9.
-v1.2 applies the owner answers of 15/11 on names and host disk access (EVOL D26, section 12).
+v1.2 applies the owner answers of 15/11 on names and host disk access (EVOL D26, section 12). v1.3 closes
+the review (section 13); it changes no point and no unit.
 
 Units: a point is the size unit of the study (S = 1, M = 3, L = 8, with intermediate values). A build unit
 is one point at the Cheap tier. All figures are estimates; they are re-based after the two go/no-go gates.
@@ -84,10 +85,15 @@ Wave rules:
 
 ## 4. Critical path
 
-`L0 (3.5) -> L1a-1 (2) -> L1b (6) -> L2 (8.5) -> L3 (8) -> L4 (8.5) -> L5 (8.5) -> L6a (3)`: 48 points.
-L1a-2 (4) runs beside L1b and must be merged before L2; L8a (8) runs beside L3 and must be merged before
-L4; L8b and L1d run beside L4 and must be merged before its final PR. Every lot of the path is at the
-Strong tier. Everything else hangs off L2 or later and has slack.
+Shell core, W0 to W7: `L0 (3.5) -> L1a-1 (2) -> L1b (6) -> L2 (8.5) -> L3 (8) -> L4 (8.5) -> L5 (8.5) ->
+L6a (3)`: 48 points, every lot at the Strong tier. L1a-2 (4) runs beside L1b and must be merged before L2;
+L8a (8) runs beside L3 and must be merged before L4; L8b and L1d run beside L4 and must be merged before
+its final PR.
+
+To the parity gate, the longest dependency chain is 54 points (`L0 .. L5` (45) `-> L9a-2 (5) -> L19 (4)`),
+or 54.5 through `L11a -> L11b`; L17a adds 3.5 after the gate. From W8 to W13 the schedule is bound by the
+two slots rather than by dependencies: about 95 points of slot time for the remaining lots, so their
+order can change but their total duration cannot shrink without a third lane.
 
 ## 5. Go/no-go gates
 
@@ -100,7 +106,9 @@ Strong tier. Everything else hangs off L2 or later and has slack.
 
 ## 6. Clean-room handoff
 
-1. For each lot the design lane (Room 1) writes `spec/lots/<lot>.md`: behaviour tables (options, exit
+1. For each lot the design lane (Room 1) writes `spec/lots/<lot>.md` (for the batched leaf lots L9b and
+   L16c: one spec and one snapshot PR per group of at most six commands, not one per command, which is
+   what keeps their overhead at the Cheap rate): behaviour tables (options, exit
    codes, messages, edge cases), the coverage flag table and the exact trigger sites where relevant, the
    list of oracle cases, the exit gates of this plan, the lot's allowed paths, and the interface it builds
    against as declarations written by the design lane: TypeScript signatures for facade lots (L1b, L7b,
@@ -159,7 +167,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Builder.** Sonnet 5.5; fallback Gemini 4 Argon.
 - **Cost.** Build 17.5 units + overhead 5.25 = 22.75 units.
 - **Depends on.** —.
-- **Entry.** Lot spec merged (section 6); EVOL v1.3 approved.
+- **Entry.** Lot spec merged (section 6); EVOL approved.
 - **Exit gates.** G1-G8 pass on a clean worktree; `wasm-tools component wit` accepts Annex A; a `node:test` case instantiates the generated glue with an empty import object and calls the export; `npm pack` tarball installs in an empty project with no native tool and has no dependency and no install script (S13); written go/no-go report. `make check` green.
 - **Also.** Scope exceptions to declare: `BR<n>-EX1` `Makefile` (delegation to `tools/`), `BR<n>-EX2` `package.json` (entries, `files`), `BR<n>-EX3` `.github/workflows/**` (run `make check`).
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
@@ -499,11 +507,11 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Branch.** `feat/l15b3-ini-csv` (worktree `tmp/l15b3-ini-csv`).
 
 ### L16a-1 — Compression and archives
-- **Scope.** inflate/deflate, `gzip`/`gunzip`/`zcat`, `tar`, with archive limits and extraction containment (EVOL S15).
+- **Scope.** inflate/deflate, `gzip`/`gunzip`/`zcat`, `tar`, with their flag tables, archive limits and extraction containment (EVOL S15).
 - **Room.** Room 2 (build). **Wave.** W11, slot B. **Size.** 5 points, Strong.
 - **Builder.** Gemini 4 Argon; fallback Sonnet 5.5.
 - **Cost.** Build 25 units + overhead 7.5 = 32.5 units.
-- **Depends on.** L2, L7a, L7b.
+- **Depends on.** L2, L7a, L7b, L1d.
 - **Entry.** Lot spec merged (section 6); Listed lots merged; codec and `tar` specs and snapshots committed.
 - **Exit gates.** Round-trip tests and snapshots with 0 failure; archive-bomb, symlink-parent and special-file cases end in limit or error results, including on a host mount. `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
@@ -525,7 +533,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Room.** Room 2 (build). **Wave.** W12, slot A. **Size.** 9 points, Cheap.
 - **Builder.** Haiku 5.5; fallback Engram Muse 1.3.
 - **Cost.** Build 9 units + overhead 3.6 = 12.6 units.
-- **Depends on.** L10a and the lots under test.
+- **Depends on.** L10a and the lots merged before W12; exit: L16a-2, L16c.
 - **Entry.** Lot spec merged (section 6); Listed lots merged; case list reviewed.
 - **Exit gates.** Parity report: 0 failing case outside the divergence list; every Annex D.7 identifier that is not excluded is hit by at least one case; every row of Annex D.1 tiers A and B has a case; no case derived from a reference test file. `make check` green.
 - **Review.** Carbon reviews the first three PRs in full, then one in five; dispatched only on a green `make check`.
@@ -536,7 +544,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Room.** Room 2 (build). **Wave.** W12, slot B. **Size.** 3 points, Mid.
 - **Builder.** Codex Sol 6.1 medium; fallback Sonnet 5.5.
 - **Cost.** Build 7.5 units + overhead 3 = 10.5 units.
-- **Depends on.** L2.
+- **Depends on.** L2, L1d.
 - **Entry.** Lot spec merged (section 6); Snapshots committed.
 - **Exit gates.** Snapshots pass with 0 failure; flag table covered. `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
@@ -558,7 +566,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Room.** Room 1 (reference-reading, documentation only). **Wave.** W12, slot B. **Size.** 2 points, Cheap.
 - **Builder.** Haiku 5.5; fallback Engram Muse 1.3.
 - **Cost.** Build 2 units + overhead 0.8 = 2.8 units.
-- **Depends on.** —.
+- **Depends on.** exit: L10b (status column from its parity report).
 - **Entry.** Lot spec merged (section 6); Room 1 worktree with `tmp/refs/`.
 - **Exit gates.** Matrix has one row per name of the 85 + 5 command names and per row of Annex D.1; status column filled from the parity report; no code copied. Refreshed at the parity gate. `make check` green.
 - **Review.** Carbon reviews the first three PRs in full, then one in five; dispatched only on a green `make check`.
@@ -591,7 +599,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Room.** Room 2 (build). **Wave.** W13, slot B. **Size.** 5 points, Strong.
 - **Builder.** Gemini 4 Argon; fallback Sonnet 5.5.
 - **Cost.** Build 25 units + overhead 7.5 = 32.5 units.
-- **Depends on.** L1d, L7a, L7b, L16b; findings of L11a.
+- **Depends on.** L1d, L7a, L7b, L12, L16b; exit: L11a.
 - **Entry.** Lot spec merged (section 6); Listed lots merged.
 - **Exit gates.** Invariant table with a passing suite named for each of S1-S15; M7 limit latency not above just-bash on the same cases; zero open trap. `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
@@ -604,7 +612,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Cost.** Build 8.75 units + overhead 3.5 = 12.25 units.
 - **Depends on.** parity gate.
 - **Entry.** Lot spec merged (section 6); Parity gate passed; snapshots of the reference CLIs recorded by Room 1 for the `--just-bash` cases.
-- **Exit gates.** API snapshots for `Sandbox` pass with 0 failure, including arguments with quotes and spaces; `stpsh` tests: with no flag a script cannot read a sentinel file of the current directory; with `--root` it reads it and a write fails; with `--allow-write` the write succeeds as on the reference; with `--just-bash` outputs equal the recorded snapshots of both reference CLIs; a bare `stpsh` with a terminal enters the interactive shell and with a pipe runs the script; one test per documented option. `make check` green.
+- **Exit gates.** API snapshots for `Sandbox` pass with 0 failure, including arguments with quotes and spaces; `stpsh` tests: with no flag a script cannot read a sentinel file of the current directory; with `--root` it reads it and a write fails; with `--allow-write` the write succeeds and the host file is unchanged; `stpsh script.sh` alone runs the file in an empty filesystem; with `--just-bash`, script-mode outputs equal the recorded snapshots of the reference script CLI, and interactive mode driven through a pseudo-terminal gives the same stdout, stderr, exit code and filesystem state per command as the reference shell (banner and version string excluded); a bare `stpsh` with a terminal enters the interactive shell and with a pipe runs the script; one test per option of EVOL D26. `make check` green.
 - **Also.** Scope exception to declare: `BR<n>-EX1` `package.json` (`bin`). Release gate (conductor): npm component digest equals the OCI digest.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l17a-tier-c` (worktree `tmp/l17a-tier-c`).
@@ -672,15 +680,15 @@ lot ids; they become Track item ids at creation. Decisions referenced by the lot
 | L6b-2 | L6b-2 — Simple builtins | W10 | L5 | 2.63 |
 | L15b-1 | L15b-1 — yq command and YAML | W11 | L15a-1 | 35.75 |
 | L15b-3 | L15b-3 — INI and CSV for yq | W11 | first PR of L15b-1 | 5.25 |
-| L16a-1 | L16a-1 — Compression and archives | W11 | L2, L7a, L7b | 32.5 |
+| L16a-1 | L16a-1 — Compression and archives | W11 | L2, L7a, L7b, L1d | 32.5 |
 | L15b-2 | L15b-2 — XML and TOML for yq | W11 | first PR of L15b-1 | 17.5 |
-| L10b | L10b — Cross-cutting parity cases | W12 | L10a and the lots under test | 12.6 |
-| L16a-2 | L16a-2 — diff | W12 | L2 | 10.5 |
+| L10b | L10b — Cross-cutting parity cases | W12 | L10a and the lots merged before W12; exit: L16a-2, L16c | 12.6 |
+| L16a-2 | L16a-2 — diff | W12 | L2, L1d | 10.5 |
 | L16c | L16c — Leaf tier-3 commands | W12 | L7a, L8b, L1d | 6.13 |
-| L12b | L12b — Feature matrix | W12 | — | 2.8 |
+| L12b | L12b — Feature matrix | W12 | exit: L10b (status column from its parity report) | 2.8 |
 | L11a | L11a — Fuzz harnesses and campaigns | W13 | L5, L8a, L16a-1, L16b, L15a-1, L15b-1, L15b-2, L15b-3 | 15.75 |
 | L19 | L19 — Browser entry verification | W13 | L1d, L9a-2, L16a-1, L15b-1, L15b-2, L15b-3 | 14 |
-| L11b | L11b — Security suites and triage | W13 | L1d, L7a, L7b, L16b; findings of L11a | 32.5 |
+| L11b | L11b — Security suites and triage | W13 | L1d, L7a, L7b, L12, L16b; exit: L11a | 32.5 |
 | L17a | L17a — Tier C: Sandbox facade and the stpsh binary | W14 | parity gate | 12.25 |
 
 Milestone items (kind `milestone`): `Gate L0` (after L0), `Gate L2` (after L2), `WIT freeze` (after L1c),
@@ -735,3 +743,6 @@ observable gate per target:
 | m2 companion invariants | accepted | consensus | Section 9 |
 | m3 Track mapping | accepted | consensus | Section 10 |
 | Owner question Q1 | answered by the owner (15/11) | Owner | EVOL D26 and V8; section 12; L17a, L19, L1c, L1b, L7b |
+| Pass 2, R1 `stpsh` rules and gates | accepted | consensus | EVOL D26; L17a exit gates (pseudo-terminal comparison without the banner, host file unchanged after `--allow-write`) |
+| Pass 2, R2 edges and critical-path wording | accepted | consensus | L1d on L16a-1 and L16a-2; exit edges on L10b, L12b, L11b; section 4; version references |
+| Pass 2, R3 batching | accepted | consensus | Section 6 step 1 |
