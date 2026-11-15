@@ -3,7 +3,7 @@
 // Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { repoRoot, components, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
+import { repoRoot, components, coreImports, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
@@ -16,7 +16,8 @@ const only = opt("--component", "all");
 const out = resolve(repoRoot, opt("--out", "dist"));
 const checkBindings = argv.includes("--check-bindings");
 const all = components();
-const names = only === "all" ? Object.keys(all) : [only];
+const wantKernel = only === "all" || only === "kernel";
+const names = only === "all" ? Object.keys(all) : only === "kernel" ? [] : [only];
 for (const n of names) if (!all[n]) throw new Error(`unknown component ${n}`);
 
 const wasmTools = toolBin("wasm-tools");
@@ -44,6 +45,15 @@ function buildCore(c, def) {
   const magic = readFileSync(core).subarray(0, 8).toString("hex");
   if (magic !== "0061736d01000000") throw new Error(`${core} is not a core module (magic ${magic})`);
   return core;
+}
+
+// The kernel is built as a core module only (it is componentized from L1b on). It must have no import.
+function buildKernelCore() {
+  const core = buildCore("kernel", { crate: "sentropic-bash-kernel" });
+  const imports = coreImports(core);
+  if (imports.length > 0) throw new Error(`kernel core module has ${imports.length} import(s): ${imports[0]}`);
+  report(core);
+  console.log(`kernel core module: ${statSync(core).size} bytes, 0 imports`);
 }
 
 function buildComponent(c, def, core) {
@@ -74,6 +84,7 @@ async function main() {
   mkdirSync(out, { recursive: true });
   // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
   if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
+  if (wantKernel) buildKernelCore();
   for (const c of names) {
     const def = all[c];
     const core = buildCore(c, def);
