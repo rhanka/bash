@@ -30,9 +30,9 @@ Every L1a-1 signature and behaviour stays as it is.
 - none.
 
 ## Plan / Todo (lot-based)
-- [ ] **Lot 0 — Baseline**: BRANCH.md, lot spec
-- [ ] **Lot 1 — Accounting**: atomic budget counters, static headroom account, transfer charging
-- [ ] **Lot 2 — Allocator**: boundary-tag size-class heap, reserve, footprint, native unit tests
-- [ ] **Lot 3 — Containers**: B-tree `KMap`, `KInsertMap`, `KChunks`, native tests
-- [ ] **Lot 4 — Wasm gates**: `mem-test-exports`, node:test workloads, source check
-- [ ] **Lot N — Final validation**: `make check`
+- [x] **Lot 0 — Baseline**: BRANCH.md, lot spec
+- [x] **Lot 1 — Accounting**: atomic budget counters, static headroom account, transfer charging
+- [x] **Lot 2 — Allocator**: boundary-tag size-class heap, reserve, footprint, native unit tests
+- [x] **Lot 3 — Containers**: B-tree `KMap`, `KInsertMap`, `KChunks`, native tests
+- [x] **Lot 4 — Wasm gates**: `mem-test-exports`, node:test workloads, source check
+- [x] **Lot N — Final validation**: `make check`
