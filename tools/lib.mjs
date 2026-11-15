@@ -145,3 +145,8 @@ export function importLines(text) {
 export function coreImports(path, tdir = toolsDir(), root = repoRoot) {
   return importLines(run(toolBin("wasm-tools", tdir, root), ["print", path], { maxBuffer: 1 << 28 }));
 }
+
+/** Drops the canonical resource builtins (`[export]...` imports) that componentization resolves. */
+export function foreignImports(lines) {
+  return lines.filter((l) => !/\(import "\[export\]/.test(l));
+}

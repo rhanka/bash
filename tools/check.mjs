@@ -3,7 +3,7 @@
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { coreImports, repoRoot, toolsDir } from "./lib.mjs";
+import { coreImports, foreignImports, repoRoot, toolsDir } from "./lib.mjs";
 import { GATES } from "./gates.mjs";
 import { runTests } from "./run-tests.mjs";
 
@@ -38,7 +38,7 @@ if (!only) {
     console.log("K1 kernel core: FAIL dist/kernel.core.wasm is missing");
     failed = true;
   } else {
-    const imports = coreImports(core, ctx.toolsDir);
+    const imports = foreignImports(coreImports(core, ctx.toolsDir));
     if (imports.length > 0) {
       console.log(`K1 kernel core: FAIL ${imports.length} import(s), first: ${imports[0]}`);
       failed = true;
@@ -57,6 +57,20 @@ if (!only) {
     console.log("cargo test: FAIL");
     process.exit(cargo.status ?? 1);
   }
+  const cmds = spawnSync("cargo", ["test", "-p", "sentropic-bash-kernel", "--lib", "--features", "test-commands", "--offline", "--quiet"], {
+    cwd: repoRoot,
+    stdio: "inherit",
+    env: { ...process.env, CARGO_TARGET_DIR: join(repoRoot, "dist", "target") },
+  });
+  if (cmds.status !== 0) {
+    console.log("cargo test (test-commands): FAIL");
+    process.exit(cmds.status ?? 1);
+  }
   console.log("cargo test: OK");
+  const bind = spawnSync("node", [join(repoRoot, "tools", "build.mjs"), "--check-bindings", "--component", "kernel"], { cwd: repoRoot, stdio: "inherit" });
+  if (bind.status !== 0) {
+    console.log("bindings regeneration check: FAIL");
+    process.exit(bind.status ?? 1);
+  }
   process.exit(runTests());
 }

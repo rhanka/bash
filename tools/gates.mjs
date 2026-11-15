@@ -1,6 +1,6 @@
 // The eight gates of tools/check.mjs. Each gate takes a context { root, out, toolsDir, quick } and returns
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { components, lockProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
@@ -302,7 +302,10 @@ export function g5OneCoreModule(ctx) {
     const dir = join(ctx.out, "js", name);
     if (!existsSync(dir)) return `${name}: no generated JavaScript in ${relative(ctx.root, dir)}`;
     const wasm = walk(dir, (p) => p.endsWith(".wasm"));
-    if (wasm.length !== 1) return `${name}: expected exactly one .wasm, found ${wasm.length}`;
+    // jco may add the tiny `<name>.coreN.wasm` shim and fixup modules of wit-component (resource
+    // destructor table, a few hundred bytes of generated code). Only one real core module is allowed.
+    const real = wasm.filter((p) => !/\.core\d+\.wasm$/.test(p) || statSync(p).size > 1024);
+    if (real.length !== 1) return `${name}: expected exactly one core module, found ${real.length} of ${wasm.length} .wasm files`;
     for (const js of walk(dir, (p) => p.endsWith(".js"))) {
       const m = readFileSync(js, "utf8").match(/[A-Za-z0-9+/]{1000,}={0,2}/);
       if (m) return `${relative(ctx.root, js)} embeds a base64 literal of ${m[0].length} characters`;
