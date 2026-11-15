@@ -43,8 +43,8 @@ test("G6 fails on alloc::vec outside kernel/src/mem", () => {
 });
 
 test("G7 fails on a dependency and on an install script", () => {
-  assert.match(gates.g7Manifests({ ...real(), root: fx("g7-dep"), skipMake: true }), /dependencies/);
-  assert.match(gates.g7Manifests({ ...real(), root: fx("g7-script"), skipMake: true }), /postinstall/);
+  assert.match(gates.g7Manifests({ ...real(), root: fx("g7-dep"), manifestFile: "manifest.json", skipMake: true }), /dependencies/);
+  assert.match(gates.g7Manifests({ ...real(), root: fx("g7-script"), manifestFile: "manifest.json", skipMake: true }), /postinstall/);
 });
 
 test("G8 fails on a wrong pinned hash", () => {
