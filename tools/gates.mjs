@@ -2,7 +2,7 @@
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { components, pins, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { components, lockResolution, pins, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 
 const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.root);
 
@@ -276,7 +276,7 @@ export function g8ToolPins(ctx) {
   const staged = join(ctx.toolsDir, "npm", "package-lock.json");
   const committed = join(ctx.root, "tools", "package-lock.json");
   if (!existsSync(staged)) return "staged npm lockfile is missing";
-  if (!readFileSync(staged).equals(readFileSync(committed))) return "staged npm lockfile differs from tools/package-lock.json";
+  if (lockResolution(readJson(staged)) !== lockResolution(readJson(committed))) return "staged npm lockfile resolves differently from tools/package-lock.json";
   const nm = findNodeModules(ctx.root, ctx.root, []);
   if (nm.length) return `node_modules inside the repository: ${nm.join(", ")}`;
   return null;

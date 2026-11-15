@@ -70,3 +70,14 @@ export function walk(dir, filter = () => true) {
 export function components(root = repoRoot) {
   return readJson(join(root, "tools", "components.json")).components;
 }
+
+// What an npm lockfile resolved: package path, version, resolved URL and integrity, sorted. npm versions
+// rewrite other lockfile metadata differently, so lockfiles are compared on this projection.
+export function lockResolution(lock) {
+  return JSON.stringify(
+    Object.entries(lock.packages ?? {})
+      .filter(([key]) => key !== "")
+      .map(([key, p]) => [key, p.version, p.resolved, p.integrity])
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+}
