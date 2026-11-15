@@ -17,7 +17,7 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
   - `kernel/src/**` (except `kernel/src/mem/**`), `kernel/Cargo.toml` (features only), `Cargo.lock`
   - `host/**`, `types/**`, `test/**`
   - `tools/**` (build learns the two components, the committed bindings check and the `[export]` imports)
-  - `wit/**` (only if a syntax fix is needed)
+  - `wit/**` (one line: the world also exports `types`, see the PR description)
   - `spec/lots/L1b.md` (the lot spec, carried by the branch), `BRANCH.md`
 - **Forbidden Paths (must not change in this branch)**:
   - `LICENSE`, `.githooks/**`, `rules/**`, `.track/**`, `harness.profile.json`
@@ -29,9 +29,9 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
 - none.
 
 ## Plan / Todo (lot-based)
-- [ ] **Lot 0 — Baseline**: BRANCH.md, lot spec
-- [ ] **Lot 1 — Kernel**: bindings (generated, committed), limits, filesystem slice, shell, fiber, bootstrap interpreter, test commands
-- [ ] **Lot 2 — Build**: components `kernel` and `kernel-test`, bindings check, canonical-builtin imports in the core module
-- [ ] **Lot 3 — Facade**: loaders, driver, membrane, `Bash`, `InMemoryFs`, types
-- [ ] **Lot 4 — Tests**: the 22 exit gates
-- [ ] **Lot N — Final validation**: `make check`
+- [x] **Lot 0 — Baseline**: BRANCH.md, lot spec
+- [x] **Lot 1 — Kernel**: bindings (generated, committed), limits, filesystem slice, shell, fiber, bootstrap interpreter, test commands
+- [x] **Lot 2 — Build**: components `kernel` and `kernel-test`, bindings check, canonical-builtin imports in the core module
+- [x] **Lot 3 — Facade**: loaders, driver, membrane, `Bash`, `InMemoryFs`, types
+- [x] **Lot 4 — Tests**: the 22 exit gates
+- [x] **Lot N — Final validation**: `make check`
