@@ -29,7 +29,7 @@ bindings -> eight gates -> installable npm tarball. Ends with the Gate L0 report
 - BR1-EX3 `.github/workflows/check.yml`. Reason: run `make check` on pull requests. Impact: new file. Rollback: delete the file.
 
 ## Plan / Todo (lot-based)
-- [ ] **Lot 0 — Baseline**: BRANCH.md, scope exceptions
-- [ ] **Lot 1 — Link proof** (spec 6.2)
-- [ ] **Lot 2 — WIT, kernel, probe, tools, package skeleton, CI, tests**
-- [ ] **Lot N — Final validation**: `make check`, Gate L0 report
+- [x] **Lot 0 — Baseline**: BRANCH.md, scope exceptions
+- [x] **Lot 1 — Link proof** (spec 6.2)
+- [x] **Lot 2 — WIT, kernel, probe, tools, package skeleton, CI, tests**
+- [x] **Lot N — Final validation**: `make check`, Gate L0 report
