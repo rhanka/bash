@@ -26,8 +26,8 @@ containers, transfer hook) and a deliberately simple implementation. Spec: `spec
 - none.
 
 ## Plan / Todo (lot-based)
-- [ ] **Lot 0 — Baseline**: BRANCH.md, lot spec
-- [ ] **Lot 1 — Pipeline extensions** (spec 7): native tests in `make check`, kernel core module build and zero-import check
-- [ ] **Lot 2 — Module**: errors, ceiling and allocators, budgets, containers, transfer hook
-- [ ] **Lot 3 — Tests**: interface, budget exactness, nested budgets, leak run, ceiling, overflow, preservation, semantics, formatting, transfer, stray-unsafe check
-- [ ] **Lot N — Final validation**: `make check`
+- [x] **Lot 0 — Baseline**: BRANCH.md, lot spec
+- [x] **Lot 1 — Pipeline extensions** (spec 7): native tests in `make check`, kernel core module build and zero-import check
+- [x] **Lot 2 — Module**: errors, ceiling and allocators, budgets, containers, transfer hook
+- [x] **Lot 3 — Tests**: interface, budget exactness, nested budgets, leak run, ceiling, overflow, preservation, semantics, formatting, transfer, stray-unsafe check
+- [x] **Lot N — Final validation**: `make check`
