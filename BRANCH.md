@@ -40,9 +40,9 @@ Produce the reviewed design ladder of `@sentropic/bash`: STUDY, then EVOL spec, 
   - [x] Worktree `tmp/design`; reference clones under `tmp/refs/`.
 - [x] **Lot 1 — STUDY (Fable 5.2)**
   - [x] `spec/SPEC_STUDY_BASH_SANDBOX.md`
-- [ ] **Lot 2 — STUDY review (Carbon) + owner gates**
-  - [ ] Adversarial review reconciled into the STUDY.
-  - [ ] Owner answers Q1-Q10 recorded in Track.
+- [x] **Lot 2 — STUDY review (Carbon) + owner gates**
+  - [x] Adversarial review reconciled into the STUDY (v1 -> v3.2, consensus Fable 5.2 + Carbon).
+  - [x] Owner answers (A1, A2, A4, O1-O8, B1, P1, P2) recorded in Track.
 - [ ] **Lot 3 — EVOL spec (Fable 5.2) + review (Carbon)**
   - [ ] `spec/SPEC_EVOL_BASH_SANDBOX.md` with numbered decisions D1..Dn.
 - [ ] **Lot 4 — Plan (Fable 5.2) + review (Carbon)**
