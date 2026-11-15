@@ -32,6 +32,7 @@ Produce the reviewed design ladder of `@sentropic/bash`: STUDY, then EVOL spec, 
 - owner: `acknowledge` — model mapping per lot is owned by the design lane (Fable 5.2) and the review lane (Carbon), accountable for spend and velocity; candidates Haiku 5.5, Sonnet 5.5, Gemini 4 Argon, Engram Muse 1.3 (quota back soon), Codex Sol 6.1 below high.
 - owner: `acknowledge` — GitHub repo public; npm publish as pre-release (0.x, `next` tag) once the core passes parity tests.
 - owner: `acknowledge` (15/11) — study gates O1-O8 answered (Track decisions). Governance: the owner owns the upstream (just-bash) features and the perf targets; every other technical choice is settled by a two-pass consensus of Fable 5.2 and Carbon, and each recommendation names who poses it.
+- owner: `acknowledge` (15/11) — technical questions to the owner remain welcome, but each one first states what upstream (just-bash) does, with a source path.
 - `BR01-EX1` — `rules/MASTER.md` (conditional path). Reason: owner decision O6 (15/11): MoonBash is a feature-alignment reference, not a perf benchmark target; building it with `moon` is rejected. Impact: the perf bench runs against just-bash only; a feature matrix covers MoonBash. Rollback: revert the WASM-first bullet change in `rules/MASTER.md`.
 
 ## Plan / Todo (lot-based)
