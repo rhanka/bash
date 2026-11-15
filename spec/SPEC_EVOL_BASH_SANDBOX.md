@@ -1,4 +1,4 @@
-# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.4)
+# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.5)
 
 Status: normative. Derived from `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 (called "the study" below), which
 holds the evidence, measurements and alternatives; this document holds the decisions. Where both speak,
@@ -419,9 +419,25 @@ Conventions:
   | Browser | `InMemoryFs` seeded by the page, as the reference | A custom `IFileSystem` supplied by the page, for example one backed by the origin-private file system |
   | wasmCloud and Kubernetes | `session-pure`: no filesystem import at all | `session-fs`: the directory or volume the host grants (a preopened directory: a Kubernetes volume, a wasmCloud configuration) is mounted as the root |
 
-  Other `stpsh` options keep the reference's names and meaning: `-c`, `-e`/`--errexit`, `--cwd`,
-  `--json`, `--python`, `--javascript` (effective once the companions exist, D25), `-h`, `-v`, and
-  `--network` for the interactive shell (an explicit grant of full network access, as in the reference).
+  Rules of the command line:
+  - *Script argument.* `stpsh script.sh` without `--root` or `--just-bash` reads that one file, named
+    explicitly by the operator, from the host disk and runs it in the empty filesystem; nothing else is
+    read. With `--root` or `--just-bash` the script path is resolved inside the mounted directory, as on
+    the reference.
+  - *`--allow-write`.* Writes go to an in-memory copy-on-write layer over the mounted directory; the host
+    disk is never modified by `stpsh`. Without the flag the mount is read-only.
+  - *`--just-bash`.* Selects the reference's defaults for the mode in use. Script mode (file, `-c`, or a
+    script on a pipe, executed as one script): the current directory mounted read-only at
+    `/home/user/project`, which is the working directory. Interactive mode (bare `stpsh` on a terminal):
+    the current directory mounted at `/` with in-memory writes allowed, working directory and `HOME` `/`.
+    `--root <dir>` replaces the current directory in both modes. What is not reproduced: the reference
+    shell's start-up banner, which prints the host path of the current directory (it would break
+    invariant S7), its own version string, and its line-by-line execution of piped input.
+  - *Options.* Reference names and meaning are kept: `-c`, `-e`/`--errexit`, `--cwd`, `--json`,
+    `--python`, `--javascript` (effective once the companions exist, D25), `-h`, `-v`, `--` to end
+    options, combined short options (for example `-ec`), the legacy second positional root,
+    `--files <json-file>` to seed files, and `--network` / `--no-network` (an explicit grant of full
+    network access, off by default), accepted in both modes.
 - **Rationale.** Default deny is a mandatory rule of the project; an implicit read of the working
   directory would expose local files to scripts run by an agent. One binary name of our own avoids
   shadowing an installed reference CLI.
@@ -429,9 +445,12 @@ Conventions:
   (host disk).
 - **Acceptance.** Per target: (CLI) with no flag, a script cannot read a sentinel file placed in the
   current directory; with `--root` it reads it and a write fails; with `--allow-write` the write succeeds
-  as on the reference; with `--just-bash` the outputs equal snapshots recorded from the reference's two
-  CLIs; a bare `stpsh` with a terminal on stdin enters the interactive shell and with a pipe runs the
-  script. (Node) a default `new Bash()` cannot read a host sentinel file; with `OverlayFs` it can.
+  and the host file is unchanged afterwards; `stpsh script.sh` alone runs the file and the script still
+  sees an empty filesystem; with `--just-bash`, script-mode outputs equal snapshots recorded from the
+  reference's script CLI, and interactive mode, driven through a pseudo-terminal, gives for each command
+  the same stdout, stderr, exit code and filesystem state as the reference's shell (banner and version
+  string excluded); a bare `stpsh` with a terminal on stdin enters the interactive shell and with a pipe
+  runs the script. (Node) a default `new Bash()` cannot read a host sentinel file; with `OverlayFs` it can.
   (Browser) the suite runs with a page-supplied async `IFileSystem`. (wasmCloud, Kubernetes) the composed
   `session-pure` component lists no filesystem import; `session-fs` under `wasmtime` with one preopened
   directory sees it as `/` and cannot reach its parent; without a preopen it sees no host file. A smoke run
@@ -1059,6 +1078,7 @@ with the companion packages when those expose a host-JS surface, where the prote
 | R4 `find` trace details, `logger`, types, G6, security exports | accepted | consensus | D.6, D.1, G6, D25, V5 |
 | R5 lot deltas | accepted | consensus | Annex K replaced by the plan |
 | Plan review B2.2 (oracle and `curl`) | accepted | consensus | Annex E.1: loopback fixture server for `curl` cases |
+| Plan review, pass 2, R1 (`stpsh` rules) | accepted | consensus | D26: script argument, `--allow-write` as in-memory copy-on-write, `--just-bash` per mode and what it excludes, full option list |
 
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
 
