@@ -1,15 +1,31 @@
 //! Byte budgets (spec 5.3): a logical cap tied to a named limit, nestable.
 use super::error::{LimitId, MemError, MemResult};
 use super::alloc::alloc::{alloc, dealloc, Layout};
-use core::cell::Cell;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 
+// The counters are atomics so that the one process-wide node (the headroom account) can live in a static
+// and be touched by the several threads of the native test binaries. On wasm they compile to plain loads
+// and stores.
 struct Node {
     limit: LimitId,
-    cap: Cell<u64>,
-    used: Cell<u64>,
-    refs: Cell<usize>,
+    cap: AtomicU64,
+    used: AtomicU64,
+    refs: AtomicUsize,
     parent: Option<Budget>,
+}
+
+/// A node that lives in a static: it has no parent and one permanent reference, so it is never freed.
+pub(crate) struct StaticNode(Node);
+
+// SAFETY: the node has no parent handle (the only non-`Sync` part of `Node`) and every field is an atomic
+// or a plain `Copy` value, so shared references to it from several threads are sound.
+unsafe impl Sync for StaticNode {}
+
+impl StaticNode {
+    pub(crate) const fn new(limit: LimitId, cap: u64) -> StaticNode {
+        StaticNode(Node { limit, cap: AtomicU64::new(cap), used: AtomicU64::new(0), refs: AtomicUsize::new(1), parent: None })
+    }
 }
 
 /// A byte budget. Cloning yields another handle to the same budget (never fails, allocates nothing).
@@ -26,13 +42,22 @@ impl Budget {
         let raw = unsafe { alloc(layout) } as *mut Node;
         let Some(node) = NonNull::new(raw) else { return Err(MemError::Ceiling) };
         // SAFETY: `raw` is a fresh, aligned allocation of `size_of::<Node>()` bytes, not yet initialised.
-        unsafe { node.as_ptr().write(Node { limit, cap: Cell::new(cap), used: Cell::new(0), refs: Cell::new(1), parent }) };
+        unsafe {
+            node.as_ptr().write(Node { limit, cap: AtomicU64::new(cap), used: AtomicU64::new(0), refs: AtomicUsize::new(1), parent })
+        };
         Ok(Budget { node })
     }
 
     fn node(&self) -> &Node {
         // SAFETY: the node is live while this handle exists (the handle owns one reference count).
         unsafe { self.node.as_ref() }
+    }
+
+    /// A handle to a static node (the headroom account): counts one more reference.
+    pub(crate) fn of_static(node: &'static StaticNode) -> Budget {
+        let n = &node.0;
+        n.refs.fetch_add(1, Relaxed);
+        Budget { node: NonNull::from(n) }
     }
 
     /// A root budget with the given cap, in bytes. Fails only with `Ceiling` (the node is allocated).
@@ -51,8 +76,8 @@ impl Budget {
         let mut at = Some(self);
         while let Some(b) = at {
             let n = b.node();
-            match n.used.get().checked_add(bytes) {
-                Some(total) if total <= n.cap.get() => {}
+            match n.used.load(Relaxed).checked_add(bytes) {
+                Some(total) if total <= n.cap.load(Relaxed) => {}
                 _ => return Err(MemError::Limit(n.limit)),
             }
             at = n.parent.as_ref();
@@ -60,7 +85,7 @@ impl Budget {
         let mut at = Some(self);
         while let Some(b) = at {
             let n = b.node();
-            n.used.set(n.used.get() + bytes);
+            n.used.store(n.used.load(Relaxed) + bytes, Relaxed);
             at = n.parent.as_ref();
         }
         Ok(())
@@ -72,21 +97,21 @@ impl Budget {
         let mut at = Some(self);
         while let Some(b) = at {
             let n = b.node();
-            let used = n.used.get();
+            let used = n.used.load(Relaxed);
             debug_assert!(bytes <= used, "budget released more than charged");
-            n.used.set(used.saturating_sub(bytes));
+            n.used.store(used.saturating_sub(bytes), Relaxed);
             at = n.parent.as_ref();
         }
     }
 
     /// Bytes currently charged to this budget (including those of its descendants).
     pub fn used(&self) -> u64 {
-        self.node().used.get()
+        self.node().used.load(Relaxed)
     }
 
     /// The cap, in bytes.
     pub fn cap(&self) -> u64 {
-        self.node().cap.get()
+        self.node().cap.load(Relaxed)
     }
 
     /// The named limit this budget stands for.
@@ -96,7 +121,7 @@ impl Budget {
 
     /// Changes the cap. Lowering it below `used` is allowed; later charges fail until usage drops.
     pub fn set_cap(&self, cap: u64) {
-        self.node().cap.set(cap);
+        self.node().cap.store(cap, Relaxed);
     }
 }
 
@@ -104,9 +129,8 @@ impl Clone for Budget {
     /// A handle copy: never fails, allocates nothing.
     fn clone(&self) -> Budget {
         let n = self.node();
-        match n.refs.get().checked_add(1) {
-            Some(r) => n.refs.set(r),
-            None => panic!("budget handle count overflow"),
+        if n.refs.fetch_add(1, Relaxed) == usize::MAX {
+            panic!("budget handle count overflow");
         }
         Budget { node: self.node }
     }
@@ -115,9 +139,7 @@ impl Clone for Budget {
 impl Drop for Budget {
     fn drop(&mut self) {
         let n = self.node();
-        let left = n.refs.get() - 1;
-        n.refs.set(left);
-        if left == 0 {
+        if n.refs.fetch_sub(1, Relaxed) == 1 {
             // SAFETY: this was the last handle, so nothing else refers to the node; it was allocated in
             // `make` with `Layout::new::<Node>()` and is initialised. Dropping it drops the parent handle.
             unsafe {
