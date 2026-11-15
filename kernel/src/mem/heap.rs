@@ -356,6 +356,9 @@ impl Heap {
         if self.grow_in_place(pages, blk, size, need, ceiling) {
             return addr;
         }
+        if let Some(moved) = self.grow_backward(blk, size, old_size, new_size, need) {
+            return moved;
+        }
         let moved = self.alloc(pages, new_size, align, ceiling, reserve_open);
         if moved == 0 {
             return 0;
@@ -365,6 +368,41 @@ impl Heap {
         unsafe { ptr::copy_nonoverlapping(addr as *const u8, moved as *mut u8, old_size.min(new_size)) };
         self.dealloc(addr);
         moved
+    }
+
+    /// Slides the in-use block (`blk`, `size`) down over the free block before it (and absorbs a free block
+    /// after it) when together they hold `need` bytes: the payload moves, but no new space is taken.
+    fn grow_backward(&mut self, blk: usize, size: usize, old_size: usize, new_size: usize, need: usize) -> Option<usize> {
+        if rd64(blk) & PREV_FREE == 0 {
+            return None;
+        }
+        let psz = rd64(blk - HDR) as usize;
+        let next = blk + size;
+        let nh = rd64(next);
+        let nsz = if nh & IN_USE == 0 { (nh & !FLAGS) as usize } else { 0 };
+        let total = psz + size + nsz;
+        if total < need {
+            return None;
+        }
+        let prev = blk - psz;
+        self.remove_free(prev, psz);
+        if nsz != 0 {
+            self.remove_free(next, nsz);
+        }
+        // SAFETY: source and destination lie inside the merged block (all three parts are owned by this
+        // heap); `copy` handles the overlap, and `min(old_size, new_size)` payload bytes are live.
+        unsafe { ptr::copy((blk + HDR) as *const u8, (prev + HDR) as *mut u8, old_size.min(new_size)) };
+        let rem = total - need;
+        if rem >= MIN_BLOCK {
+            wr64(prev, need as u64 | IN_USE);
+            self.insert_free(prev + need, rem);
+            self.in_use += need - size;
+        } else {
+            wr64(prev, total as u64 | IN_USE);
+            self.clear_prev_free(prev + total);
+            self.in_use += total - size;
+        }
+        Some(prev + HDR)
     }
 
     /// Tries to extend the in-use block (`blk`, `size`) to `need` bytes without moving it.
