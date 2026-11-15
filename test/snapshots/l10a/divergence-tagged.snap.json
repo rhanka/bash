@@ -1,0 +1,18 @@
+{
+  "case": "l10a/divergence-tagged",
+  "caseHash": "43f9f8a6c84aa05942f268db9d23aa4b2cb4f77938ff1a0403fc5dbc99e5490f",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "differs on purpose\n"
+    }
+  ]
+}

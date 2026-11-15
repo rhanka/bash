@@ -1,0 +1,47 @@
+{
+  "case": "l10a/cwd-relative",
+  "caseHash": "dd9bc9344ecb1376ee1d3566a8c75b9d40c2153321d2f7d3f94a9527d66bdefe",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {
+    "/elsewhere": {
+      "kind": "directory",
+      "mode": 493
+    },
+    "/elsewhere/other.txt": {
+      "content": {
+        "base64": "dGhlcmU="
+      },
+      "kind": "file",
+      "mode": 420
+    },
+    "/work": {
+      "kind": "directory",
+      "mode": 493
+    },
+    "/work/rel.txt": {
+      "content": {
+        "base64": "aGVyZQ=="
+      },
+      "kind": "file",
+      "mode": 420
+    }
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "here"
+    },
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    }
+  ]
+}

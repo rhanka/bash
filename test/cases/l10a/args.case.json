@@ -1,0 +1,17 @@
+{
+  "id": "l10a/args",
+  "steps": [
+    {
+      "args": [
+        "a b",
+        "c",
+        ""
+      ],
+      "script": "args"
+    }
+  ],
+  "tags": [
+    "args"
+  ],
+  "title": "Arguments passed to the step"
+}

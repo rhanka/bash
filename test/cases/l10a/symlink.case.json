@@ -1,0 +1,16 @@
+{
+  "files": {
+    "/t/target.txt": "through the link\n"
+  },
+  "id": "l10a/symlink",
+  "steps": [
+    {
+      "script": "ln /t/target.txt /t/link\ncat /t/link"
+    }
+  ],
+  "tags": [
+    "files",
+    "symlink"
+  ],
+  "title": "Symlink creation and read through it"
+}

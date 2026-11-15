@@ -1,0 +1,31 @@
+{
+  "case": "l10a/coverage-hits",
+  "caseHash": "0a3b09d14c292d9266af2d31b8ab81014b696c5daf19ba5cec4a88724565e958",
+  "coverage": [
+    "bash:cmd:SimpleCommand",
+    "bash:builtin:echo",
+    "bash:expansion:tilde",
+    "bash:cmd:If",
+    "bash:builtin:echo"
+  ],
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    }
+  ]
+}

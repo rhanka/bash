@@ -1,0 +1,12 @@
+{
+  "id": "l10a/plain-text",
+  "steps": [
+    {
+      "script": "echo hello world\necho second line"
+    }
+  ],
+  "tags": [
+    "output"
+  ],
+  "title": "Plain text on stdout"
+}

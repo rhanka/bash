@@ -1,0 +1,18 @@
+{
+  "case": "l10a/stderr",
+  "caseHash": "cda4cd0e4a880e363270943bada7390869d4bb33765a1e45f444b3c9267f6ec8",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "oops\nagain\n",
+      "stdout": "ok\n"
+    }
+  ]
+}

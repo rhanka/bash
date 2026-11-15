@@ -1,0 +1,32 @@
+{
+  "case": "l10a/two-steps-files",
+  "caseHash": "e55a41c4302913879d4d414f166e10ac73e7ab66dba7686c00e3e867ce1103a6",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {
+    "/data/out.txt": {
+      "content": {
+        "base64": "YmV0YQ=="
+      },
+      "kind": "file",
+      "mode": 420
+    }
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "alpha\n"
+    },
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "betaalpha\n"
+    }
+  ]
+}
