@@ -1,4 +1,4 @@
-# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.2)
+# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.3)
 
 Status: normative. Derived from `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 (called "the study" below), which
 holds the evidence, measurements and alternatives; this document holds the decisions. Where both speak,
@@ -12,7 +12,8 @@ Conventions:
   `.track/events.jsonl`; "—" means the decision is recorded in the study and `BRANCH.md` only.
 - Lot ids are those of study section 7.
 - v1.1 reconciles the adversarial review of v1 (Annex J). v1.2 applies the owner answers of 15/11 on
-  runtimes, tracing and defense-in-depth (section 3).
+  runtimes, tracing and defense-in-depth (section 3). v1.3 closes the review (R1-R5, Annex J); the lot plan
+  is `plan/PLAN_BASH_SANDBOX_V1.md`.
 - A build lane reads this document without the reference: every behaviour it needs is stated here or in a
   lot spec, never by a bare `JB:` pointer. `JB:` paths are kept only as provenance for reviewers.
 
@@ -386,9 +387,9 @@ Conventions:
   design lane: (a), with (b) only if (a) cannot run the reference's snapshots; Carbon's position is taken
   at the review of that study.
   The reference's security exports (`DefenseInDepthBox`, `SecurityViolationError`,
-  `SecurityViolationLogger`, `createConsoleViolationCallback` and their types) ship with the companions
-  when a companion exposes a host-JS surface (form (b), or any host-side glue), where that protection has
-  something to guard. In the v1 kernel `defenseInDepth` is accepted and has no effect.
+  `SecurityViolationLogger`, `createConsoleViolationCallback` and their types) are exported from the
+  companion packages' JS entry in either build form; they guard whatever host-JS surface the companion
+  has (the worker glue of form (b), or the loader and bridge of form (a)). In the v1 kernel `defenseInDepth` is accepted and has no effect.
 - **Rationale.** The engines are large third-party code; isolating them in separate components and
   packages keeps the kernel's guarantees (zero import, zero dependency, size budget) intact.
 - **Posed by.** Owner (companions, exception scope, deferred security exports); Fable 5.2 + Carbon (build
@@ -418,7 +419,7 @@ interface types {
   flags grants { host-fs, network, real-clock, real-sleep, entropy, custom-commands }
 
   record env-var { name: bytes, value: bytes, exported: bool }
-  record fd-entry { fd: u32, target: bytes }
+  record fd-entry { fd: u32, len: u64 }      // content pulled with read-call-input
   record process-info { pid: u32, ppid: u32, uid: u32, gid: u32 }
   record shell-config {
     limits: limits,
@@ -489,11 +490,11 @@ interface types {
 
   record header { name: string, value: bytes }
   record command-call { name: string, args: list<bytes>, cwd: bytes, env: list<env-var>,
-                        fds: list<fd-entry>, input-len: u64 }
+                        fds: list<fd-entry>, input-len: u64, xpg-echo: bool }
   record fetch-req { method: string, url: string, headers: list<header>, input-len: u64,
                      follow-redirects: bool, max-redirects: option<u32>,
                      timeout-ms: u32, max-response-bytes: u64 }
-  record redirect-hop { url: string, status: u16 }
+  record redirect-hop { url: string, status: u16, status-text: string, headers: list<header> }
   record fetch-resp { status: u16, status-text: string, url: string, headers: list<header>,
                       redirect-chain: list<redirect-hop> }
   enum net-error-code { access-denied, method-not-allowed, redirect-denied, too-many-redirects,
@@ -566,7 +567,7 @@ interface engine {
     run: func(fuel: u64) -> step;
     resume: func(epoch: u64, outcome: host-outcome) -> result<step, kernel-error>;
     // valid only while the call of that epoch is pending:
-    read-call-input: func(epoch: u64, max: u32) -> result<bytes, kernel-error>;
+    read-call-input: func(epoch: u64, fd: u32, max: u32) -> result<bytes, kernel-error>;
     push-call-data: func(epoch: u64, channel: out-channel, chunk: bytes)
         -> result<_, kernel-error>;
     assign-variable: func(epoch: u64, name: bytes, value: bytes, subscript: option<bytes>)
@@ -590,11 +591,18 @@ world kernel {
 Rules attached to the contract:
 - `create`/`spawn` are static functions because they can fail; borrowed handles are not retained past the
   call (the kernel keeps its own shared reference to the underlying object).
-- Chunking: every `bytes` value is at most 1 MiB, except `exec-opts.script` (3 MiB). A lazy file's content
+- Chunking: values carried by the *stream calls* (`write-stdin`, `read-call-input`, `push-call-data`,
+  `take-stdout`, `take-stderr`, file `data` in `read-file`/`write-file`) are at most 1 MiB each.
+  Non-streamed values (`env-var.value`, `args`, `assign-variable` values, paths) may be as large as the
+  shell allows a string to be; before lowering a call, the driver checks that its non-streamed values fit
+  both the string limit and half the headroom, and otherwise produces the limit result (exit 126) without
+  calling. `exec-opts.script` may reach 3 MiB. A lazy file's content
   and a fetch response body are pushed with `push-call-data` on channel `body`, then the call is resumed
   with `completed` (lazy file) or `fetched` (fetch). `host-outcome::data` is for small values (entropy).
-- Custom commands: stdin is pulled with `read-call-input` only when the command reads it, so an unread
-  stdin stays available to the rest of the script; output is pushed with `push-call-data`; the command's
+- Custom commands: input is pulled with `read-call-input(epoch, fd, max)`: `fd` 0 is stdin, pulled only
+  when the command reads it, so an unread stdin stays available to the rest of the script; an `fd` listed
+  in `fds` gives the content of that open descriptor (for example a here-document on descriptor 3).
+  `xpg-echo` reports the shell's `xpg_echo` setting; output is pushed with `push-call-data`; the command's
   environment view carries the `exported` flag; `fds` lists the open descriptors visible to it.
   `assign-variable` applies the shell's own checks (readonly, nameref, array subscript) and fails with
   `denied` when they refuse; `set-call-env` is accepted only for a trusted command. A custom command that
@@ -608,15 +616,18 @@ Rules attached to the contract:
 - `net-error` codes map to the facade's typed errors and to `curl` exit codes in the `curl` lot spec.
 - Trace and coverage are collected only when enabled in `shell-config`. Their buffers are bounded: when one
   is full the fiber returns `out-of-fuel` so that the driver drains it. All events and hits of an exec are
-  drained, in order, before its result is delivered. `trace-clock` is answered by the driver with a
+  drained, in order, before its result is delivered. The driver also drains both buffers when a `run` or
+  `resume` returns `host-call`, **before** it runs the host callback, and on `cancel`, so that hits and
+  events from a custom command or a child exec never precede buffered ones of the parent. `trace-clock` is answered by the driver with a
   monotonic reading (`clock` outcome) even without the `real-clock` grant; the kernel uses it only to fill
   trace durations and never makes it observable to the script.
-- `exec-oneshot` returns `bad-state` if the script needs a host call.
+- `exec-oneshot` returns `bad-state` if the script needs a host call, and `invalid-config` if `trace` or
+  `coverage` is set (it has no channel for them).
 - The session drivers live in a second package, `sentropic:bash-session@0.1.0-draft`: each world imports
   `sentropic:bash/engine` and exports one `session` resource (`create`, `exec`, `read-file`, `write-file`).
-  `session-pure` imports nothing else; `session-fs` adds `wasi:filesystem/{preopens,types}` and
-  `wasi:clocks/monotonic-clock`; `session-net` adds `wasi:http/outgoing-handler` and
-  `wasi:clocks/wall-clock`. Their WIT is written in L1c.
+  `session-pure` imports nothing else and answers `trace-clock` with 0 (trace durations are then 0);
+  `session-fs` adds `wasi:filesystem/{preopens,types}` and `wasi:clocks/monotonic-clock`; `session-net`
+  adds `wasi:http/outgoing-handler` and `wasi:clocks/wall-clock` to those. Their WIT is written in L1c.
 
 ## Annex B — Limit profiles
 
@@ -688,7 +699,7 @@ Order (commands: study 2.6):
 | G3 two-build identity | two clean builds in different directories | component, core module, generated `js/*` or session driver bytes differ |
 | G4 component validity | `wasm-tools validate`; embedded world equals `wit/` | mismatch |
 | G5 one core module | file count of the glue output | more than one core module, or wasm inlined as base64 |
-| G6 zero crate, heap discipline | `Cargo.lock` inspection; import scan (D6.2) | a non-workspace package; an `alloc` container import outside `kernel::mem` |
+| G6 zero crate, heap discipline | `Cargo.lock` inspection; import scan (D6.2) | a non-workspace package; an `alloc` container import outside `kernel::mem` and the generated binding module (which is committed, reviewed and allocates only through `cabi_realloc`) |
 | G7 manifests | `check-no-deps`, no Python, no attribution | existing repo gates |
 | G8 tool pins | SHA-256 of every native tool in `tmp/tools/`; npm tools installed by `npm ci --ignore-scripts` from the committed `tools/package.json` and lockfile, staged into `tmp/tools/` first | missing or different hash; lockfile drift; `node_modules` inside the repo |
 
@@ -709,7 +720,7 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 | A | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, maxCallDepth, maxCommandCount, maxLoopIterations, commands, customCommands, sleep, network, fetch, processInfo, logger, trace, coverage})` | Same; profile names extended with `contain`, `micro` |
 | A | `bash.exec(cmd, {env, replaceEnv, cwd, rawScript, stdin, stdinKind, signal, args})` -> `{stdout, stderr, exitCode, env, stdoutKind?}` | Same (D.2) |
 | A | `bash.fs`, `readFile`, `writeFile`, `getCwd`, `getEnv` (synchronous), `registerCommand` | Same |
-| A | `defineCommand`, `LazyCommand`, `createCommandContext`; context `fs`, `cwd`, `env`, `exportedEnv`, `assignShellVariable`, `stdin`, `limits`, `exec`, `origCommand`, `execWithInheritedStdin`, `fetch`, `sleep`, `signal`, `fileDescriptors`, `getRegisteredCommands`, `trace` | Same, behind the membrane |
+| A | `defineCommand`, `LazyCommand`, `createCommandContext`; context `fs`, `cwd`, `env`, `exportedEnv`, `assignShellVariable`, `stdin`, `limits`, `exec`, `origCommand`, `execWithInheritedStdin`, `fetch`, `sleep`, `signal`, `fileDescriptors`, `getRegisteredCommands`, `trace`, `coverage`, `xpgEcho` | Same, behind the membrane |
 | A | `InMemoryFs` and the `IFileSystem` contract (D.3) | Same |
 | A | `getCommandNames`, `getNetworkCommandNames`; byte helpers (D.5) | Same |
 | B | `OverlayFs`, `ReadWriteFs`, `MountableFs` | Same options, own implementation (D10) |
@@ -717,13 +728,16 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 | B | ESM and CJS entries, `./browser` entry | Same; browser runs every kernel command |
 | C (after parity) | `Sandbox`, `SandboxCommand`; CLI binaries | Later lot (L17a) |
 | Not in v1 | `parse`, AST types, `BashTransformPipeline`, plugins, `serialize`, `registerTransformPlugin`, `transform` | Absent; the two methods throw "not supported" |
-| Deferred to companions (D25) | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | In v1 the option is accepted and has no effect and the exports are absent; they ship with a companion that exposes a host-JS surface |
+| Deferred to companions (D25) | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | In v1 the option is accepted and has no effect and the exports are absent; they are exported by the companion packages |
 | Companions (D25) | `python`, `javascript` options; `getPythonCommandNames`, `getJavaScriptCommandNames` | Options accepted; without the companion the commands are absent (exit 127); helpers return the names |
 | Additions | — | `execSync`, `Bash.precompile()`, `bash.compact()`, journal option |
 
 `logger` is an object with `info(message, data)` and `debug(message, data)`. For each `exec` it receives
 `info("exec", {command})`, then `debug("stdout", {output})` and `info("stderr", {output})` when those are
-non-empty, then `info("exit", {exitCode})`. It is host-side code in L1b.
+non-empty, then `info("exit", {exitCode})`. An empty or whitespace-only script produces no logger call.
+It is host-side code. `javascript` is typed `boolean | JavaScriptConfig` (an object with optional
+`bootstrap` and `invokeTool`); any truthy value counts as enabled. In the browser entry, `getCwd()` and
+`getEnv()` called before the instance exists return the staged initial cwd and environment.
 
 ### D.2 `exec` result contract
 
@@ -815,7 +829,9 @@ text and byte strings (decoding keeps invalid bytes as single characters); `lati
 `trace` is a callback receiving events `{category, name, durationMs, details?}`: `category` and `name` are
 strings, `durationMs` a number of milliseconds, `details` a flat object of numbers and strings. Custom
 commands receive the same callback as `ctx.trace` and may emit their own events. Built-in events exist
-for `find` only, two per search path given on the command line, in this order:
+for `find` only, two per search path, in this order. With no path operand the search path is `.`. A
+search path that does not exist produces the usual error and no event. One trailing `/` is removed from a
+search path longer than one character before it is reported in `details.path`.
 
 | category / name | `durationMs` | `details` |
 |---|---|---|
@@ -841,16 +857,20 @@ execution order, with one of these identifiers:
 | Family | Identifier | Hit when |
 |---|---|---|
 | Command kinds | `bash:cmd:<Kind>`, Kind in `SimpleCommand`, `If`, `For`, `CStyleFor`, `While`, `Until`, `Case`, `Subshell`, `Group`, `FunctionDef`, `ArithmeticCommand`, `ConditionalCommand` | a command of that kind starts executing |
-| Builtins | `bash:builtin:<name>`, name in `export unset exit local set break continue return eval shift getopts compgen complete compopt pushd popd dirs source . read mapfile readarray declare typeset readonly cd : true false let command builtin shopt exec wait type hash help [ test` | the builtin is dispatched |
+| Builtins | `bash:builtin:<name>`, name in `: true false cd export unset exit local set break continue return eval shift getopts compgen complete compopt pushd popd dirs source . read mapfile readarray declare typeset readonly let command shopt exec test [ echo printf pwd alias unalias type hash ulimit umask trap times wait kill jobs fg bg disown suspend fc history help enable builtin caller` (59 names) | a command with that name is dispatched; the hit comes before the lookup of a function of the same name |
 | Expansions | `bash:expansion:<op>`, op in `default_value` (`${v:-w}`), `assign_default` (`${v:=w}`), `error_if_unset` (`${v:?w}`), `use_alternative` (`${v:+w}`), `pattern_removal` (`#`, `##`, `%`, `%%`), `pattern_replacement` (`/`, `//`), `length` (`${#v}`), `substring` (`${v:o:l}`), `case_modification` (`^`, `^^`, `,`, `,,`), `transform` (`${v@op}`), `indirection` (`${!v}`), `array_keys` (`${!a[@]}`), `var_name_prefix` (`${!p*}`), `tilde`, `word_glob`, `word_split` | the operation is applied |
 | awk statements | `awk:stmt:<kind>`, kind in `expr_stmt print printf if while do_while for for_in break continue next nextfile exit return delete block` | the statement executes |
 | awk expressions | `awk:expr:<kind>`, kind in `number string regex field variable array_access binary unary ternary call assignment pre_increment pre_decrement post_increment post_decrement in getline tuple` | the expression is evaluated |
 | sed commands | `sed:cmd:<kind>`, kind in `substitute print printFirstLine delete deleteFirstLine append insert change hold holdAppend get getAppend exchange next nextAppend quit quitSilent transliterate lineNumber branch branchOnSubst branchOnNoSubst label zap group list printFilename version readFile readFileLine writeFile writeFirstLine execute` | the command executes on a line |
 | jq nodes | `jq:node:<Kind>`, Kind in `Identity Field Index Slice Iterate Pipe Comma Literal Array Object Paren BinaryOp UnaryOp Cond Try Call VarBind VarRef Recurse Optional StringInterp UpdateOp Reduce Foreach Label Break Def` | the filter node is evaluated |
-| Command flags | `cmd:flag:<command>:<flag>` | an argument of the command equals a flag of that command's coverage flag table (the table is part of each command's lot spec) |
+| Command flags | `cmd:flag:<command>:<flag>` | an argument of the command equals a flag of that command's coverage flag table (the table is part of each command's lot spec; `curl` has none). Not emitted by the `./browser` entry, as in the reference: the facade filters this family there |
 
-These identifiers are a vocabulary of strings; they do not give access to a syntax tree. The exact hit
-sequence of a script is fixed by the oracle snapshots.
+These identifiers are a vocabulary of strings; they do not give access to a syntax tree. `jq:node:*` hits
+are also produced by `yq`, which runs the same evaluator. The table gives the meaning of each identifier;
+the exact trigger sites (for example `word_glob` is hit at every word expansion, and some array fast
+paths hit neither `word_split` nor the parameter operations) are stated in the lot specs and fixed by the
+oracle snapshots. A hit pattern that proves to be an artefact of the reference's internal fast paths is
+reported as an `upstream-defect` candidate instead of being matched.
 
 ## Annex E — Oracle and parity protocol
 
@@ -945,7 +965,7 @@ above is put to the owner at L2 with the numbers; it is not adopted before.
 | V2 | Not available in v1: `python3`/`python`, `js-exec`/`node` (until their companions, D25), `sqlite3`, `xan`, `html-to-markdown`, `@just-bash/executor`. With `python` or `javascript` set, construction succeeds and the commands return exit 127, as in the reference's browser bundle; the limits specific to those runtimes are accepted and unused | Owner, A4 and 15/11 |
 | V3 | Not available in v1: `parse`, AST types, transform pipeline and plugins | Consensus, B3 |
 | V4 | The browser entry runs `tar` and `yq`, which the reference's browser bundle excludes, and `gzip`/`gunzip`/`zcat`, which the reference registers but which fail at run time in a browser | Owner, P1 |
-| V5 | Deferred to companions: in the v1 kernel `defenseInDepth` is accepted and has no effect, and `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported; they ship with a companion that exposes a host-JS surface (D25) | Owner, 15/11 |
+| V5 | Deferred to companions: in the v1 kernel `defenseInDepth` is accepted and has no effect, and `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported; they are exported by the companion packages (D25) | Owner, 15/11 |
 | V6 | Additions that do not alter existing behaviour and add no oracle exclusion: `execSync`, `precompile`, `compact`, journal, profiles `contain`/`micro`, byte helpers and `MethodNotAllowedError` exported from `./browser` as well, the component and its WIT | Consensus |
 
 ## 3. Questions for the owner
@@ -989,26 +1009,23 @@ with the companion packages when those expose a host-JS surface, where the prote
 | Table: V5 | settled by the owner (15/11): deferred to companions | Owner | V5, D25 |
 | Table: V6 | agreed | consensus | V6, D23 |
 | Table: Annex H | accepted | consensus | Annex H |
+| R1 `redirect-hop` | accepted | consensus | Annex A: `status-text`, `headers` (verified in the reference's fetch result type) |
+| R2.1 missing builtin identifiers | accepted | consensus | D.7: 59 names, hit before function lookup (verified in the reference's dispatcher and builtin set) |
+| R2.2 drain order | accepted | consensus | Annex A rules: drain on `host-call` before the callback, and on `cancel`; `coverage` and `xpgEcho` in the command context |
+| R2.3 trigger rules, browser | accepted, amended | consensus | D.7: trigger sites in lot specs, `upstream-defect` rule, `jq` hits from `yq`. The browser difference is mirrored by a facade filter instead of being added to V4, so no divergence is created |
+| R3.1 chunking scope, `fds`, `xpg-echo` | accepted | consensus | Annex A: 1 MiB limited to stream calls, driver pre-check for non-streamed values, `fd-entry {fd, len}`, `read-call-input` with `fd`, `xpg-echo` |
+| R3.2 `exec-oneshot`, session drivers | accepted | consensus | Annex A rules |
+| R4 `find` trace details, `logger`, types, G6, security exports | accepted | consensus | D.6, D.1, G6, D25, V5 |
+| R5 lot deltas | accepted | consensus | Annex K replaced by the plan |
 
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
 
-## Annex K — Lot impact of v1.1 and v1.2 for the plan rung
+## Annex K — Lot impact for the plan rung
 
-Sizes are deltas against study section 7 (estimates).
-
-| Change | Lots | Delta |
-|---|---|---|
-| `kernel::mem` with fallible containers (v1.1, M1) | L1a | 4 -> 6 points |
-| WIT additions of v1.1 (custom-command calls, chunked lazy files, redirects, cancel result) | L1b | +1 |
-| `logger`; trace and coverage buffers, drain, feature table, facade delivery | L1b | +1 |
-| Trace events of `find` | L9a-2 | +0.5 |
-| Coverage instrumentation: command kinds, builtins, expansions | L4, L5, L6a, L6b | +1 in total |
-| Coverage instrumentation: `sed`, `awk`, `jq` | L13, L14, L15a | +0.5 each |
-| Coverage flag tables and `cmd:flag` hits | every command lot (L9a-1, L9a-2, L9b, L16a-1, L16a-2, L16c, L16d, L15b-1) | +1.5 in total, Cheap tier |
-| Trace and coverage fields in snapshots and recorder | L10a | +0.5 |
-| Specs: coverage flag table per command, trace and coverage sections | design overhead | within the 40% line, upper half of its range |
-| Runtime companions (post-parity, outside v1 parity totals) | new: companion study (3), `@sentropic/python` (8), `@sentropic/js` (8), all Strong | +19 |
-
-v1 parity build points move from 180 to about 189; the critical path grows by 3 points (L1a +2, L1b +1,
-if the L1b additions are not split off).
+The lot plan is `plan/PLAN_BASH_SANDBOX_V1.md`; it supersedes the deltas listed here in v1.2. Corrections
+taken from the review: the v1 parity base of the study is 169 points (180 included the conditional L17b
+and the post-parity L18); flag tables are costed at the tier of their command lot; the generic flag
+coverage hook is built once in L2; observability (logger, trace and coverage delivery) is a separate lot
+off the critical path; L11, L10b, L19 and L15b-1 carry their share; L16b is the network adapter inside
+`@sentropic/bash`. Resulting v1 parity size: 183.5 points.
 
