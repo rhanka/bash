@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2022", "dom"],
+    "types": [],
+    "paths": { "@sentropic/bash": ["../../../types/index.d.ts"], "@sentropic/bash/browser": ["../../../types/browser.d.ts"] }
+  },
+  "files": ["main.ts"]
+}
