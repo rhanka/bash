@@ -6,7 +6,11 @@ fn trap() -> ! {
     #[cfg(target_arch = "wasm32")]
     core::arch::wasm32::unreachable();
     #[cfg(not(target_arch = "wasm32"))]
-    panic!("cabi_realloc: the allocator refused");
+    {
+        // Natively the panic machinery itself allocates: lift the ceiling first (the process is unwinding).
+        super::ceiling::lift();
+        panic!("cabi_realloc: the allocator refused");
+    }
 }
 
 /// Allocation hook of the canonical ABI, for the binding module.
