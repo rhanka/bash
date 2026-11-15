@@ -1,0 +1,7 @@
+package sentropic:bash-probe@0.0.0;
+
+world probe {
+  export ping: func(x: u32) -> u32;                 // returns x + 1
+  export echo-bytes: func(data: list<u8>) -> list<u8>;   // returns the same bytes
+  export grow: func(pages: u32) -> u32;              // memory.grow(pages), returns the new size in pages
+}
