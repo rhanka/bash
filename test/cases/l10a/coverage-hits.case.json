@@ -1,0 +1,18 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l10a/coverage-hits",
+  "steps": [
+    {
+      "script": "cover bash:cmd:SimpleCommand\ncover bash:builtin:echo\ncover bash:expansion:tilde"
+    },
+    {
+      "script": "cover bash:cmd:If\ncover bash:builtin:echo"
+    }
+  ],
+  "tags": [
+    "coverage"
+  ],
+  "title": "Coverage identifiers in hit order"
+}

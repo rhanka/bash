@@ -1,0 +1,17 @@
+{
+  "id": "l10a/stdin-bytes",
+  "steps": [
+    {
+      "script": "stdin",
+      "stdin": {
+        "base64": "//5B"
+      },
+      "stdinKind": "bytes"
+    }
+  ],
+  "tags": [
+    "stdin",
+    "bytes"
+  ],
+  "title": "Stdin given as raw bytes"
+}

@@ -1,0 +1,17 @@
+{
+  "case": "l10a/no-fs-capture",
+  "caseHash": "3fba150a7b482f235c7c6d50d013a212b050a46161ff23859b7f061d65cd0de5",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "done\n"
+    }
+  ]
+}

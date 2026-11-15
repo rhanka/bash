@@ -1,0 +1,15 @@
+{
+  "capture": {
+    "fs": false
+  },
+  "id": "l10a/no-fs-capture",
+  "steps": [
+    {
+      "script": "write /x.txt ignored\necho done"
+    }
+  ],
+  "tags": [
+    "capture"
+  ],
+  "title": "Filesystem capture switched off"
+}

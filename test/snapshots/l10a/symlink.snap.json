@@ -1,0 +1,23 @@
+{
+  "case": "l10a/symlink",
+  "caseHash": "7f585a4ce55f53271691d324818ffaa1cc637583a1cc1e90f68844a1f897fd27",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {
+    "/t/link": {
+      "kind": "symlink",
+      "target": "/t/target.txt"
+    }
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "through the link\n"
+    }
+  ]
+}

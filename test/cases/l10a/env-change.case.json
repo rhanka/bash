@@ -1,0 +1,29 @@
+{
+  "env": {
+    "A": "1",
+    "B": "2"
+  },
+  "id": "l10a/env-change",
+  "steps": [
+    {
+      "script": "setenv C 3"
+    },
+    {
+      "env": {
+        "E": "5"
+      },
+      "script": "setenv D 4"
+    },
+    {
+      "env": {
+        "G": "7"
+      },
+      "replaceEnv": true,
+      "script": "setenv F 6"
+    }
+  ],
+  "tags": [
+    "env"
+  ],
+  "title": "Environment persists and can be replaced"
+}
