@@ -1,8 +1,9 @@
-# SPEC STUDY — @sentropic/bash sandbox (rung 1: study, v2)
+# SPEC STUDY — @sentropic/bash sandbox (rung 1: study, v3)
 
-Status: study only, v2 after the adversarial review (verdict `approve-with-changes`, architecture
-option (a) accepted as target). No decision is taken here; every choice marked **OWNER** is listed in
-section 6. Appendix A maps each review finding to its resolution.
+Status: study only, v3. v2 reconciled the adversarial review (verdict `approve` on v2). v3 reworks the
+architecture for the owner's decision A1: Rust to `wasm32-wasip2`, Component Model, dedicated WIT contract,
+running in wasmCloud, Node and the browser. Section 6 lists the answered decisions and the questions still
+open. Appendix A maps each review finding to its resolution; Appendix B records the v3 changes.
 Scope: clean-room, MIT, zero third-party runtime dependency, WASM-first reimplementation with functional
 parity against `vercel-labs/just-bash`, benchmarked against just-bash and MoonBash on this machine.
 
@@ -266,9 +267,9 @@ puts numbers on each.
 
 ---
 
-## 2. Architecture options for a WASM-first engine
+## 2. Architecture: a WASI 0.2 component kernel
 
-### 2.1 Cost primitives measured on this machine
+### 2.1 Cost primitives measured on this machine (core modules; see 2.7 for the component)
 
 Synthetic modules generated with `wat2wasm`. Two kinds of measurement:
 
@@ -316,148 +317,312 @@ JS functions. A WASM engine cannot `await`. Three ways to bridge:
    (`DONE`, `OUT_OF_FUEL`, `HOST_CALL`); on `HOST_CALL` the JS host performs the async operation, writes the
    result into linear memory and resumes. No toolchain support needed, and the same mechanism provides fuel
    metering, cooperative time slicing, `AbortSignal` support and immunity to native stack overflow.
-Option 3 is assumed by every option below.
+Option 3 is the execution model of the kernel; section 2.3 expresses it as WIT resources.
 
-### 2.2 Options
+### 2.2 Options considered and owner decision A1
 
-**(a) Rust -> `wasm32-unknown-unknown`, zero crates.** Engine in Rust using only `core`/`alloc`/`std`, no
-`wasm-bindgen`, hand-written `extern "C"` ABI, hand-written JS glue. `panic = "abort"`, size-oriented
-profile, LTO, one codegen unit. `Cargo.lock` holds a single package.
+Four options were compared in v1/v2: (a) Rust compiled to WebAssembly with zero crates, (b) hand-written
+WAT, (c) AssemblyScript / MoonBit / Zig, (d) a TS shell with WASM kernels for hot builtins only. Rust was
+retained by the review: it keeps untrusted data out of the JS heap, needs no new language toolchain, and
+compiles natively for tests and debugging. (b) is not reviewable at this size, (c) adds a vendor toolchain,
+(d) keeps the JS startup cost and the shared-heap surface.
 
-**(b) Hand-written WAT.** Engine written directly in WebAssembly text, assembled with `wat2wasm`.
+**Owner decision A1 (binding, `owner-feedback-a1.md`)** refines option (a):
 
-**(c) AssemblyScript / MoonBit / Zig.** AssemblyScript is an npm package (third-party JS toolchain).
-MoonBit needs the `moon` toolchain and registry packages. Zig needs a tarball install (single static
-binary, std only).
+| # | Constraint | Effect on the design |
+|---|---|---|
+| 1 | Target `wasm32-wasip2`, Component Model, dedicated WIT contract. No `wasm32-unknown-unknown`, no `wasm-bindgen` | The deliverable is a component with typed exports, not a core module with an ad-hoc ABI |
+| 2 | Runs natively in wasmCloud on K8s, composable with TS orchestrators through `wac`/WIT, without a JS sub-VM; and in the browser through `jco transpile` at packaging time, producing a wrapper with 0 runtime dependency | Three execution environments from one component (section 2.6) |
+| 3 | Rust and `wasm-opt` only in the release pipeline of `@sentropic/bash`; the package ships the prebuilt `.wasm`, the `.wit` and the generated bindings | Consumers need no Rust and no native binary in CI (section 3.3) |
+| 4 | Cargo profile first (`opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`); `wasm-opt` only on the core module before componentization, and only with a proven gain >= 10% | Pipeline order of section 2.7 |
+| 5 | Only compile-time WIT binding generation (no async runtime, no Tokio); 0 dynamic runtime dependency; 0 npm dependency in the deliverable | Binding generation choice (open question O3); zero-import world (section 2.3) |
 
-**(d) Hybrid: TS host shell + WASM kernels for hot builtins only.**
+### 2.3 Component architecture and WIT contract
 
-| Criterion | (a) Rust zero-crate | (b) hand WAT | (c) AS / MoonBit / Zig | (d) hybrid TS + kernels |
-|---|---|---|---|---|
-| Startup model | One module; validation 2.5 ms/MB, lazy compile paid only for executed code; `Module` cached per process | Smallest binary | Zig similar to (a); AS adds its runtime/GC; MoonBit wasm-gc needs recent engines | JS parse/compile of the interpreter dominates (what just-bash pays today) |
-| JS<->WASM boundary for the VFS | VFS in linear memory: zero crossings for in-memory work; host FS via batched `HOST_CALL` | Same as (a) | Same as (a) | VFS in JS: every kernel call copies file content in and out, pipelines cross per stage |
-| Binary size | Medium; `std::fmt` and panic paths need care | Smallest | Zig small; AS medium | Small WASM, large JS |
-| Memory isolation | Untrusted data never becomes JS objects; Rust memory safety inside the module | Isolation from JS, no memory safety inside | Zig: manual memory safety; AS: GC-managed | Interpreter state on the JS heap: shared-heap classes remain |
-| Fuel / limits | VM loop decrements fuel; budgeted fallible allocation (section 2.4); memory ceiling from the limit profile | Same, by hand | Same | Two limit systems |
-| Build reproducibility | `rust-toolchain.toml` pin + `rustup target add wasm32-unknown-unknown` (native, official, no Docker); fixed flags; two builds must be byte-identical | `wat2wasm` pinned | New toolchain installs | Needs a TS build step or JS with JSDoc |
-| Supply chain | rustc/cargo already installed (1.96); one official target component; zero crates | wabt already installed | Zig: one new binary; MoonBit: new vendor toolchain + registry; AS: npm tree | Same as the kernel language, plus JS tooling |
-| Contributor cost | Mainstream language; kernel also compiles natively for unit tests and debugging with real stack traces | Very high, not reviewable at this size | Zig medium; MoonBit high; AS medium | Two languages on every hot path |
-| Performance ceiling | High: byte-oriented, no GC | Highest in theory | Zig comparable | Bounded by JS and boundary copies |
+**Principle: the kernel component has zero imports.** Capabilities are not WIT imports of the kernel; they
+are *requests returned to the driver*. The kernel exports an engine whose `run` returns either a result, an
+out-of-fuel status, or a host-call request; the driver (JS host, TS orchestrator, or a Rust driver
+component) decides whether to serve it and calls `resume`. Reasons:
 
-### 2.3 Recommendation (OWNER gate Q1; accepted as target by the review)
+1. Default deny at the binary level: a component with no import cannot receive an ambient capability, even
+   by a deployment mistake. An import audit (`wasm-tools component wit`) is a release gate.
+2. WASI 0.2 functions are synchronous at the component boundary. A synchronous import cannot wait for a JS
+   promise without JSPI, and JSPI is not available on this node: `WebAssembly.Suspending` is undefined on
+   node 22.22.1 (V8 12.4), with and without `--experimental-wasm-jspi` (verified locally). The reference
+   API is asynchronous (`IFileSystem`, custom commands), so inverted control is the only shape that works
+   unchanged in Node, browsers and Wasmtime today.
+3. `jco` emits imports of `@bytecodealliance/preview2-shim` only for `wasi:*` imports of the component
+   (reported by the fact note, consistent with the jco documentation, unverified locally). A zero-import
+   world therefore yields generated JS with no external module, which satisfies "0 npm dependency in the
+   deliverable". The gate checks the generated files for any bare import specifier.
+4. The resumable VM, exec handles and epoch fencing of v2 map one to one onto WIT resources.
 
-**Option (a): a Rust zero-crate fat kernel compiled to `wasm32-unknown-unknown`, with a thin dependency-free
-JS host, and the resumable-VM execution model.** Hand-written WAT only for micro-kernels where a benchmark
-proves a gain and the code stays reviewable. Hybrid (d) is rejected as the target: it keeps the JS startup
-cost of a large interpreter and the shared-heap security surface. The same reasoning applies to companion
-commands: a separate `.wasm` per companion would reintroduce the copy cost of (d) for `awk`/`jq` reading the
-core VFS, hence the single-binary recommendation of Q13.
+Consequence for the Rust source: on `wasm32-wasip2`, `std` links `wasi-libc`, which makes the component
+import `wasi:cli`, `wasi:io`, `wasi:filesystem` and `wasi:random` interfaces even when the program does no
+I/O (reported by the fact note, consistent with public Rust documentation, unverified locally). To keep
+zero imports the kernel is built **`no_std` + `alloc` on wasm** and with `std` on the native target for
+tests: `Vec`, `String`, `Box`, `BTreeMap`, `core::fmt` and `try_reserve` remain available; `HashMap` is
+replaced by an own table with a fixed seed; the global allocator is our own (a few hundred lines over
+`memory.grow`), which is also where the memory ceiling and the byte budgets are enforced.
 
-Rationale:
-1. Startup: the measured upper bound (22-43 ms with all code executed) is already 3-5 times under
-   just-bash's 119 ms, and a first `exec` touches a fraction of the kernel.
-2. Security: linear-memory isolation removes the JS escape and prototype-pollution classes for the kernel;
-   the JS host stays small and auditable.
-3. Zero-dependency rule: Rust `std`/`core` gives collections, UTF-8 and formatting without any crate.
-4. Testability: kernel logic compiles natively for fast unit tests, debugging and fuzzing loops.
-5. Cheapest delivery: per-command work is separable and specifiable (section 7).
+WIT sketch (illustrative; not validated by a tool, since `wasm-tools` is not installed here):
 
-Known costs to accept: own regex engine, glob matcher, printf/strftime engine, hashing, deflate/inflate,
-tar, and JSON/YAML parsers; an explicit-stack VM is harder to debug than a recursive interpreter (mitigated
-by the native build and a VM trace mode); WebAssembly linear memory never shrinks (section 2.4, point 8).
+```wit
+package sentropic:bash@0.1.0;
+
+interface types {
+  type bytes = list<u8>;                 // never `string`: scripts, stdio and files are byte data
+  enum profile { micro, contain, hardened, normal }
+  record limits { profile: profile, overrides: list<tuple<string, u64>> }
+  flags capabilities { host-fs, network, real-clock, real-sleep, entropy, custom-commands }
+  record shell-config { limits: limits, grants: capabilities, commands: list<string>,
+                        custom-commands: list<string>, env: list<tuple<bytes, bytes>>, cwd: bytes }
+  record exec-opts { script: bytes, stdin: bytes, args: list<bytes>, env: list<tuple<bytes, bytes>>,
+                     replace-env: bool, cwd: option<bytes>, raw-script: bool }
+  record exec-result { exit-code: s32, env: list<tuple<bytes, bytes>>, limit-hit: option<string>,
+                       aborted: bool }
+  variant host-req { fs-batch(list<fs-op>), lazy-file(bytes), custom-command(command-call),
+                     fetch(fetch-req), sleep(u64), clock, entropy(u32) }
+  variant host-outcome { fs(list<fs-result>), data(bytes), command(command-result), denied,
+                         failed(bytes) }
+  record pending-call { epoch: u64, req: host-req }
+  variant step { done(exec-result), out-of-fuel, host-call(pending-call) }
+  enum cancel-reason { aborted, deadline, limit }
+}
+
+interface engine {
+  use types.{bytes, shell-config, exec-opts, step, host-outcome, cancel-reason};
+  configure: func(memory-ceiling-bytes: u64);          // once per instance, before any resource
+  resource vfs {
+    constructor(max-bytes: u64);
+    op: func(req: fs-op) -> result<fs-result, fs-error>;        // sync path behind `bash.fs`
+    read: func(path: bytes, offset: u64, len: u32) -> result<bytes, fs-error>;
+    take-dirty: func() -> list<bytes>;                          // journal and compaction
+  }
+  resource shell { constructor(root: borrow<vfs>, config: shell-config); }
+  resource fiber {
+    constructor(owner: borrow<shell>, parent: option<borrow<fiber>>, opts: exec-opts);
+    run: func(fuel: u64) -> step;
+    resume: func(epoch: u64, outcome: host-outcome) -> step;
+    cancel: func(reason: cancel-reason);
+    take-stdout: func(max: u32) -> bytes;                       // drained in chunks, never flattened
+    take-stderr: func(max: u32) -> bytes;
+  }
+  exec-oneshot: func(files: list<tuple<bytes, bytes>>, config: shell-config, opts: exec-opts)
+      -> oneshot-result;                                        // stateless entry, fails on host-call
+}
+
+world kernel { export engine; }                                 // zero imports
+```
+
+Mapping of the v2 contract onto WIT:
+
+| v2 concept | WIT form | Notes |
+|---|---|---|
+| `vfs_id` store | `resource vfs` | Handles are unforgeable and dropped through the canonical ABI; several shells may attach to one `vfs` (the kernel keeps a shared reference behind the borrow) |
+| per-`Bash` configuration | `resource shell` | Capabilities, command registry and byte/step budgets are scoped per shell and per fiber, never per instance: two `Bash` objects sharing one `InMemoryFs` share an instance but not their grants or limits |
+| `exec_id` fiber | `resource fiber` with `parent` | Concurrent and re-entrant execs are distinct resources over one `vfs`; nested fibers charge the parent's aggregate budget |
+| `HOST_CALL` + epoch | `step::host-call(pending-call)` and `resume(epoch, outcome)` | A stale epoch is rejected by the kernel; the driver also drops it. `denied` is the answer for an ungranted capability |
+| Output | `take-stdout` / `take-stderr` | Chunked drain avoids a second contiguous copy of the output inside linear memory |
+| Limit profile | `limits` in `shell-config`, `configure` for the instance ceiling | The linear memory is defined inside the core module, so its `maximum` is fixed at link time and cannot follow the profile; the ceiling is enforced by the kernel allocator (section 4.3) |
+
+Capabilities as imports, where the platform wants them: a second, optional component, the **session
+driver** (Rust, same workspace, `no_std`), imports `sentropic:bash/engine` plus the WASI interfaces it is
+allowed to use and exports a simple synchronous shell API. It runs the `run`/`resume` loop natively and
+maps `host-req` onto its imports. Driver worlds are fixed capability sets:
+
+```wit
+world session-pure { import sentropic:bash/engine@0.1.0; export shell-api; }
+world session-fs   { include session-pure; import wasi:filesystem/preopens@0.2.0;
+                     import wasi:filesystem/types@0.2.0; }
+world session-net  { include session-fs; import wasi:http/outgoing-handler@0.2.0;
+                     import wasi:clocks/wall-clock@0.2.0; }
+```
+
+Composing `kernel` with one driver through `wac plug` gives a component whose import list *is* its
+capability list. The kernel binary is identical in all cases.
+
+WASI 0.2 versus 0.3 (facts and status):
+
+| Fact | Status |
+|---|---|
+| `wasm32-wasip2` is offered by `rustup target list` on the installed stable 1.96.0; not installed yet | verified locally |
+| `wasm32-wasip3` is known to `rustc --print target-list` but not offered by `rustup target list` (no prebuilt std on stable) | verified locally |
+| `wasm-component-ld` 0.5.22 ships with the installed toolchain and has `--skip-wit-component`, `--component-type <WIT_FILE>`, `--wasi-adapter none` | verified locally (`--help`) |
+| JSPI is not available on node 22.22.1 | verified locally |
+| WASI 0.2 exports and imports are synchronous; 0.3 adds `async func`, `stream`, `future` | public specification, not checkable here |
+| WASI 0.3 ratification date and the Wasmtime/jco versions supporting it | reported by the fact note, **unverified** |
+| A `no_std` `cdylib` links on `wasm32-wasip2` without `wasi-libc` and yields a zero-import component | **unverified**; first gate of lot L0 |
+
+v1 is a WASI 0.2 component with synchronous exports. A later 0.3 version can turn the *driver's* exported
+`exec` into an `async func` without touching the kernel world.
 
 ### 2.4 Kernel and host contract (to be detailed in the EVOL rung)
 
 ```
-JS host (no dependency)                          WASM kernel instance (Rust, zero crates)
-  Bash class, options, limit profile                VFS stores (vfs_id): tree, chunked byte files
-  module cache (one WebAssembly.Module)             exec fibers (exec_id): VM stack, shell state,
-  capability membrane (revocable, epoch-fenced)       fd table, budget; parent link for nested exec
-  fs proxy for `bash.fs` / `InMemoryFs`             lexer -> parser -> bytecode; expansion; i64 arithmetic
-  exec(): exec_create -> loop exec_run(fuel)        builtins and commands (one module per command)
-     HOST_CALL  -> membrane -> exec_resume          regex, glob, format, codecs
-     OUT_OF_FUEL -> deadline / abort check          budget accounting on every growth
-  view(): fresh typed-array view per entry          imports: host_call family, capability-gated
+driver (JS facade over jco output | TS orchestrator | session driver component)
+   shell-config, capability membrane, run/resume loop, deadline and abort checks
+        |  canonical ABI: typed records, list<u8> payloads, resource handles
+kernel component (Rust no_std + alloc, zero imports)
+   vfs resources: tree, chunked byte files      shell resources: grants, registry, budgets
+   fiber resources: VM stack, shell state, fd table, budget, parent link
+   lexer -> parser -> bytecode; expansion; i64 arithmetic; builtins and commands
+   regex, glob, format, codecs; own allocator with ceiling and budget accounting
 ```
 
-1. **Explicit exec handles.** Exports: `exec_create(vfs_id, parent_exec_id) -> exec_id`,
-   `exec_run(exec_id, fuel) -> status`, `exec_resume(exec_id, call_epoch, result) -> status`,
-   `exec_result(exec_id)`, `exec_destroy(exec_id)`. Each exec is a fiber with its own VM stack, shell state
-   and budget; nothing in the ABI is implicit or global. This covers:
-   - **Concurrent** `bash.exec()` calls on one `Bash`: several fibers over one VFS. JS is single-threaded,
-     so fibers interleave only at `HOST_CALL` and fuel-slice boundaries, which matches the reference
-     behaviour (interleaving at await points). No host mutex, so no deadlock on re-entry.
-   - **Re-entrant** execution (`ctx.exec`, `ctx.origCommand`, `execWithInheritedStdin` from a custom
-     command suspended in a `HOST_CALL`): a child fiber with `parent_exec_id`, charged to the parent's
-     aggregate budget (`maxWorkUnits`, `maxExecDepth`). In-kernel nesting (`bash -c`, `eval`, `xargs`,
-     `find -exec`, `timeout`, `time`) stays inside one fiber's explicit stack.
-2. **VFS ownership.** A VFS store is a kernel object (`vfs_id`). Rule: *an exec runs in the instance that
-   owns its root VFS.* `new Bash()` creates a dedicated instance with one store. A standalone
-   `new InMemoryFs()` owns a store in its own instance; a `Bash` constructed with it attaches to that
-   instance, so two `Bash` objects sharing one `InMemoryFs` share an instance and see the same files with
-   no copy (they share all their data anyway, so no isolation is lost). Any other `fs` (`OverlayFs`,
-   `ReadWriteFs`, custom `IFileSystem`, a mount from another instance) is host-backed and reached through
-   `HOST_CALL`. `MountableFs` keeps its mount table in the kernel and routes each path to an in-kernel store
-   or to the host.
-3. **Public `bash.fs` bridging.** `bash.fs` and `InMemoryFs` are JS proxies implementing `IFileSystem`
-   over synchronous kernel exports (`fs_op(vfs_id, op, args)`), returning resolved promises (and the sync
-   `mkdirSync`/`writeFileSync`/`writeFileLazy`). They are valid between and during execs because fibers
-   never hold VFS borrows across a suspension point. Lazy files (`LazyFileProvider`) are stubs in the store;
-   first read raises a `HOST_CALL` that materializes the content.
-4. **Fallible, budgeted allocation.** No infallible growth on untrusted data: every buffer, string, array,
-   VFS write and output append goes through a budget check (`charge(bytes)` against the limit that applies:
-   `maxStringLength`, `maxOutputSize`, `maxFileSystemBytes`, `maxLiveBytes`, ...) followed by a fallible
-   reservation (`try_reserve`-style). A breach unwinds the fiber's explicit stack and returns an
-   `ExecutionLimitError` **result** with the reference exit code; the instance and its VFS stay valid.
-   Infallible `push`/`format!`/`collect`/`to_string` on untrusted-sized data are banned by a source check
-   in the gate. Large data (files, stdout/stderr, pipeline buffers) uses chunked storage, so growth never
-   needs a doubling copy and peak memory is size + one chunk.
-5. **Memory ceiling fitted to the limit profile.** The `maximum` pages of the instance are derived from the
-   active profile: `maxFileSystemBytes + maxLiveBytes + maxOutputSize + fixed kernel overhead (64 MiB)`,
-   capped by the wasm32 limit (4 GiB). `hardened`: 128 + 64 + 10 + 64 = 266 MiB. `normal`: 1024 + 512 + 256
-   + 64 = 1 856 MiB. Pages are committed on demand, so a large ceiling costs nothing until used. The byte
-   budgets of point 4 always bind before the page ceiling; `memory.grow` failure is a last line that also
-   returns a limit error.
-6. **Traps are bugs, with a defined recovery contract.** With points 4 and 5, no untrusted input is
-   supposed to trap. If a trap happens (kernel bug, engine stack exhaustion), linear memory is no longer
-   trusted: the `exec` returns a fatal result (flagged, never silently retried), the instance is
-   **poisoned** (further `exec` and `bash.fs` calls reject with a typed error) and every pending fiber of
-   that instance fails. VFS content is not salvaged from a trapped instance. Callers who need committed
-   files to survive opt into a **journal**: at each exec completion the host mirrors the files dirtied by
-   that exec (dirty set tracked by the kernel; 0.57 us per 60 KB copied) and can rebuild a fresh instance
-   from the mirror. Whether the journal is on by default is owner question Q12. A per-exec fresh instance
-   is not offered: it would either lose the persistent VFS or copy it on every call.
-7. **Revocable capability membrane with epochs.** Every `HOST_CALL` carries `(exec_id, call_epoch)`. The
-   host hands async extensions (custom commands, custom `IFileSystem`, `fetch`, `sleep`) revocable proxies,
-   never raw objects. On `AbortSignal`, deadline or limit breach the host revokes the fiber's proxies at
-   once: later `fs`/`exec`/`fetch` calls through them reject with an abort error, and a late
-   `exec_resume` whose `(exec_id, call_epoch)` is no longer current is dropped by both host and kernel.
-   `exec_id` values are never reused within an instance. An extension that does not settle within
-   `maxExtensionCleanupTimeMs` is abandoned and its fiber destroyed.
-8. **Memory views and retention.** `memory.grow` detaches the previous `ArrayBuffer`: the host never
-   caches a typed-array view across a kernel entry; a `view()` helper re-reads `memory.buffer` each time.
-   Linear memory never shrinks, so a spike pins RSS for the life of the instance: the host offers
-   `bash.compact()` (and an optional idle threshold) that exports the VFS to a fresh instance, using the
-   same path as the journal.
-9. **Batched host calls.** For host-backed filesystems the kernel issues batched operations (read a
-   directory with entry types and stats in one call, multi-stat, bounded tree walk for the built-in
-   adapters, `readdirWithFileTypes` when a custom `IFileSystem` provides it), so that `find`, `grep -r`,
-   `du`, `cp -r` or `**` cost one host round trip per directory, not per entry.
-10. **Bytes at the boundary.** All strings and buffers are (pointer, length) pairs; no JS object enters
-    the kernel. Output conversion follows the reference contract: valid UTF-8 decoded, invalid bytes
-    preserved as latin1, raw bytes available (`stdoutKind`, `ByteString`). `normalizeScript` runs in the
-    kernel unless `rawScript` is set.
-11. **Runtime loading.** On Node the module is read with `readFileSync(new URL(...))` and compiled
-    synchronously once per process. Where synchronous compilation of a large module is not available
-    (browser main thread in some engines, edge runtimes that only accept statically imported modules), the
-    instance is created lazily and awaited inside the first `exec`, which is already async; this is owner
-    question Q11 and is unverified on this machine (no browser).
+1. **Explicit exec handles.** Each exec is a `fiber` resource with its own VM stack, shell state and
+   budget. Concurrent `bash.exec()` calls on one `Bash` are several fibers over one `vfs`; they interleave
+   only at host-call and fuel-slice boundaries, as in the reference (await points). Re-entrant execution
+   (`ctx.exec`, `ctx.origCommand`, `execWithInheritedStdin` from a custom command suspended in a host
+   call) creates a child fiber with `parent`, charged to the parent's aggregate budget. In-kernel nesting
+   (`bash -c`, `eval`, `xargs`, `find -exec`, `timeout`, `time`) stays inside one fiber.
+2. **VFS ownership.** *An exec runs in the instance that owns its root VFS.* `new Bash()` creates a
+   dedicated instance with one `vfs`. A standalone `new InMemoryFs()` owns a `vfs` in its own instance,
+   whose memory ceiling comes from its own size option or the default profile; a `Bash` constructed with it
+   attaches a `shell` to that instance. Any other `fs` (`OverlayFs`, `ReadWriteFs`, custom `IFileSystem`)
+   is host-backed and reached through host calls. `MountableFs` keeps its mount table in the kernel.
+3. **Public `bash.fs` bridging.** `bash.fs` and `InMemoryFs` are JS objects implementing `IFileSystem`
+   over the synchronous `vfs.op` / `vfs.read` exports, returning resolved promises (and the sync
+   `mkdirSync`/`writeFileSync`/`writeFileLazy`). Fibers never hold VFS borrows across a suspension point.
+   Lazy files are stubs; the first read raises a `lazy-file` host call.
+4. **Fallible, budgeted allocation.** No infallible growth on untrusted data: every buffer, string,
+   array, VFS write and output append goes through a budget check against the limit that applies, then a
+   fallible reservation. A breach unwinds the fiber's explicit stack and returns an `ExecutionLimitError`
+   **result** with the reference exit code; the instance and its VFS stay valid. Infallible
+   `push`/`format!`/`collect`/`to_string` on untrusted-sized data are banned by a source check in the gate.
+   Files, stdout/stderr and pipeline buffers use chunked storage: no doubling copy, peak = size + one
+   chunk. Canonical-ABI arguments and results are allocated through the same allocator (`cabi_realloc`)
+   and are charged to the fiber.
+5. **Memory ceiling.** Enforced by the kernel allocator, which is the only caller of `memory.grow`: the
+   instance ceiling is set once by `configure`, and the byte budgets of point 4 are sized so that they
+   always bind before it (section 4.3). The link-time `maximum` of the memory is a fixed backstop, and the
+   platform limiter (wasmCloud, Wasmtime) is a third, independent line.
+6. **Traps are bugs, with a defined recovery contract.** With points 4 and 5 no untrusted input is
+   supposed to trap. After a trap, linear memory is not trusted: the exec returns a fatal result, the
+   instance is **poisoned** (further calls reject with a typed error), every pending fiber of that
+   instance fails, and VFS content is not salvaged. Callers who need committed files to survive opt into
+   a **journal**: at each exec completion the driver mirrors the files reported by `take-dirty` and can
+   rebuild a fresh instance from the mirror. No per-exec fresh instance is offered.
+7. **Revocable capability membrane with epochs.** The driver hands async extensions revocable proxies,
+   never raw objects. On abort, deadline or limit breach it calls `fiber.cancel`, revokes the fiber's
+   proxies, and drops any late `resume` whose epoch is no longer current; the kernel rejects it as well.
+   An extension that does not settle within `maxExtensionCleanupTimeMs` is abandoned.
+8. **Memory views and retention.** Views over linear memory are owned by the generated bindings, which
+   must refresh them after any growth (a release-gate test grows memory mid-call). Linear memory never
+   shrinks: the driver offers `bash.compact()` (and an optional idle threshold) that rebuilds a fresh
+   instance from the VFS, using the journal path.
+9. **Batched host calls.** `fs-batch` carries several operations (directory listing with entry types and
+   stats, multi-stat, bounded tree walk), so `find`, `grep -r`, `du`, `cp -r` or `**` cost one driver round
+   trip per directory, not per entry.
+10. **Bytes at the boundary.** Every payload is `list<u8>`; a WIT `string` is only used for identifiers
+    (limit names, command names). Output conversion in the JS facade follows the reference contract: valid
+    UTF-8 decoded, invalid bytes preserved as latin1, raw bytes available. `normalizeScript` runs in the
+    kernel unless `raw-script` is set.
+11. **Stateless entry.** `exec-oneshot` runs one script over a file set and returns the result plus the
+    modified files. It needs no resource handle across calls, so it is callable over a wasmCloud link or
+    wRPC; it fails with a typed error if the script needs a host call.
+
+### 2.5 Execution environments
+
+| Environment | How the kernel is loaded | Driver | Status |
+|---|---|---|---|
+| Node >= 22 | `jco transpile` output generated at packaging time: one core module (`kernel.core.wasm`) + generated JS glue + `.d.ts`. The core module is read with `readFileSync(new URL(...))`, compiled synchronously once per process, and passed to the generated `instantiate` with an empty import object | Hand-written JS facade (`Bash`, `InMemoryFs`, `OverlayFs`, `ReadWriteFs`, membrane), no dependency | Synchronous instantiation mode of jco output is **unverified** here (jco not installed); gate in L0 |
+| Browser | Same generated files; the core module is compiled with `WebAssembly.compileStreaming` and awaited inside the first `exec` (already async) or through an explicit `Bash.precompile()` | Same facade without the host-FS adapters | In v1 by owner decision. Needs a headless browser as a test-only tool (batch B, B9) |
+| wasmCloud on K8s | The component itself (`kernel.component.wasm`), from the npm package or an OCI registry | A TS orchestrator component composed with the kernel through `wac plug` (it drives `run`/`resume` and serves host calls with its own imports), or the Rust session driver for a fixed capability set, or `exec-oneshot` over a link | Platform facts below are **unverified** locally |
+| Wasmtime (test) | The component, run natively in the repo test suite as the proxy for wasmCloud | Session driver | Needs `wasmtime` as a test-only tool (section 2.7) |
+
+wasmCloud facts used by the design, all reported by the fact note and not checkable on this machine (no
+`wash`, no `wasmtime`); the L1 smoke test must confirm them against the wasmCloud version the owner runs:
+- A WASI 0.2 component with a custom WIT world is accepted; `wasi:http` is not required.
+- Host capabilities reach a component only through its imports and the links declared for it. With zero
+  imports the kernel cannot receive any.
+- Components are instantiated per invocation, so no in-memory state survives between invocations. A
+  multi-turn session with a persistent VFS therefore needs either one composed component whose
+  orchestrator keeps the session inside a single invocation, a host-managed stateful service, or the
+  stateless `exec-oneshot` with files passed in and out. This is open question O4.
+- Default per-component limits: 256 MiB of linear memory, 10 minutes of execution time, enforced by
+  Wasmtime's limiter and epoch interruption.
+- In a `wac` composition both components run in one Wasmtime store with separate linear memories; the
+  canonical ABI copies bytes from one memory to the other, with no JS engine around the kernel.
+
+The owner's requirement "no JS sub-VM" is met for the kernel in every case. A TS orchestrator is itself
+JavaScript compiled to a component; it is the orchestrator's engine, not a wrapper around the kernel.
+
+### 2.6 Build pipeline and toolchain (release lane only)
+
+Verified locally: `rustc`/`cargo` 1.96.0 (LLVM 22.1.2), `wasm-component-ld` 0.5.22, `wasm-ld`, node
+22.22.1, `wat2wasm` 1.0.36. Absent: `wasm-tools`, `wit-bindgen`, `jco`, `wac`, `wasm-opt`, `wasmtime`,
+`wash`. Nothing was installed for this study.
+
+Commands lot L0 would run (none executed here):
+
+```
+# 1. toolchain pin (rust-toolchain.toml: channel = "1.96.0", targets = ["wasm32-wasip2"], profile = "minimal")
+rustup target add wasm32-wasip2
+# 2. core module: no_std + alloc, release profile (opt-level "z", lto "fat", codegen-units 1,
+#    panic "abort", strip true), linker told not to componentize and not to link wasi-libc
+cargo build --release --target wasm32-wasip2        # with -C link-arg=--skip-wit-component
+# 3. optional, only if lot L2 proved a gain >= 10%
+wasm-opt -Oz kernel.core.wasm -o kernel.core.opt.wasm
+# 4. componentization from the WIT contract, no adapter
+wasm-tools component embed wit/ --world kernel kernel.core[.opt].wasm -o kernel.embedded.wasm
+wasm-tools component new kernel.embedded.wasm -o dist/kernel.component.wasm
+# 5. gates
+wasm-tools validate dist/kernel.component.wasm
+wasm-tools component wit dist/kernel.component.wasm    # must list zero imports
+# 6. JS bindings for Node and browser
+jco transpile dist/kernel.component.wasm -o dist/js    # sync instantiation, no WASI shim, wasm kept as a file
+#    gate: no bare import specifier in dist/js/*.js; exactly one core module emitted
+# 7. reproducibility: two clean builds must be byte-identical; SHA-256 recorded in the release
+```
+
+Development builds can skip steps 3-5 and let the bundled linker componentize directly
+(`--component-type wit/world.wit`, `--wasi-adapter none`), which needs `rustup` only; whether that path
+produces the same zero-import component is to be confirmed in L0.
+
+Third-party build-time tools. None is a dependency of the published package; none is needed by consumers.
+
+| Tool (version seen) | Kind | Role | Pin method | Avoidable? | Supply-chain note |
+|---|---|---|---|---|---|
+| `rustc`/`cargo` 1.96.0 + `rust-std` for `wasm32-wasip2` (includes `wasm-component-ld` 0.5.22) | Official native toolchain | Compile the kernel | `rust-toolchain.toml` with an exact channel; rustup verifies its manifests | No | Already on the machine; one extra official component |
+| `wit-bindgen-cli` 0.63.0 (crates.io) | Native binary | Generate the Rust export glue from the WIT, as a committed source file | Release tarball + recorded SHA-256, under git-ignored `tmp/tools/`; run only when the WIT changes | Yes: hand-written canonical ABI glue (open question O3) | Bytecode Alliance. Used as a generator, it adds no crate to `Cargo.lock`; the proc-macro crate would add a compile-time crate tree |
+| `wasm-tools` 1.263.0 (crates.io) | Native binary | `component embed/new`, validation, import audit | Release tarball + SHA-256, `tmp/tools/` | Partly: the bundled linker can componentize, but the audit gate and the pre-component `wasm-opt` order need it | Bytecode Alliance; same `wit-component` code as the linker already shipped inside rustc |
+| `@bytecodealliance/jco` 1.42.0 or `@bytecodealliance/jco-transpile` 0.24.0 (npm) | npm tool | Generate the JS glue and `.d.ts` | Dedicated manifest with `devDependencies` only and a committed lockfile under `tools/`, installed with `npm ci --ignore-scripts` into `tmp/tools/`; never in the root `package.json` | No (owner constraint 2) | Largest surface. `jco` 1.42.0 declares 14 dependencies (among them `rolldown`, `typescript`, `binaryen`, `componentize-js`, `preview2-shim`); `jco-transpile` declares 4 (`binaryen`, `oxc-minify`, `preview2-shim`, `preview3-shim`) (verified with `npm view`). L0 checks whether `jco-transpile` alone is enough |
+| `wasm-opt` (Binaryen release) | Native binary | Size pass on the core module | Release tarball + SHA-256, `tmp/tools/` | Yes: used only if L2 proves >= 10% | Prebuilt binary only; Binaryen is never built from source here |
+| `wac-cli` 0.12.0 (crates.io) | Native binary | Composition smoke test (kernel + driver); used by consumers for their own compositions | Release tarball + SHA-256, `tmp/tools/` | Yes for publishing; needed for the composition test | Bytecode Alliance |
+| `wasmtime` | Native binary | Run the component natively in tests (proxy for wasmCloud) | Release tarball + SHA-256, `tmp/tools/` | Yes if the owner provides a wasmCloud test host instead | Bytecode Alliance; test-only |
+| `typescript` | npm tool | `tsc --noEmit` on the hand-written facade declarations and on consumer fixtures | Same `tools/` manifest and lockfile as jco | No, if declarations are to be checked | Test-only; fails closed when absent |
+| `moon` | Vendor toolchain | Build MoonBash for the benchmark | `tmp/bench-tools/`, version and artefact hash recorded | Open question O6 | Bench-only |
+| `cargo-fuzz` + nightly Rust | Dev crate | Coverage-guided fuzz campaign | `tmp/fuzz/`, out of every manifest | Open question O8 | Fuzz-only, never in the gate |
+
+Version numbers come from `cargo search` and `npm view` on 2026-11-15. The fact note quotes older ones
+(`jco` 1.33.x, `wac` 0.11.0, Binaryen 120-128); the registry values above supersede them.
+
+### 2.7 Startup and size under the component model (re-estimate)
+
+Nothing component-specific could be measured: the target and the tools are not installed. What changes
+against section 2.1:
+
+| Item | Expectation | Status |
+|---|---|---|
+| Node/browser load path | `jco` unbundles the component into its core module plus JS glue, so V8 compiles the same core module as in the section 2.1 probe; the component wrapper is not loaded at runtime | reasoning from the jco design, **unverified** |
+| Glue cost | Generated JS for a zero-import world with a handful of resources: a few to a few tens of KB, plus resource tables | **unverified**; within the 60 KB host budget only if the facade stays small |
+| Call cost | Every `run`/`resume` lowers and lifts a variant; payloads are copied once per direction (0.57 us per 60 KB measured for the raw copy). Records with many small `list<u8>` fields (env) cost one allocation each | **unverified** |
+| Kernel size | `no_std` removes `std` I/O, panic formatting and the WASI adapter; the canonical-ABI export glue and an own allocator are added | **unverified**; budget unchanged (<= 1.5 MB raw, <= 700 KB gzip) |
+| Package size | The npm package carries two copies of the kernel code: the component (for `wac`/wasmCloud) and the core module extracted by jco (for JS) | certain by construction; open question O2 |
+| Wasmtime path | Whole-module compilation at component start (cached by the host), then cheap per-invocation instantiation | **unverified** |
+
+Lot L2 must measure, before any budget becomes a gate: size of the `no_std` core module with the Cargo
+profile alone, gain of `wasm-opt -Oz` on it (the >= 10% decision), size of the component versus the core
+module, size and initialization time of the jco glue, cold start of `import + new Bash() + exec('echo hi')`
+through the generated bindings, per-call cost of `run`/`resume` with a host call, and, with `wasmtime`,
+instantiation and first-exec time of the composed component.
 
 ---
 
 ## 3. Packaging
 
-### 3.1 Core versus companion packages (proposal, OWNER gates Q4 and Q13)
+### 3.1 Core versus companion packages (A4 answered; single binary in batch B, B7)
 
 Constraint: a second `.wasm` module carries its own allocator and cannot reach the core VFS without copies
 or host calls, and unused code in a single module costs only validation (2.5 ms/MB). So the proposal is
@@ -473,9 +638,9 @@ or host calls, and unused code in a single module costs only validation (2.5 ms/
 | `@sentropic/make` | make (not in just-bash; owner-named), after parity | in the kernel workspace, feature-gated |
 | Not planned for v1 | `python3`/`python`, `js-exec`/`node`, `sqlite3`, `xan`, `html-to-markdown`, `@just-bash/executor` | each needs a large third-party runtime or library; left to custom commands |
 
-All 85 `CommandName` entries are accounted for: 80 in the kernel tiers, `xan`, `sqlite3`, `html-to-markdown`
-not planned, and `curl` in `@sentropic/net`; opt-in `python*`/`js-exec`/`node` not planned. `yq` is in tier 3
-with YAML first; its XML/TOML/INI/CSV inputs are a scope decision inside Q4. A `slim` build (tier 1 only)
+All 85 `CommandName` entries are accounted for: 82 in the kernel tiers and `xan`, `sqlite3`,
+`html-to-markdown` not planned; of the opt-in names, `curl` is in `@sentropic/net` and `python*`/`js-exec`/
+`node` are not planned. `yq` is in tier 3; its input formats are open question O5. A `slim` build (tier 1 only)
 can be produced from the same workspace if the size budget requires it.
 
 ### 3.2 API compatibility surface with just-bash
@@ -483,10 +648,24 @@ can be produced from the same workspace if the size budget requires it.
 | Tier | Surface | v1 stance |
 |---|---|---|
 | A — drop-in | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, commands, customCommands, sleep, network/fetch, processInfo})`; `bash.fs`; `exec(cmd, {env, replaceEnv, cwd, stdin, stdinKind, signal, args, rawScript})` with the non-throwing result contract, `normalizeScript` and the binary-preserving output decoding; `readFile`, `writeFile`, `getCwd`, `getEnv`, `registerCommand`, `defineCommand` and the full command context (`exec`, `origCommand`, `exportedEnv`, `assignShellVariable`, `fileDescriptors`, `getRegisteredCommands`); `InMemoryFs` with the `IFileSystem` contract incl. `createExclusive` and stat identity; default layout (`/home/user`, `/bin`, `/usr/bin`, `/dev`, `/proc`, default env); command-list helpers; byte/text helpers | Same names and semantics; proven by our own API tests |
-| B — compatible behaviour, own implementation | `OverlayFs`, `ReadWriteFs`, `MountableFs`, `NetworkConfig` allow-list and typed errors, limit names and both profiles, ESM and CJS entries | Same options; host-side JS adapters behind explicit capabilities |
-| C — later | `parse()` + AST types, transform pipeline and plugins, `Sandbox` facade, CLI binaries, `trace`, `logger`, `coverage`, `./browser` entry (Q11) | After parity of tiers A and B |
+| B — compatible behaviour, own implementation | `OverlayFs`, `ReadWriteFs`, `MountableFs`, `NetworkConfig` allow-list and typed errors, limit names and profiles, ESM and CJS entries, `./browser` entry (in v1 by decision A1) | Same options; host-side JS adapters behind explicit capabilities |
+| C — later | `parse()` + AST types, transform pipeline and plugins, `Sandbox` facade, CLI binaries, `trace`, `logger`, `coverage` | After parity of tiers A and B |
 | D — not reproduced | `DefenseInDepthBox` and related exports, `python`, `javascript`, sqlite3, `@just-bash/executor` | Documented as N-A |
-| Additions | `execSync` (Q10), `Bash.precompile()`, `bash.compact()`, journal option (Q12), fuel and memory knobs | Opt-in, never required for drop-in use |
+| Additions | `execSync` (B5), `Bash.precompile()`, `bash.compact()`, journal option (B6), profiles `contain` and `micro`, the component and its WIT for `wac`/wasmCloud consumers | Opt-in, never required for drop-in use |
+
+### 3.3 Published artefacts (decision A1, constraint 3)
+
+| Artefact | Produced by | Consumer |
+|---|---|---|
+| `kernel.component.wasm` | release pipeline (section 2.6) | `wac` compositions, wasmCloud, Wasmtime |
+| `wit/` (`sentropic:bash@0.1.0`) | hand-written, versioned | everyone who composes or generates bindings |
+| `js/kernel.core.wasm`, `js/kernel.js`, `js/*.d.ts` | `jco transpile` at packaging time | Node and browser, through the facade |
+| Facade (`Bash`, filesystems, membrane) + `.d.ts` | hand-written JS, no dependency | Node (`.`) and browser (`./browser`) entries |
+| Session driver component(s) | release pipeline | wasmCloud deployments wanting a fixed capability set |
+
+The published `package.json` has empty `dependencies`. Nothing in the package needs Rust, a native binary
+or an install script. `*.wasm` is git-ignored in the repository, so consumers depend on published
+packages, not on git refs. Whether the component also lives in the npm tarball is open question O2.
 
 ---
 
@@ -499,7 +678,7 @@ can be produced from the same workspace if the size budget requires it.
 2. Capabilities are explicit objects passed at construction, each mapped to a `host_call` operation code.
    An operation without a granted capability fails inside the sandbox and never reaches host code.
 3. The kernel is the only code that parses untrusted bytes. The JS host validates lengths, operation codes
-   and `(exec_id, call_epoch)`; it never evaluates, never builds property names from sandbox data, and
+   and the fiber handle and epoch of each resume; it never evaluates, never builds property names from sandbox data, and
    never passes sandbox strings to `import()`, `require`, `Function` or `RegExp`.
 4. Limits return results, not traps (section 2.4, points 4-5). A trap is a kernel bug handled by the
    poison contract (point 6).
@@ -530,8 +709,28 @@ ambient Node APIs it closes over: custom commands are host code supplied by the 
 
 ### 4.3 Resource limits
 
-Limit names, both profiles and their values follow the reference (`JB:src/limits.ts`, table in 1.2) so
-existing callers keep working. Enforcement points in our engine:
+Limit names follow the reference (`JB:src/limits.ts`, table in 1.2) so existing callers keep working.
+Profiles are redefined so that byte caps are coherent with one memory ceiling: in every profile
+`VFS + live + output + kernel headroom = ceiling`, so a byte budget always binds before the allocator
+ceiling, and the ceiling of the default profile fits wasmCloud's default per-component cap.
+
+| Profile | VFS | Live / input | Output / string | Commands / loop / work units | Wall time | Headroom | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `micro` | 32 MiB | 16 / 16 MiB | 8 / 4 MiB | 25k / 25k / 1M | 10 s | 8 MiB | 64 MiB |
+| `contain` | 128 MiB | 64 / 64 MiB | 32 / 16 MiB | 100k / 100k / 100M | 60 s | 32 MiB | 256 MiB |
+| `hardened` | 128 MiB | 64 / 32 MiB | 10 / 10 MiB | 10k / 10k / 100k | 30 s | 54 MiB | 256 MiB |
+| `normal` | 1 024 MiB | 512 / 512 MiB | 256 / 64 MiB | 100k / 100k / 100M | 1 h | 64 MiB | 1 856 MiB |
+
+`hardened` and `normal` keep the reference values; `contain` and `micro` are additions. Explicit
+`executionLimits` overrides are validated against the ceiling at construction (a set of byte caps that
+does not fit is rejected, never silently clamped). The headroom figures (code, AST, allocator
+fragmentation) are estimates to validate in L2. Which profile is the default is open question O1.
+
+CPU and time: kernel fuel is the deterministic limit in every environment. Wall time is checked by the
+driver between fuel slices; a synchronous driver without a clock capability (session driver, `execSync`)
+relies on fuel and on the platform deadline (wasmCloud: 10 minutes by default, unverified locally).
+
+Enforcement points in our engine:
 
 | Limit family | Enforcement point |
 |---|---|
@@ -539,7 +738,7 @@ existing callers keep working. Enforcement points in our engine:
 | Aggregate work: `maxWorkUnits`, `maxExecDepth` | Budget shared by a fiber and all its descendants (nested `bash -c`, `eval`, `$(...)`, `ctx.exec`), so nesting cannot multiply the per-exec counters |
 | Wall time: `maxExecutionTimeMs`, `maxExtensionCleanupTimeMs` | Checked by the host at each fuel slice and around each host call |
 | Bytes: `maxStringLength`, `maxHeredocSize`, `maxOutputSize`, `maxLiveBytes`, `maxInputBytes`, `maxFileSystemBytes` | Budget charge before every growth (section 2.4, point 4) |
-| Memory ceiling | Instance `maximum` pages derived from the profile (point 5) |
+| Memory ceiling | Kernel allocator ceiling set by `configure` (section 2.4, point 5); link-time `maximum` and the platform limiter as backstops |
 | Recursion: `maxCallDepth`, `maxSubstitutionDepth`, `maxSourceDepth`, parser depth 200 | Explicit-stack depth counters |
 | Input: `maxSourceBytes`, token count | Before parsing. The reference effectively caps scripts at 1 000 000 chars; we enforce `maxSourceBytes` as documented and record the difference in the divergence list |
 | Expansion: brace results, `maxGlobOperations`, globstar segment count (reference: 5), `maxArrayElements` | Expansion engine |
@@ -555,10 +754,10 @@ existing callers keep working. Enforcement points in our engine:
 | Grammar-based generation | Own JS generator with a seeded PRNG; every failure is reproducible from a printed seed |
 | Mutation fuzzing | Byte-level mutations of our own corpus, run **only against our engine** (`parse`, `exec`) with tight limits |
 | Oracles on our engine | No trap and no host exception; termination within fuel and memory limits; no host capability call when none is granted; determinism for a given seed; no stale resume accepted after revocation |
-| Differential oracle against the system bash | **Never fed fuzzed or mutated scripts.** Two inputs only: (1) recorded fixtures: hand-written, reviewed scripts run once by a recorder and replayed from committed expected outputs; (2) a generated subset built from an AST generator that can only emit shell builtins, arithmetic, expansions and control flow, with **no external command, no path-bearing redirection outside the work directory, no `eval`/`source` of generated strings, no background jobs**. Execution is confined: fresh empty directory under `TMPDIR` (never `/tmp`), `env -i`, empty `PATH`, `bash --norc --noprofile -r` (restricted mode), `ulimit` caps on CPU time, file size and processes, a wall-clock timeout, and a user/network namespace (`unshare -Urn`) when the host allows it. The generator's safety property (no external command reachable) is itself unit-tested |
+| Differential oracle against the system bash | **Never fed fuzzed or mutated scripts.** Two inputs only: (1) recorded fixtures: hand-written, reviewed scripts run once by a recorder and replayed from committed expected outputs; (2) a generated subset built from an AST generator that can only emit shell builtins, arithmetic, expansions and control flow, with **no external command, no path-bearing redirection outside the work directory, no `eval`/`source` of generated strings, no background jobs**. Execution is confined: fresh empty directory under `TMPDIR` (never `/tmp`), `env -i`, empty `PATH`, `bash --norc --noprofile` (restricted mode `-r` only for generated scripts without file redirections, since `-r` rejects them), `ulimit` caps on CPU time, file size and processes, a wall-clock timeout, and a user/network namespace (`unshare -Urn`) when the host allows it. The generator's safety property (no external command reachable) is itself unit-tested |
 | Adversarial suites | Own cases per threat class of section 1.5: parser bombs, expansion bombs, path traversal, symlink and special-file escapes on the host FS adapters, redirect chains and DNS rebinding on the network adapter, output floods, deep recursion, regex blowups (matching and compilation), NUL bytes and invalid UTF-8, keys such as `__proto__`, archive bombs, late async continuations after abort |
 | Native-side fuzzing | Kernel compiled natively and driven by the seeded generator in a `cargo test` binary with debug assertions and overflow checks |
-| Coverage-guided fuzzing | Valuable for parser, expansion, regex compiler, codecs and path canonicalization. The usual tool (`cargo-fuzz`/libFuzzer) is a third-party dev crate on a nightly toolchain: it is not part of the v1 gate; adopting it as a non-gating, out-of-manifest dev tool needs a tooling justification and is deferred to the EVOL rung |
+| Coverage-guided fuzzing | Valuable for parser, expansion, regex compiler, codecs and path canonicalization. The usual tool (`cargo-fuzz`/libFuzzer) is a third-party dev crate on a nightly toolchain: it is never part of `make check`. Whether a campaign run from git-ignored `tmp/fuzz/` is required in lot L11 before 1.0 is open question O8 |
 | Regression corpus | Every failing seed becomes a named test under `test/security/` |
 | Budget | A short deterministic slice in `make check`; long runs via `FUZZ_RUNS` outside the gate |
 
@@ -592,14 +791,14 @@ existing callers keep working. Enforcement points in our engine:
 - Correctness before speed: each workload has a committed expected output (the GNU bash result). An
   engine's timing is reported only if it produces that output; otherwise the cell reads `divergent`.
   Workloads are chosen in the subset where just-bash agrees with GNU bash, so the comparison stays fair
-  under Q3.
+  under B1.
 
 ### 5.3 Reference engines (bench only, never a repo dependency)
 
 | Engine | Install | Location |
 |---|---|---|
 | just-bash | `npm install --ignore-scripts --no-audit --no-fund just-bash@<pinned>` with a local `--cache` | `tmp/bench-engines/just-bash/` (git-ignored) |
-| MoonBash | Mandatory per `rules/MASTER.md`. Not on npm, so it is built once from the reference clone: `moon` toolchain installed under `tmp/bench-tools/`, `moon build --target js --release` (fetches 17 registry packages), kernel artefact `entry.js` wrapped by a small local adapter; commit and artefact SHA-256 recorded. The full package build (pnpm + floating Vite+ versions) is avoided. See Q8 | `tmp/bench-engines/moonbash/` |
+| MoonBash | Mandatory per `rules/MASTER.md`. Not on npm, so it is built once from the reference clone: `moon` toolchain installed under `tmp/bench-tools/`, `moon build --target js --release` (fetches 17 registry packages), kernel artefact `entry.js` wrapped by a small local adapter; commit and artefact SHA-256 recorded. The full package build (pnpm + floating Vite+ versions) is avoided. See O6 | `tmp/bench-engines/moonbash/` |
 | System bash | `/bin/bash --norc --noprofile -c`, external reference for M3/M4 (process spawn included, labelled) | n/a |
 
 `make check-no-deps` keeps guarding the manifests: bench engines never appear in any `package.json`.
@@ -617,7 +816,7 @@ existing callers keep working. Enforcement points in our engine:
   of the baseline. Absolute floors: 0.02 ms for sub-millisecond metrics, 0.5 ms for the others, 1 MB for
   memory.
 
-### 5.5 Proposed performance budgets (OWNER gate Q2)
+### 5.5 Performance budgets (A2: accepted as targets, confirmed after lot L2)
 
 Baselines are the section 1.7 measurements of just-bash 3.6.0 on this machine. All budgets are targets to
 confirm with the vertical slice (lot L2); none is a commitment before that measurement.
@@ -637,220 +836,200 @@ confirm with the vertical slice (lot L2); none is a commitment before that measu
 | M8-M10 | not measured yet | "not slower than just-bash" until measured, then set | n/a |
 
 The gzip budgets assume the measured 36-49% ratio of real `.wasm` files. The cold-start budget assumes a
-first `exec` touching at most about 300 KB of kernel code.
+first `exec` touching at most about 300 KB of kernel code. The M6 kernel budget applies to the core module
+loaded by JS; the component file is a second copy of the same code (section 2.7, O2). The jco glue counts
+in the 60 KB host budget.
 
 ---
 
-## 6. Open OWNER questions
+## 6. Owner decisions and open questions
 
-**Q1 — WASM toolchain.**
-Context: only the x86_64 Rust target is installed; wabt is installed; no zig, no moon, no binaryen. The
-review accepts Rust as target. `wasm-opt` (binaryen) is a native build-time binary, not a runtime
-dependency; it usually reduces size and helps the M6 budget, at the price of one more pinned tool.
-Options: (a) Rust zero-crate, plus `wasm-opt` as a pinned native release-build step; (b) Rust zero-crate
-without `wasm-opt`; (c) Zig; (d) hand-written WAT only.
-Recommendation: (a), with the build still working without `wasm-opt` (dev builds skip it) and the tool
-kept only if lot L2 measures a size gain of at least 10%.
-Consequence: one rustup step pinned by `rust-toolchain.toml`, one pinned binaryen release installed
-outside the repo; we own regex, codecs and parsers.
+### 6.1 Answered
 
-**Q2 — Performance budgets.**
-Context: section 5.5, based on measured just-bash numbers and on a boot probe that showed executed code
-costs about 37 us per KB to compile.
-Options: (a) accept the table as targets and confirm after L2; (b) tighten cold start to <= 15 ms now;
-(c) gate only on "never slower than just-bash" for v1.
-Recommendation: (a), with the noise-floored regression gate of section 5.4.
-Consequence: budgets drive the single-binary decision and forbid lazy JS chunks on the hot path.
+| Id | Question | Owner decision | Where applied |
+|---|---|---|---|
+| A1 (Q1) | WASM toolchain | **ANSWERED.** Rust to `wasm32-wasip2`, Component Model, dedicated WIT; no `wasm32-unknown-unknown`, no `wasm-bindgen`; runs in wasmCloud/K8s (composable through `wac`) and in the browser (`jco transpile` at packaging); Rust and `wasm-opt` only in the release pipeline; Cargo profile first, `wasm-opt` only on the core module before componentization and only with a proven gain >= 10%; compile-time WIT bindings only; 0 runtime dependency, 0 npm dependency in the deliverable | Sections 2.2-2.7, 3.3 |
+| A2 (Q2) | Performance budgets | **ANSWERED.** Accepted as targets, confirmed after lot L2 | Section 5.5 |
+| A4 (Q4) | Scope of v1 and delivery order | **ANSWERED.** No owner preference: the staged recommendation applies (tier 1, then `awk`/`jq`, then tier 3; python3, js-exec, sqlite3, xan, html-to-markdown out of v1). The `yq` format scope is carved out as O5 | Section 3.1 |
+| Q5 | Shipping the `.wasm` | **ANSWERED by A1.** Prebuilt artefacts in the published package; never built by consumers; `*.wasm` stays git-ignored, so consumers use published packages, not git refs. Remaining choice: O2 | Section 3.3 |
+| Q11 | Target runtimes | **ANSWERED by A1.** Node, browser and wasmCloud in v1 | Section 2.5 |
+| — | Repository and publication | **ANSWERED.** Public GitHub repository; npm pre-release (0.x, `next` tag) once the core passes its parity tests | `BRANCH.md` |
+| — | Model mapping per lot | **ANSWERED.** Owned by the design lane (Fable 5.2) and the review lane (Carbon), accountable for spend and velocity | Section 7 |
 
-**Q3a — Shell semantics when just-bash differs from GNU bash.**
-Context: just-bash has 32-bit bitwise arithmetic, double-based arithmetic elsewhere, and pending
-`errexit`/IFS edge cases (section 1.4).
-Options: (a) bug-for-bug just-bash; (b) GNU bash 5.2 behaviour as the truth, just-bash API as the shape;
-(c) just-bash by default with a `strict-bash` switch.
-Recommendation: (b), with a published divergence list.
-Consequence: differential fixtures are recorded against the system bash; a few just-bash users may see
-different, bash-conformant output.
+### 6.2 Open questions
 
-**Q3b — Default limit profile.**
-Context: the reference defaults to `normal` (1 GiB VFS, 256 MiB output, 100k commands, 1 h) and offers
-`hardened` (128 MiB VFS, 10 MiB output, 10k commands and loop iterations, 30 s). Our memory ceiling is
-derived from the profile: 1 856 MiB for `normal`, 266 MiB for `hardened`; linear memory never shrinks.
-Options: (a) `normal` by default, as the reference; (b) `hardened` by default; (c) `normal` byte and step
-limits with a lower default memory ceiling (512 MiB) that returns a limit error first.
-Recommendation: (a) for drop-in compatibility (10 000 loop iterations and 10 MiB of output break ordinary
-agent scripts), with `hardened` documented as the setting for untrusted multi-tenant workloads.
-Consequence: with (a) a single instance may grow to 1.8 GiB if a script uses its full allowance;
-embedders running many sandboxes should select `hardened` or set explicit limits.
-
-**Q4 — Scope of v1 and delivery order.**
-Context: 85 command names plus 5 opt-in in the reference; tiers of section 3.1.
-Options: (a) tier 1 first (pre-release), then `awk`/`jq`, then tier 3; python3, js-exec, sqlite3, xan,
-html-to-markdown out of v1; `yq` limited to YAML/JSON first; (b) all 80 kernel commands before any
-release; (c) shell and tier 1 only for v1, everything else after.
+**O1 — Default limit profile (gate A3, redone for the component architecture).**
+Context: linear memory never shrinks; wasmCloud's default per-component cap is 256 MiB (unverified
+locally); the reference default (`normal`) allows 1 GiB of VFS and needs a 1 856 MiB ceiling; the
+reference `hardened` profile stops loops at 10 000 iterations. Section 4.3 defines four profiles in which
+byte caps always sum to the ceiling.
+Options: (a) `contain` by default everywhere (256 MiB ceiling, reference step limits of `normal`, 60 s);
+(b) `hardened` by default (256 MiB ceiling, 10 000 commands and loop iterations, 30 s); (c) `normal` by
+default as in the reference (1 856 MiB ceiling; wasmCloud hosts must raise their cap or select a profile);
+(d) `normal` in the Node/browser facade and `contain` in the session driver.
 Recommendation: (a).
-Consequence: parity is reached in stages; the parity report lists each command as `covered`, `partial` or
-`not covered`.
+Consequence: one behaviour in every environment and a default that fits an unmodified wasmCloud host.
+Scripts that need more than 128 MiB of files or 32 MiB of output get a limit error until the embedder
+selects `normal`; this is a documented divergence from the just-bash default.
 
-**Q5 — Shipping the `.wasm` artefact.**
-Context: consumers must not need Rust. Committing the binary lets a fresh clone run tests without Rust but
-adds roughly 1 MB to git history per kernel change. Embedding base64 in JS adds 33% size and a decode on
-cold start.
-Options: (a) `.wasm` not committed: built by `make build`, shipped as a binary file in the npm tarball,
-verified by a two-build byte-identity check and a recorded SHA-256; (b) `.wasm` committed and verified by a
-rebuild-and-compare gate; (c) as (a), plus an opt-in `/inline` entry with the binary embedded for bundlers
-that cannot load a file.
-Recommendation: (c). Contributors and CI need the pinned Rust toolchain anyway; section 2.2 is aligned on
-this (no committed binary).
-Consequence: `make test` requires a prior `make build`; releases are reproducible from a tag.
+**O2 — Artefact split between npm and OCI.**
+Context: JS consumers need the jco output (core module + glue + types); `wac`/wasmCloud consumers need the
+component. Shipping both in one tarball roughly doubles the WASM bytes on disk (only one is loaded).
+Options: (a) one npm package with the component, the `.wit` and the jco output, plus the same component
+pushed to an OCI registry for wasmCloud deployments; (b) npm carries only the jco output and the `.wit`,
+the component is published to OCI and GitHub Releases only; (c) two npm packages (`@sentropic/bash` for JS,
+`@sentropic/bash-component` for the component).
+Recommendation: (a), revisited if the tarball exceeds 2 MB compressed.
+Consequence: TS repositories get everything from npm with no extra tool; the OCI digest and the npm
+component file must be the same bytes (checked at release).
 
-**Q6 — Host language and type checking.**
-Context: the host is a few hundred lines. node 22.22.1 does not strip types without a flag
-(`process.features.typescript` is false). Runtime tests cannot validate `.d.ts` files, so declarations
-need a real type check, and `typescript` is a third-party tool.
-Options: (a) ESM JavaScript with JSDoc + hand-written `.d.ts`, checked by `tsc --noEmit` on consumer
-fixtures with a pinned `typescript` installed under git-ignored `tmp/` (in no manifest); (b) same sources,
-`typescript` declared as a justified devDependency; (c) TypeScript sources with a `tsc` build step.
+**O3 — Generation of the Rust WIT bindings.**
+Context: A1 allows compile-time binding generation only. The `wit-bindgen` crate is a proc-macro with its
+own compile-time crate tree in `Cargo.lock`; the `wit-bindgen` CLI can emit the same glue as a source
+file; the contract is small enough to write the canonical-ABI glue by hand.
+Options: (a) `wit-bindgen-cli` as a pinned generator, output committed and reviewed, `Cargo.lock` stays at
+one package; (b) the `wit-bindgen` proc-macro crate, pinned in `Cargo.lock`; (c) hand-written glue, checked
+by `wasm-tools` validation and round-trip tests.
+Recommendation: (a), with (c) as fallback if the generated code cannot be made `no_std` without a runtime
+crate (to be checked in L0).
+Consequence: zero crates in the kernel; the generator runs only when the WIT changes.
+
+**O4 — wasmCloud linking topology.**
+Context: a wasmCloud component keeps no memory between invocations (unverified locally), while a bash
+session keeps its VFS across `exec` calls.
+Options: (a) static composition: the TS orchestrator and the kernel are linked with `wac` into one
+component and a session lives inside one invocation; stateless calls across the lattice use
+`exec-oneshot`; (b) stateless only in v1: every call passes its files in and gets the modified files back;
+(c) a long-lived host-managed service holds the sessions, addressed over the lattice.
 Recommendation: (a).
-Consequence: no build step for the host; one out-of-manifest dev tool to pin and justify; type parity with
-just-bash is checked, not assumed.
+Consequence: session state lasts as long as the orchestrator's invocation; cross-invocation persistence
+is the orchestrator's job (journal to a blob or key-value capability). (c) depends on wasmCloud features
+to be confirmed with the owner's version.
 
-**Q7 — AST and transform API compatibility.**
-Context: just-bash exports `parse()`, AST node types and a transform/serialize pipeline used by plugins.
-Options: (a) not in v1; (b) expose an AST as JSON produced by the kernel, shape-compatible with just-bash;
-(c) own AST shape.
-Recommendation: (a) for v1, (b) afterwards if a consumer needs it.
-Consequence: v1 is a drop-in for `Bash.exec` users, not for transform-plugin users.
+**O5 — `yq` input formats in v1.**
+Context: the reference `yq` reads YAML, JSON, XML, TOML, INI and CSV through third-party parsers; each
+format is an own parser for us.
+Options: (a) YAML and JSON only; (b) YAML, JSON, TOML and INI; (c) all six formats.
+Recommendation: (a), the others after parity.
+Consequence: `yq` is reported `partial` in the parity table until the other formats land.
 
-**Q8 — MoonBash in the benchmark.**
-Context: `rules/MASTER.md` makes the benchmark against MoonBash mandatory. MoonBash is not on npm. Building
-it needs the `moon` toolchain (vendor installer, not present) and a network fetch of 17 registry packages;
-its full package build additionally needs pnpm and floating `latest` versions of Vite+.
-Options: (a) install `moon` under `tmp/bench-tools/`, build only the release JS kernel once, wrap it with
-a local adapter, record commit and SHA-256; (b) full MoonBash package build with pnpm and Vite+; (c) owner
-amendment of `rules/MASTER.md` waiving MoonBash until it is published (a rule change through a branch
-exception, not a study decision).
+**O6 — MoonBash in the benchmark.**
+Context: `rules/MASTER.md` makes it mandatory. MoonBash is not on npm; building it needs the `moon`
+toolchain and a network fetch of 17 registry packages; its full package build also needs pnpm and floating
+`latest` versions of Vite+.
+Options: (a) install `moon` under `tmp/bench-tools/`, build only the release JS kernel once, wrap it with a
+local adapter, record commit and SHA-256; (b) full MoonBash package build; (c) owner amendment of
+`rules/MASTER.md` waiving MoonBash until it is published.
 Recommendation: (a).
-Consequence: one more vendor toolchain on the bench machine only; with (c) the rule text changes and the
-MoonBash column is reported as `source-gap`.
+Consequence: one vendor toolchain on the bench machine only; with (c) the rule text changes and the
+MoonBash column reads `source-gap`.
 
-**Q9 — Regex semantics.**
-Context: no third-party engine allowed; agents use ERE and Perl-like syntax in grep/sed/awk.
-Options: (a) linear-time engine for BRE/ERE + common Perl classes, bounded backtracking only for
-backreferences, compile-size caps; (b) full backtracking engine with fuel; (c) host `RegExp` fallback.
-Recommendation: (a); `grep -P` lookaround reported as unsupported in v1.
-Consequence: ReDoS-free by construction; a small set of PCRE-only patterns fails with a clear error.
-
-**Q10 — Synchronous execution API.**
-Context: when a script needs no async capability the kernel finishes in one call, so a synchronous
-`execSync` is possible on Node; just-bash has none.
-Options: (a) add `execSync`, which throws a typed error at call time if an async capability is configured
-(host-backed or custom `fs`, lazy files with async providers, `fetch`, real `sleep`, async custom
-commands); (b) keep the API identical to just-bash.
-Recommendation: (a).
-Consequence: a small documented addition; no per-exec instance isolation option is offered (it would lose
-the persistent VFS, section 2.4 point 6).
-
-**Q11 — Target runtimes for v1.**
-Context: just-bash ships a browser bundle and runs on edge runtimes. Our Node path compiles the module
-synchronously; browsers may restrict synchronous compilation of large modules on the main thread and some
-edge runtimes only accept statically imported modules (general platform knowledge, unverified on this
-machine). `exec` is async, so lazy async instantiation is compatible with the API.
-Options: (a) Node >= 22 only in v1, browser/edge entry later; (b) Node + browser in v1; (c) Node + browser
-+ edge workers in v1.
-Recommendation: (a), with the host written so that the loader is the only runtime-specific part.
-Consequence: with (a) `./browser` is tier C; with (b)/(c) a browser test rig is needed and `execSync` is
-Node-only.
-
-**Q12 — Concurrency and trap recovery on one `Bash`.**
-Context: the reference lets overlapping `exec` calls interleave. Our fibers support that. After a trap
-(kernel bug) linear memory is untrusted.
-Options: (a) interleaved fibers; trap poisons the instance; journal of dirty files opt-in; (b) interleaved
-fibers; journal on by default (committed files survive a trap, at the cost of a host-side copy of modified
-files); (c) FIFO-serialized top-level execs with re-entrant bypass; trap poisons the instance.
-Recommendation: (a).
-Consequence: with (a) a kernel bug can lose the in-memory VFS of that `Bash` unless the embedder enabled
-the journal or uses a host-backed `fs`; traps are release-blocking defects.
-
-**Q13 — Single kernel binary versus companion binaries.**
-Context: a separate `.wasm` per companion duplicates the allocator and forces copies or host calls to reach
-the core VFS; unused code in one binary costs only validation.
-Options: (a) one kernel binary with all tiers, companions as JS facades; (b) one binary per companion;
-(c) one workspace producing a `full` and a `slim` binary.
-Recommendation: (a), keeping (c) available if the size budget is exceeded.
-Consequence: `awk`/`jq` work zero-copy on the VFS; the published core grows with every command added.
-
-**Q14 — Clean-room lane separation.**
-Context: just-bash, the Oils spec cases and MoonBash are Apache-2.0; our output is MIT. Build lanes that
-read reference sources while writing code or tests risk structural copying.
+**O7 — Clean-room lane separation.**
+Context: just-bash, the Oils spec cases and MoonBash are Apache-2.0; our output is MIT.
 Options: (a) two rooms: only the design lane reads `tmp/refs/` and writes behavioural specs; build and
-test-writing lanes never read it and validate against the spec, POSIX/GNU documentation and the system
-bash; (b) one room with a written no-copy rule and review; (c) two rooms for code, one room for tests.
-Recommendation: (a), enforced by lane configuration (no `tmp/refs/` in build worktrees) and stated in
-every lot brief.
-Consequence: specs must be complete enough to build from; design cost per lot rises, licensing risk drops.
+test-writing lanes never read it; (b) one room with a written no-copy rule and review; (c) two rooms for
+code, one room for tests.
+Recommendation: (a), enforced by lane configuration and stated in every lot brief.
+Consequence: specs must be complete enough to build from; the design and review overhead of section 7
+(about 40%) is the price.
+
+**O8 — Coverage-guided fuzzing before 1.0.**
+Context: seeded generators without coverage feedback rarely reach deep states of the parser, the regex
+compiler, inflate or tar. `cargo-fuzz` needs a nightly toolchain and third-party dev crates.
+Options: (a) a `cargo-fuzz` campaign run from git-ignored `tmp/fuzz/`, out of every manifest and out of
+`make check`, required by lot L11 before 1.0; (b) seeded fuzzing only; (c) an own coverage-guided loop on
+rustc's coverage instrumentation, with no third-party crate.
+Recommendation: (a).
+Consequence: a nightly toolchain and dev crates on the fuzz machine only; findings become seeded
+regression tests in the repo.
+
+**O9 — Batch B: recommendations to confirm together.**
+These had no objection in review. Each line is the recommendation; the alternative is in brackets.
+
+| Id | Topic | Recommendation [alternative] |
+|---|---|---|
+| B1 | Shell semantics when just-bash differs from GNU bash | GNU bash 5.2 is the truth, just-bash API is the shape, divergence list published [bug-for-bug just-bash] |
+| B2 | Host language and type checking | ESM JavaScript with JSDoc and hand-written `.d.ts` for the facade; generated `.d.ts` for the bindings; `tsc --noEmit` from the pinned `tools/` manifest (lockfile committed, `devDependencies` only, never in the root manifest), failing closed when absent [TypeScript sources with a build step] |
+| B3 | AST and transform API | Not in v1 [kernel-produced JSON AST shaped like just-bash] |
+| B4 | Regex semantics | Linear-time engine with compile-size caps, bounded backtracking for backreferences only, no host `RegExp`; `grep -P` lookaround unsupported in v1 [backtracking engine with fuel] |
+| B5 | Synchronous API | `execSync` on Node, throwing a typed error if an async capability is configured [API identical to just-bash] |
+| B6 | Concurrency and trap recovery | Interleaved fibers; a trap poisons the instance; dirty-file journal opt-in [journal on by default] |
+| B7 | Kernel binaries | One kernel component with all tiers; a `slim` build is decided after L2 against the size budget [one binary per companion] |
+| B8 | WIT contract lock | `sentropic:bash@0.1.0` frozen at the end of the EVOL rung after review; additive changes bump the patch, breaking changes the minor, until 1.0 [freeze after L2 measurements] |
+| B9 | Browser verification | A headless Chromium as a test-only tool outside every manifest, for the browser entry tests [browser entry shipped as `unverified` in the pre-release] |
+| B10 | Fallback if a `no_std` `wasm32-wasip2` build cannot link without `wasi-libc` | Stop and return to the owner: the only known alternative builds the same component from a core-only target plus `wasm-tools`, which conflicts with the letter of A1 [accept WASI imports and stub them] |
+| B11 | Native run of the component in tests | `wasmtime` as a pinned test-only tool, proxy for wasmCloud [owner-provided wasmCloud test host] |
 
 ---
 
 ## 7. Lot breakdown and model routing (sketch; the plan rung refines it)
 
-Sizes: S = 1, M = 3, L = 8 points. Builder tiers and relative price per point (estimate, includes
-retries): **Cheap** x1 (Haiku 5.5; Engram Muse 1.3 when its quota is back), **Mid** x2.5 (Codex Sol 6.1 at
-medium effort, never high), **Strong** x5 (Sonnet 5.5; Gemini 4 Argon as second source and for
-security-heavy lots). Fable 5.2 writes each lot's spec and Carbon reviews each lot; neither builds. Cost =
-points x tier factor, in relative units.
+Sizes in points (S = 1, M = 3, L = 8; intermediate values where a lot was split). Builder tiers and
+relative price per point (estimate, includes retries): **Cheap** x1 (Haiku 5.5; Engram Muse 1.3 when its
+quota is back), **Mid** x2.5 (Codex Sol 6.1 at medium effort, never high), **Strong** x5 (Sonnet 5.5;
+Gemini 4 Argon as second source and for security-heavy lots). Fable 5.2 writes each lot's spec and Carbon
+reviews; neither builds. Build cost = points x tier factor.
 
-| Lot | Scope | Size | Builder (fallback) | Cost | Depends on |
+| Lot | Scope | Pts | Builder (fallback) | Cost | Depends on |
 |---|---|---:|---|---:|---|
-| L0 | Toolchain pin, node build script, reproducibility check, `make` targets (scope exception) | S | Haiku 5.5 | 1 | Q1, Q5 |
-| L1 | ABI and host: exec handles, `HOST_CALL` protocol with epochs, revocable membrane, `view()`, module cache, limit-profile plumbing | L | Sonnet 5.5 (Gemini 4 Argon) | 40 | L0 |
-| L2 | Vertical slice: lexer/parser subset, resumable VM, budgeted allocator and chunked buffers, VFS core, **command trait + one-file-per-command registry**, `echo`, realistic cold-start benchmark | L | Sonnet 5.5 (Gemini 4 Argon) | 40 | L1 |
-| L3 | Full lexer and parser: grammar of 1.4, `[[ ]]`, `$(( ))`, heredocs, `$'...'`, `normalizeScript`, parse errors | L | Codex Sol 6.1 medium (Sonnet 5.5) | 20 | L2 |
-| L4 | Expansion engine: parameter ops incl. `${var@op}`, command/arithmetic/process substitution, brace, tilde, glob/extglob/globstar, word splitting | L | Sonnet 5.5 | 40 | L3, L8a |
-| L5 | Interpreter semantics: redirections and fd table, functions, subshells, `set`/`shopt`, errexit, traps subset, arrays, namerefs, special-builtin precedence | L | Sonnet 5.5 | 40 | L4 |
-| L6a | State-coupled builtins: `declare`/`typeset`, `local`, `readonly`, `export`, `unset`, `eval`, `source`, `exec`, `command`, `builtin`, `read`, `mapfile` | M | Codex Sol 6.1 medium (Sonnet 5.5) | 7.5 | L5 |
-| L6b | Leaf builtins: `:`, `true`, `false`, `cd`, `pwd`, `shift`, `dirs`/`pushd`/`popd`, `getopts`, `let`, `hash`, `help`, `type`, `test`/`[`, `wait`, `compgen`/`complete`/`compopt` | M | Haiku 5.5 | 3 | L2 (API), L5 (final wiring) |
-| L7a | VFS complete: default layout, `bash.fs`/`InMemoryFs` proxies, `MountableFs`, lazy files, journal and compaction export | M | Codex Sol 6.1 medium | 7.5 | L2 |
-| L7b | Host FS adapters (`OverlayFs`, `ReadWriteFs`, custom `IFileSystem`) with path-security gates and batched calls | M | Gemini 4 Argon (Sonnet 5.5) | 15 | L1 |
-| L8a | Regex engine (linear-time, compile caps, bounded backrefs) + glob/extglob matcher | L | Sonnet 5.5 (Gemini 4 Argon) | 40 | L2 |
-| L8b | Shared leaf kernels: printf/strftime engine, number parsing, md5/sha1/sha256, base64 | M | Codex Sol 6.1 medium for format; Haiku 5.5 for hashes | 7.5 | L2 |
-| L9a | Hard tier-1 commands: `find`, `xargs`, `sort`, `grep` family, `expr`, `tr`, `bash`/`sh`, `timeout`, `time` | L | Codex Sol 6.1 medium (Sonnet 5.5) | 20 | L2, L8a; re-entrant ones need L5 |
-| L9b | About 38 leaf tier-1 commands, one file each | L | Haiku 5.5 / Engram Muse 1.3, parallel | 8 | L2, L7a, L8b |
-| L10a | Parity harness: `node:test` layout, fixture recorder with the confinement of 4.4, API tier A/B tests | M | Sonnet 5.5 | 15 | L2 |
-| L10b | Parity cases per grammar area and per command, written from the specs | L | Haiku 5.5 / Engram Muse 1.3 | 8 | L10a, continuous |
-| L11 | Security: adversarial suites, seeded fuzzers (JS and native), membrane and limit-latency tests | L | Gemini 4 Argon (Sonnet 5.5) | 40 | L5, L7b |
-| L12 | Benchmark harness, baseline, noise-floored gate, MoonBash adapter | M | Haiku 5.5 | 3 | L2, Q8 |
-| L13 | `sed`: parser, addresses, pattern/hold cycle, branches with fuel, `-i` | L | Codex Sol 6.1 medium (Sonnet 5.5) | 20 | L8a |
-| L14 | `awk`: lexer, parser, VM, built-in functions | L | Sonnet 5.5; built-ins by Haiku 5.5 | 40 | L8a, L8b |
-| L15a | `jq`: JSON parser, generator/backtracking evaluator, builtins | L | Sonnet 5.5; builtins by Haiku 5.5 | 40 | L8a |
-| L15b | `yq`: YAML reader/writer on the jq evaluator | M | Codex Sol 6.1 medium | 7.5 | L15a, Q4 |
-| L16a | inflate/deflate, gzip family, tar, `diff` | L | Gemini 4 Argon (Sonnet 5.5) | 40 | L2 |
-| L16b | `@sentropic/net`: DNS-pinned fetch adapter + `curl` | M | Gemini 4 Argon | 15 | L1 |
-| L16c | Leaf tier-3 text and fs commands: `comm join column fold expand unexpand split strings od file tree du` | M | Haiku 5.5 / Engram Muse 1.3 | 3 | L2, L7a |
-| L16d | `rg` on the grep kernel | M | Codex Sol 6.1 medium | 7.5 | L9a |
-| L17a | `Sandbox` facade, CLI, standalone facades (`@sentropic/grep`, `ls`, `awk`, `jq`) | M | Haiku 5.5 | 3 | parity of tiers A/B |
-| L17b | AST export, transform pipeline, `serialize` (only if Q7 = b) | M | Sonnet 5.5 | 15 | L3 |
-| L18 | `@sentropic/make`, after parity | L | Sonnet 5.5 | 40 | parity |
+| L0 | Component pipeline: toolchain pin, `wasm32-wasip2` `no_std` link proof, tool pins with hashes under `tmp/tools/`, `tools/` manifest for jco and tsc, build script, zero-import gate, no-bare-import gate, two-build identity, `make` targets (scope exception) | 3 | Sonnet 5.5 | 15 | A1, O3 |
+| L1 | WIT contract, kernel skeleton (`vfs`/`shell`/`fiber` resources, own allocator with ceiling and budgets, epochs), JS facade over the jco output, membrane, Node and browser loaders | 8 | Sonnet 5.5 (Gemini 4 Argon) | 40 | L0 |
+| L1c | Session driver component, `wac` composition, `wasmtime` smoke test, `exec-oneshot` | 3 | Gemini 4 Argon (Sonnet 5.5) | 15 | L1, O4 |
+| L2 | Vertical slice: lexer/parser subset, resumable VM, chunked buffers, VFS core, command trait + one-file-per-command registry, `echo`; measurements of section 2.7 (size, `wasm-opt` gain, glue, cold start) | 8 | Sonnet 5.5 (Gemini 4 Argon) | 40 | L1 |
+| L3 | Full lexer and parser: grammar of 1.4, `[[ ]]`, `$(( ))`, heredocs, `$'...'`, `normalizeScript`, parse errors | 8 | Sonnet 5.5 | 40 | L2 |
+| L4 | Expansion engine: parameter ops incl. `${var@op}`, substitutions, brace, tilde, glob/extglob/globstar, word splitting | 8 | Sonnet 5.5 | 40 | L3, L8a |
+| L5 | Interpreter semantics: redirections and fd table, functions, subshells, `set`/`shopt`, errexit, traps subset, arrays, namerefs, special-builtin precedence | 8 | Sonnet 5.5 | 40 | L4 |
+| L6a | State-coupled builtins: `declare`/`typeset`, `local`, `readonly`, `export`, `unset`, `eval`, `source`, `exec`, `command`, `builtin`, `read`, `mapfile` | 3 | Codex Sol 6.1 medium; escalate to Sonnet 5.5 on the first failed gate | 7.5 | L5 |
+| L6b | Leaf builtins: `:`, `true`, `false`, `cd`, `pwd`, `shift`, `dirs`/`pushd`/`popd`, `getopts`, `let`, `hash`, `help`, `type`, `test`/`[`, `wait`, `compgen`/`complete`/`compopt` | 3 | Haiku 5.5 | 3 | L2 (API), L5 (wiring) |
+| L7a | VFS complete: default layout, `bash.fs`/`InMemoryFs` facade, `MountableFs`, lazy files, journal and compaction | 3 | Codex Sol 6.1 medium | 7.5 | L2 |
+| L7b | Host FS adapters (`OverlayFs`, `ReadWriteFs`, custom `IFileSystem`) with path-security gates and batched calls | 3 | Gemini 4 Argon (Sonnet 5.5) | 15 | L1 |
+| L8a | Regex engine (linear-time, compile caps, bounded backrefs) + glob/extglob matcher | 8 | Sonnet 5.5 (Gemini 4 Argon) | 40 | L2 |
+| L8b | Shared leaf kernels: printf/strftime engine, number parsing, md5/sha1/sha256, base64 | 3 | Codex Sol 6.1 medium | 7.5 | L2 |
+| L9a-1 | Hard stream commands: `grep` family, `sort`, `tr`, `expr` | 4 | Codex Sol 6.1 medium (Sonnet 5.5) | 10 | L2, L8a |
+| L9a-2 | Re-entrant commands: `find` with `-exec`, `xargs`, `bash`/`sh`, `timeout`, `time` | 4 | Codex Sol 6.1 medium (Sonnet 5.5) | 10 | L5 |
+| L9b | About 44 leaf tier-1 commands, one file each | 8 | Haiku 5.5 / Engram Muse 1.3, parallel | 8 | L2, L7a, L8b |
+| L10a | Parity harness: `node:test` layout, confined fixture recorder (section 4.4), API tier A/B tests | 3 | Sonnet 5.5 | 15 | L2 |
+| L10b | Parity cases per grammar area and per command, written from the specs | 8 | Haiku 5.5 / Engram Muse 1.3 | 8 | L10a, continuous |
+| L11 | Security: adversarial suites, seeded fuzzers (JS and native), membrane and limit-latency tests, coverage-guided campaign (O8) | 8 | Gemini 4 Argon (Sonnet 5.5) | 40 | L5, L7b |
+| L12 | Benchmark harness, baseline, noise-floored gate, MoonBash build and adapter | 3 | Codex Sol 6.1 medium | 7.5 | L2, O6 |
+| L13 | `sed`: parser, addresses, pattern/hold cycle, branches with fuel, `-i` | 8 | Codex Sol 6.1 medium (Sonnet 5.5) | 20 | L8a |
+| L14 | `awk`: lexer, parser, VM, built-in functions | 8 | Sonnet 5.5; built-ins by Haiku 5.5 | 40 | L8a, L8b |
+| L15a | `jq`: JSON parser, generator/backtracking evaluator, builtins | 8 | Sonnet 5.5; builtins by Haiku 5.5 | 40 | L8a |
+| L15b | `yq` on the jq evaluator, formats per O5 | 3 | Codex Sol 6.1 medium | 7.5 | L15a, O5 |
+| L16a-1 | inflate/deflate, gzip family, tar | 5 | Gemini 4 Argon (Sonnet 5.5) | 25 | L2 |
+| L16a-2 | `diff` | 3 | Codex Sol 6.1 medium | 7.5 | L2 |
+| L16b | `@sentropic/net`: DNS-pinned fetch adapter + `curl` | 3 | Gemini 4 Argon | 15 | L1 |
+| L16c | Leaf tier-3 text and fs commands: `comm join column fold expand unexpand split strings od file tree du` | 3 | Haiku 5.5 / Engram Muse 1.3 | 3 | L2, L7a |
+| L16d | `rg` on the grep kernel | 3 | Codex Sol 6.1 medium | 7.5 | L9a-1 |
+| L17a | `Sandbox` facade, CLI, standalone facades (`@sentropic/grep`, `ls`, `awk`, `jq`) | 3 | Haiku 5.5 | 3 | parity of tiers A/B |
+| L17b | AST export, transform pipeline, `serialize` (only if B3 is reversed) | 3 | Sonnet 5.5 | 15 | L3 |
+| L18 | `@sentropic/make`, after parity | 8 | Sonnet 5.5 | 40 | parity |
+| L19 | Browser entry verification: headless test rig, `precompile`, streaming compile | 3 | Codex Sol 6.1 medium | 7.5 | L1, B9 |
 
-Totals (estimate): 160 points, 587 cost units. By tier: Strong 92 points (58% of points, 78% of cost), Mid
-39 points (24%, 17%), Cheap 29 points (18%, 5%). Routing everything to the Strong tier would cost 800
-units; the routing above saves about 27%, and the Mid tier is where further savings are tested first (a
-Mid lot that fails its gate twice is re-routed to its fallback, a Strong lot is never downgraded mid-way).
+Totals (estimate): 168 points, 640 build units. By tier: Strong 103 points (61% of points, 80% of cost),
+Mid 40 points (24%, 16%), Cheap 25 points (15%, 4%). Routing everything to the Strong tier would cost 840
+units; the routing saves about 24%. v1 parity without L17b and L18: 585 build units.
 
-Critical path (sequential, 44 points): `L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6a`, then the parity gate.
+Design and review overhead: under O7 (a) the build lanes work only from specs, so Fable 5.2 specs and
+Carbon reviews are a real share of the spend. Budgeted at **40% of build cost** (range 35-50%): about 256
+units, for a total near **900 units** (about 820 for v1 parity). The plan rung must carry this line per lot.
+
+Review rule: Carbon reviews **every Strong and every Mid lot in full**, and samples Cheap lots (one command
+in five) once the first three of a family pass unchanged. A Mid lot that fails its gate twice is re-routed
+to its fallback (L6a on the first failure, since it is on the critical path); a Strong lot is never
+downgraded mid-way.
+
+Critical path (sequential, 46 points): `L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6a`, then the parity gate.
 Everything else is decoupled from L3-L5 and starts right after L2:
-- `L7a`, `L7b`, `L8a`, `L8b`, `L10a`, `L12`, `L16a`, `L16b` in parallel with L3.
+- `L1c`, `L7a`, `L7b`, `L8a`, `L8b`, `L10a`, `L12`, `L16a-1`, `L16a-2`, `L16b`, `L19` in parallel with L3.
 - Leaf commands `L9b` and `L16c` need only the command trait (L2), the VFS (L7a) and the shared kernels
   (L8b): they are tested through the command trait with byte inputs, without a full shell.
-- `L9a`, `L13`, `L14`, `L15a` start when the regex engine (L8a) lands.
+- `L9a-1`, `L13`, `L14`, `L15a` start when the regex engine (L8a) lands; `L16d` follows `L9a-1`; only
+  `L9a-2` waits for L5.
 - One file per command and a generated registry (defined in L2) keep parallel lanes from editing the same
   file.
-- L2 is the go/no-go point for Q1 and Q2: it produces the first real cold-start, size and `wasm-opt`
-  numbers before any volume work starts.
-
-Spend and velocity rules for the plan rung: each lot brief is self-contained (Q14: no access to
-`tmp/refs/`), carries its test list, and is sized so that a builder session ends in a reviewable PR;
-Carbon reviews Strong and security lots in full and samples Cheap lots (one command in five) once the
-first three of a family pass unchanged.
+- L0 is the go/no-go point for the `no_std` `wasm32-wasip2` path (B10); L2 is the go/no-go point for the
+  budgets (A2) and for `wasm-opt`.
 
 ---
 
@@ -861,6 +1040,10 @@ first three of a family pass unchanged.
 - Measurements in sections 1.7 and 2.1 come from one-off node scripts under the git-ignored `tmp/bench/`
   (just-bash 3.6.0 from npm, synthetic WAT modules assembled with wabt 1.0.36). They are a single-machine
   snapshot and must be re-measured by the lot L12 harness before any budget becomes a gate.
+- "Fact note" in sections 2 and 4 is the review lane's pre-analysis of WASI 0.2 and the component model
+  (`tmp/conductor/lanes/facts-wasip2.md`, outside the repo). Its claims were adopted only where they could
+  be checked locally or are stable public specification; the others are marked unverified. Tool versions
+  come from `cargo search` and `npm view` on 2026-11-15. No tool or target was installed for v3.
 - Items labelled "estimate" (flag coverage classes, kernel size, lot sizes, tier price factors) are
   unverified. Statements about browser and edge-runtime compilation limits are unverified here.
 
@@ -868,7 +1051,10 @@ first three of a family pass unchanged.
 
 ## Appendix A — Review reconciliation
 
-Each finding was checked against `tmp/refs/` or re-measured before being applied.
+Each finding was checked against `tmp/refs/` or re-measured before being applied. Question ids in this
+table are the v2 ids. Mapping to section 6: Q1 = A1, Q2 = A2, Q3a = B1, Q3b = O1, Q4 = A4 and O5, Q5 =
+answered and O2, Q6 = B2, Q7 = B3, Q8 = O6, Q9 = B4, Q10 = B5, Q11 = answered, Q12 = B6, Q13 = B7, Q14 = O7.
+The v2 recommendation of `normal` for Q3b is superseded by O1, and the v2 ABI names by section 2.3.
 
 | Finding | Status | Where fixed / evidence |
 |---|---|---|
@@ -893,3 +1079,28 @@ Each finding was checked against `tmp/refs/` or re-measured before being applied
 | m3 `[[`, `globskipdots`, `$'...'`, `${var@op}` | accepted | 1.3, 1.4, L3-L5 |
 | m4 quantile definitions | accepted | 5.4; re-measurements use the corrected definitions |
 | m5 `ls`/`grep` companion boundary | accepted | 3.1 (JS facades over the kernel) |
+
+---
+
+## Appendix B — v3 changes (owner decision A1, fact note, v2 verification)
+
+| Input | Status | Where applied / evidence |
+|---|---|---|
+| A1: `wasm32-wasip2`, Component Model, WIT | applied | 2.2-2.7, 3.3; the v2 ad-hoc ABI (`exec_create`, `fs_op`) is replaced by WIT resources |
+| A1: wasmCloud and browser | applied | 2.5; browser moved into v1 (3.2, L19); wasmCloud platform facts are unverified locally |
+| A1: release-only toolchain, prebuilt artefacts | applied | 2.6, 3.3 |
+| A1: Cargo profile first, `wasm-opt` before componentization if >= 10% | applied | 2.6; decision measured in L2 |
+| A1: compile-time bindings only, 0 npm dependency | applied | 2.3 (zero-import world, `no_std`), O3 |
+| Fact note: zero-import world, `no_std` + `alloc`, `list<u8>`, inverted control | adopted | 2.3; linker flags verified locally, the `no_std` link itself is unverified (L0, B10) |
+| Fact note: tool versions | corrected | 2.6: registries show `jco` 1.42.0, `jco-transpile` 0.24.0, `wac-cli` 0.12.0, `wit-bindgen` 0.63.0, `wasm-tools` 1.263.0 |
+| Fact note: WASI 0.3 ratification and support, jco flags, wasmCloud defaults and statelessness | kept as unverified | 2.3, 2.5 |
+| Fact note: per-profile `maximum` pages | amended | The memory is defined in the core module, so the ceiling is enforced by the kernel allocator (2.4 point 5) |
+| Fact note: four coherent profiles | adopted | 4.3, O1 |
+| v2 dispute 1: coherent byte caps | accepted | 4.3, O1 |
+| v2 dispute 2: `yq` scope, 82 kernel commands | accepted | 3.1, O5 |
+| v2 dispute 3: `tsc` location | accepted, reconciled | B2: dedicated `tools/` manifest with a committed lockfile, outside the root manifest, failing closed |
+| v2 dispute 4: coverage-guided fuzzing | accepted as a question | 4.4, O8, L11 |
+| v2 dispute 5: routing and spend | accepted | Section 7: L3 Strong, L12 Mid, L9a and L16a split, full review of Mid lots, 40% design and review overhead |
+| v2 note: shared `InMemoryFs` instance versus per-`Bash` grants and limits | accepted | `shell` resource (2.3), 2.4 point 2 |
+| v2 note: `bash -r` rejects file redirections | accepted | 4.4 |
+
