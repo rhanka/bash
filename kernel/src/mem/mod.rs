@@ -3,8 +3,10 @@
 //! * Errors: [`MemError`], [`LimitId`], [`MemResult`].
 //! * Instance ceiling: [`configure`], [`raise_ceiling`], [`usage`] on top of a global allocator wrapper.
 //! * Budgets: [`Budget`], a nestable logical byte cap.
-//! * Containers: [`KVec`], [`KBytes`], [`KString`], [`KBox`], [`KRc`], [`KMap`], all fallible, with
-//!   [`TryClone`]. Nothing here grows infallibly.
+//! * Containers: [`KVec`], [`KBytes`], [`KString`], [`KBox`], [`KRc`], [`KMap`] (a B-tree), [`KInsertMap`]
+//!   (insertion-ordered) and [`KChunks`] (chunked bytes), all fallible, with [`TryClone`]. Nothing here grows
+//!   infallibly.
+//! * Accounting: [`footprint`], [`headroom`], [`reserve_scope`].
 //! * Transfer hook: [`cabi_realloc`], [`transfer_free`].
 //!
 //! The module is single-threaded by design: its types are neither `Send` nor `Sync`.
@@ -14,11 +16,13 @@ extern crate alloc;
 mod boxed;
 mod budget;
 mod ceiling;
+mod chunks;
 mod clone;
 mod error;
 #[cfg(any(target_arch = "wasm32", test))]
 mod heap;
 mod headroom;
+mod insertmap;
 mod map;
 mod rc;
 mod reserve;
@@ -30,10 +34,12 @@ mod vec;
 
 pub use boxed::KBox;
 pub use budget::Budget;
+pub use chunks::KChunks;
 pub use ceiling::{configure, raise_ceiling, usage, ConfigError, Usage};
 pub use clone::TryClone;
 pub use error::{LimitId, MemError, MemResult};
 pub use headroom::{headroom, set_headroom};
+pub use insertmap::KInsertMap;
 pub use map::KMap;
 pub use rc::KRc;
 pub use reserve::reserve_scope;
