@@ -69,9 +69,20 @@ function npmInstalled(npmDir, want) {
 function fetchNpm() {
   const src = join(repoRoot, "tools");
   const npmDir = join(dir, "npm");
-  const lockSrc = readFileSync(join(src, "package-lock.json"));
+  const lockSrc = readJson(join(src, "package-lock.json"));
   const want = readJson(join(src, "package.json")).devDependencies;
-  const same = () => existsSync(join(npmDir, "package-lock.json")) && readFileSync(join(npmDir, "package-lock.json")).equals(lockSrc);
+  // npm versions rewrite lockfile metadata differently, so the check compares what was resolved: the same
+  // package set, each with the same version, resolved URL and integrity.
+  const resolved = (lock) =>
+    JSON.stringify(
+      Object.entries(lock.packages ?? {})
+        .filter(([key]) => key !== "")
+        .map(([key, p]) => [key, p.version, p.resolved, p.integrity])
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    );
+  const same = () =>
+    existsSync(join(npmDir, "package-lock.json")) &&
+    resolved(readJson(join(npmDir, "package-lock.json"))) === resolved(lockSrc);
   if (same() && npmInstalled(npmDir, want)) {
     console.log("tool npm-tools verified");
     return;
