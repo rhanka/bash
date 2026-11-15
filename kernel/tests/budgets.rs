@@ -290,7 +290,7 @@ fn preservation() {
     assert_eq!((v.len(), v.capacity(), b8.used()), (0, 0, 0));
     assert_eq!(Rc::strong_count(&tracker), 1, "dropped");
     // try_insert on a map: unchanged, key and value dropped; replacing never allocates.
-    let b16 = root(ID, 16 * core::mem::size_of::<(u32, Rc<()>)>() as u64);
+    let b16 = root(ID, BIG);
     let mut m: KMap<u32, Rc<()>> = KMap::new_in(&b16);
     assert_eq!(m.try_insert(1, tracker.clone()).map(|o| o.is_none()), Ok(true));
     let tight = root(ID, b16.used());
