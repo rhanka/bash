@@ -1,7 +1,7 @@
 //! Adapter between the generated contract types and the kernel proper. Conversions copy: the contract
 //! types own `Vec`s and `String`s from the global allocator, the kernel works on `kernel::mem` containers.
 use super::kernel::exports::sentropic::bash::engine as E;
-use super::kernel::sentropic::bash::types as T;
+use super::kernel::exports::sentropic::bash::types as T;
 use super::rt;
 use crate::fiber::{self, CallError, Chan, Fiber, HostReq, Outcome, Status, Step};
 use crate::fs::{self, Code, Ok_, Op, Vfs};

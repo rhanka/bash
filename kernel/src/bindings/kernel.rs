@@ -5,1241 +5,1245 @@
 //   * bitflags_path: "crate::bindings::rt::bitflags"
 //   * disable_custom_section_link_helpers
 #[allow(dead_code, clippy::all)]
-pub mod sentropic {
-  pub mod bash {
-
-    #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-    pub mod types {
-      
-      use super::super::super::_rt;
-      pub type Bytes = _rt::Vec::<u8>;
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum Profile {
-        Micro,
-        Contain,
-        Hardened,
-        Normal,
-      }
-      impl ::core::fmt::Debug for Profile {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            Profile::Micro => {
-              f.debug_tuple("Profile::Micro").finish()
-            }
-            Profile::Contain => {
-              f.debug_tuple("Profile::Contain").finish()
-            }
-            Profile::Hardened => {
-              f.debug_tuple("Profile::Hardened").finish()
-            }
-            Profile::Normal => {
-              f.debug_tuple("Profile::Normal").finish()
-            }
-          }
-        }
-      }
-
-      impl Profile{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> Profile{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => Profile::Micro,
-            1 => Profile::Contain,
-            2 => Profile::Hardened,
-            3 => Profile::Normal,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[derive(Clone)]
-      pub struct LimitOverride {
-        pub name: _rt::String,
-        pub value: u64,
-      }
-      impl ::core::fmt::Debug for LimitOverride {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("LimitOverride").field("name", &self.name).field("value", &self.value).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct Limits {
-        pub profile: Profile,
-        pub overrides: _rt::Vec::<LimitOverride>,
-      }
-      impl ::core::fmt::Debug for Limits {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("Limits").field("profile", &self.profile).field("overrides", &self.overrides).finish()
-        }
-      }
-      crate::bindings::rt::bitflags::bitflags! {
-        #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
-        pub struct Grants: u8 {
-          const HOST_FS = 1 << 0;
-          const NETWORK = 1 << 1;
-          const REAL_CLOCK = 1 << 2;
-          const REAL_SLEEP = 1 << 3;
-          const ENTROPY = 1 << 4;
-          const CUSTOM_COMMANDS = 1 << 5;
-        }
-      }
-      #[derive(Clone)]
-      pub struct EnvVar {
-        pub name: Bytes,
-        pub value: Bytes,
-        pub exported: bool,
-      }
-      impl ::core::fmt::Debug for EnvVar {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("EnvVar").field("name", &self.name).field("value", &self.value).field("exported", &self.exported).finish()
-        }
-      }
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct FdEntry {
-        pub fd: u32,
-        pub len: u64,
-      }
-      impl ::core::fmt::Debug for FdEntry {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("FdEntry").field("fd", &self.fd).field("len", &self.len).finish()
-        }
-      }
-      /// content pulled with read-call-input
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct ProcessInfo {
-        pub pid: u32,
-        pub ppid: u32,
-        pub uid: u32,
-        pub gid: u32,
-      }
-      impl ::core::fmt::Debug for ProcessInfo {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ProcessInfo").field("pid", &self.pid).field("ppid", &self.ppid).field("uid", &self.uid).field("gid", &self.gid).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct ShellConfig {
-        pub limits: Limits,
-        pub grants: Grants,
-        pub commands: ::core::option::Option<_rt::Vec::<_rt::String>>,
-        /// none = every kernel command
-        pub custom_commands: _rt::Vec::<_rt::String>,
-        pub env: _rt::Vec::<EnvVar>,
-        pub cwd: ::core::option::Option<Bytes>,
-        pub process_info: ::core::option::Option<ProcessInfo>,
-        pub default_layout: bool,
-        pub trace: bool,
-        /// collect trace events (D.6)
-        pub coverage: bool,
-      }
-      impl ::core::fmt::Debug for ShellConfig {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ShellConfig").field("limits", &self.limits).field("grants", &self.grants).field("commands", &self.commands).field("custom-commands", &self.custom_commands).field("env", &self.env).field("cwd", &self.cwd).field("process-info", &self.process_info).field("default-layout", &self.default_layout).field("trace", &self.trace).field("coverage", &self.coverage).finish()
-        }
-      }
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct ScriptOverflow {
-        pub utf16_units: u64,
-        pub utf8_bytes: u64,
-      }
-      impl ::core::fmt::Debug for ScriptOverflow {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ScriptOverflow").field("utf16-units", &self.utf16_units).field("utf8-bytes", &self.utf8_bytes).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct ExecOpts {
-        pub script: Bytes,
-        /// at most 3 MiB; empty when script-overflow is set
-        pub script_overflow: ::core::option::Option<ScriptOverflow>,
-        pub args: _rt::Vec::<Bytes>,
-        pub env: _rt::Vec::<EnvVar>,
-        pub replace_env: bool,
-        pub cwd: ::core::option::Option<Bytes>,
-        pub raw_script: bool,
-        pub bypass_custom: ::core::option::Option<_rt::String>,
-      }
-      impl ::core::fmt::Debug for ExecOpts {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ExecOpts").field("script", &self.script).field("script-overflow", &self.script_overflow).field("args", &self.args).field("env", &self.env).field("replace-env", &self.replace_env).field("cwd", &self.cwd).field("raw-script", &self.raw_script).field("bypass-custom", &self.bypass_custom).finish()
-        }
-      }
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum ExecStatus {
-        Completed,
-        LimitExceeded,
-        Aborted,
-        Deadline,
-      }
-      impl ::core::fmt::Debug for ExecStatus {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            ExecStatus::Completed => {
-              f.debug_tuple("ExecStatus::Completed").finish()
-            }
-            ExecStatus::LimitExceeded => {
-              f.debug_tuple("ExecStatus::LimitExceeded").finish()
-            }
-            ExecStatus::Aborted => {
-              f.debug_tuple("ExecStatus::Aborted").finish()
-            }
-            ExecStatus::Deadline => {
-              f.debug_tuple("ExecStatus::Deadline").finish()
-            }
-          }
-        }
-      }
-
-      impl ExecStatus{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> ExecStatus{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => ExecStatus::Completed,
-            1 => ExecStatus::LimitExceeded,
-            2 => ExecStatus::Aborted,
-            3 => ExecStatus::Deadline,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[derive(Clone)]
-      pub struct ExecResult {
-        pub exit_code: i32,
-        pub status: ExecStatus,
-        pub limit_name: ::core::option::Option<_rt::String>,
-        pub env: _rt::Vec::<EnvVar>,
-      }
-      impl ::core::fmt::Debug for ExecResult {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ExecResult").field("exit-code", &self.exit_code).field("status", &self.status).field("limit-name", &self.limit_name).field("env", &self.env).finish()
-        }
-      }
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum NodeKind {
-        File,
-        Directory,
-        Symlink,
-      }
-      impl ::core::fmt::Debug for NodeKind {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            NodeKind::File => {
-              f.debug_tuple("NodeKind::File").finish()
-            }
-            NodeKind::Directory => {
-              f.debug_tuple("NodeKind::Directory").finish()
-            }
-            NodeKind::Symlink => {
-              f.debug_tuple("NodeKind::Symlink").finish()
-            }
-          }
-        }
-      }
-
-      impl NodeKind{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> NodeKind{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => NodeKind::File,
-            1 => NodeKind::Directory,
-            2 => NodeKind::Symlink,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct Stat {
-        pub kind: NodeKind,
-        pub size: u64,
-        pub mode: u32,
-        pub mtime_ms: i64,
-        pub dev: u64,
-        pub ino: u64,
-      }
-      impl ::core::fmt::Debug for Stat {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("Stat").field("kind", &self.kind).field("size", &self.size).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).field("dev", &self.dev).field("ino", &self.ino).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct DirEntry {
-        pub name: Bytes,
-        pub kind: NodeKind,
-      }
-      impl ::core::fmt::Debug for DirEntry {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("DirEntry").field("name", &self.name).field("kind", &self.kind).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct WalkEntry {
-        pub path: Bytes,
-        pub info: Stat,
-      }
-      impl ::core::fmt::Debug for WalkEntry {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("WalkEntry").field("path", &self.path).field("info", &self.info).finish()
-        }
-      }
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum FsErrorCode {
-        NotFound,
-        Exists,
-        NotDirectory,
-        IsDirectory,
-        NotEmpty,
-        Permission,
-        Invalid,
-        LinkLoop,
-        TooLarge,
-        NoSpace,
-        Busy,
-        CrossDevice,
-        ReadOnly,
-        Unsupported,
-        Io,
-      }
-      impl ::core::fmt::Debug for FsErrorCode {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            FsErrorCode::NotFound => {
-              f.debug_tuple("FsErrorCode::NotFound").finish()
-            }
-            FsErrorCode::Exists => {
-              f.debug_tuple("FsErrorCode::Exists").finish()
-            }
-            FsErrorCode::NotDirectory => {
-              f.debug_tuple("FsErrorCode::NotDirectory").finish()
-            }
-            FsErrorCode::IsDirectory => {
-              f.debug_tuple("FsErrorCode::IsDirectory").finish()
-            }
-            FsErrorCode::NotEmpty => {
-              f.debug_tuple("FsErrorCode::NotEmpty").finish()
-            }
-            FsErrorCode::Permission => {
-              f.debug_tuple("FsErrorCode::Permission").finish()
-            }
-            FsErrorCode::Invalid => {
-              f.debug_tuple("FsErrorCode::Invalid").finish()
-            }
-            FsErrorCode::LinkLoop => {
-              f.debug_tuple("FsErrorCode::LinkLoop").finish()
-            }
-            FsErrorCode::TooLarge => {
-              f.debug_tuple("FsErrorCode::TooLarge").finish()
-            }
-            FsErrorCode::NoSpace => {
-              f.debug_tuple("FsErrorCode::NoSpace").finish()
-            }
-            FsErrorCode::Busy => {
-              f.debug_tuple("FsErrorCode::Busy").finish()
-            }
-            FsErrorCode::CrossDevice => {
-              f.debug_tuple("FsErrorCode::CrossDevice").finish()
-            }
-            FsErrorCode::ReadOnly => {
-              f.debug_tuple("FsErrorCode::ReadOnly").finish()
-            }
-            FsErrorCode::Unsupported => {
-              f.debug_tuple("FsErrorCode::Unsupported").finish()
-            }
-            FsErrorCode::Io => {
-              f.debug_tuple("FsErrorCode::Io").finish()
-            }
-          }
-        }
-      }
-
-      impl FsErrorCode{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> FsErrorCode{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => FsErrorCode::NotFound,
-            1 => FsErrorCode::Exists,
-            2 => FsErrorCode::NotDirectory,
-            3 => FsErrorCode::IsDirectory,
-            4 => FsErrorCode::NotEmpty,
-            5 => FsErrorCode::Permission,
-            6 => FsErrorCode::Invalid,
-            7 => FsErrorCode::LinkLoop,
-            8 => FsErrorCode::TooLarge,
-            9 => FsErrorCode::NoSpace,
-            10 => FsErrorCode::Busy,
-            11 => FsErrorCode::CrossDevice,
-            12 => FsErrorCode::ReadOnly,
-            13 => FsErrorCode::Unsupported,
-            14 => FsErrorCode::Io,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[derive(Clone)]
-      pub struct FsError {
-        pub code: FsErrorCode,
-        pub path: Bytes,
-      }
-      impl ::core::fmt::Debug for FsError {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("FsError").field("code", &self.code).field("path", &self.path).finish()
-        }
-      }
-      impl ::core::fmt::Display for FsError {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          write!(f, "{:?}", self)
-        }
-      }
-      #[cfg(feature = "std")]
-      impl ::core::error::Error for FsError {}
-      #[derive(Clone)]
-      pub struct ReadReq {
-        pub path: Bytes,
-        pub offset: u64,
-        pub len: u32,
-      }
-      impl ::core::fmt::Debug for ReadReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ReadReq").field("path", &self.path).field("offset", &self.offset).field("len", &self.len).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct WriteReq {
-        pub path: Bytes,
-        pub data: Bytes,
-        pub offset: ::core::option::Option<u64>,
-        /// none = append
-        pub truncate: bool,
-        pub mode: ::core::option::Option<u32>,
-        pub mtime_ms: ::core::option::Option<i64>,
-      }
-      impl ::core::fmt::Debug for WriteReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("WriteReq").field("path", &self.path).field("data", &self.data).field("offset", &self.offset).field("truncate", &self.truncate).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct LazyReq {
-        pub path: Bytes,
-        pub mode: u32,
-        pub mtime_ms: ::core::option::Option<i64>,
-      }
-      impl ::core::fmt::Debug for LazyReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("LazyReq").field("path", &self.path).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct CreateReq {
-        pub path: Bytes,
-        pub mode: u32,
-        pub directory: bool,
-      }
-      impl ::core::fmt::Debug for CreateReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("CreateReq").field("path", &self.path).field("mode", &self.mode).field("directory", &self.directory).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct MkdirReq {
-        pub path: Bytes,
-        pub recursive: bool,
-        pub mode: ::core::option::Option<u32>,
-      }
-      impl ::core::fmt::Debug for MkdirReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("MkdirReq").field("path", &self.path).field("recursive", &self.recursive).field("mode", &self.mode).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct RemoveReq {
-        pub path: Bytes,
-        pub recursive: bool,
-        pub force: bool,
-      }
-      impl ::core::fmt::Debug for RemoveReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("RemoveReq").field("path", &self.path).field("recursive", &self.recursive).field("force", &self.force).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct PairReq {
-        pub source: Bytes,
-        pub target: Bytes,
-        pub recursive: bool,
-      }
-      impl ::core::fmt::Debug for PairReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("PairReq").field("source", &self.source).field("target", &self.target).field("recursive", &self.recursive).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct ChmodReq {
-        pub path: Bytes,
-        pub mode: u32,
-      }
-      impl ::core::fmt::Debug for ChmodReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ChmodReq").field("path", &self.path).field("mode", &self.mode).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct UtimesReq {
-        pub path: Bytes,
-        pub atime_ms: i64,
-        pub mtime_ms: i64,
-      }
-      impl ::core::fmt::Debug for UtimesReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("UtimesReq").field("path", &self.path).field("atime-ms", &self.atime_ms).field("mtime-ms", &self.mtime_ms).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct WalkReq {
-        pub root: Bytes,
-        pub max_depth: u32,
-        pub max_entries: u32,
-      }
-      impl ::core::fmt::Debug for WalkReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("WalkReq").field("root", &self.root).field("max-depth", &self.max_depth).field("max-entries", &self.max_entries).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub enum FsOp {
-        Stat(Bytes),
-        Lstat(Bytes),
-        Exists(Bytes),
-        ReadLink(Bytes),
-        RealPath(Bytes),
-        ReadDir(Bytes),
-        ReadDirPlus(Bytes),
-        Walk(WalkReq),
-        AllPaths,
-        ReadFile(ReadReq),
-        WriteFile(WriteReq),
-        WriteLazy(LazyReq),
-        CreateExclusive(CreateReq),
-        Mkdir(MkdirReq),
-        Remove(RemoveReq),
-        Copy(PairReq),
-        Rename(PairReq),
-        Symlink(PairReq),
-        HardLink(PairReq),
-        Chmod(ChmodReq),
-        Utimes(UtimesReq),
-      }
-      impl ::core::fmt::Debug for FsOp {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            FsOp::Stat(e) => {
-              f.debug_tuple("FsOp::Stat").field(e).finish()
-            }
-            FsOp::Lstat(e) => {
-              f.debug_tuple("FsOp::Lstat").field(e).finish()
-            }
-            FsOp::Exists(e) => {
-              f.debug_tuple("FsOp::Exists").field(e).finish()
-            }
-            FsOp::ReadLink(e) => {
-              f.debug_tuple("FsOp::ReadLink").field(e).finish()
-            }
-            FsOp::RealPath(e) => {
-              f.debug_tuple("FsOp::RealPath").field(e).finish()
-            }
-            FsOp::ReadDir(e) => {
-              f.debug_tuple("FsOp::ReadDir").field(e).finish()
-            }
-            FsOp::ReadDirPlus(e) => {
-              f.debug_tuple("FsOp::ReadDirPlus").field(e).finish()
-            }
-            FsOp::Walk(e) => {
-              f.debug_tuple("FsOp::Walk").field(e).finish()
-            }
-            FsOp::AllPaths => {
-              f.debug_tuple("FsOp::AllPaths").finish()
-            }
-            FsOp::ReadFile(e) => {
-              f.debug_tuple("FsOp::ReadFile").field(e).finish()
-            }
-            FsOp::WriteFile(e) => {
-              f.debug_tuple("FsOp::WriteFile").field(e).finish()
-            }
-            FsOp::WriteLazy(e) => {
-              f.debug_tuple("FsOp::WriteLazy").field(e).finish()
-            }
-            FsOp::CreateExclusive(e) => {
-              f.debug_tuple("FsOp::CreateExclusive").field(e).finish()
-            }
-            FsOp::Mkdir(e) => {
-              f.debug_tuple("FsOp::Mkdir").field(e).finish()
-            }
-            FsOp::Remove(e) => {
-              f.debug_tuple("FsOp::Remove").field(e).finish()
-            }
-            FsOp::Copy(e) => {
-              f.debug_tuple("FsOp::Copy").field(e).finish()
-            }
-            FsOp::Rename(e) => {
-              f.debug_tuple("FsOp::Rename").field(e).finish()
-            }
-            FsOp::Symlink(e) => {
-              f.debug_tuple("FsOp::Symlink").field(e).finish()
-            }
-            FsOp::HardLink(e) => {
-              f.debug_tuple("FsOp::HardLink").field(e).finish()
-            }
-            FsOp::Chmod(e) => {
-              f.debug_tuple("FsOp::Chmod").field(e).finish()
-            }
-            FsOp::Utimes(e) => {
-              f.debug_tuple("FsOp::Utimes").field(e).finish()
-            }
-          }
-        }
-      }
-      #[derive(Clone)]
-      pub enum FsOk {
-        None,
-        Flag(bool),
-        Info(Stat),
-        Path(Bytes),
-        Data(Bytes),
-        Paths(_rt::Vec::<Bytes>),
-        Entries(_rt::Vec::<DirEntry>),
-        EntriesPlus(_rt::Vec::<WalkEntry>),
-      }
-      impl ::core::fmt::Debug for FsOk {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            FsOk::None => {
-              f.debug_tuple("FsOk::None").finish()
-            }
-            FsOk::Flag(e) => {
-              f.debug_tuple("FsOk::Flag").field(e).finish()
-            }
-            FsOk::Info(e) => {
-              f.debug_tuple("FsOk::Info").field(e).finish()
-            }
-            FsOk::Path(e) => {
-              f.debug_tuple("FsOk::Path").field(e).finish()
-            }
-            FsOk::Data(e) => {
-              f.debug_tuple("FsOk::Data").field(e).finish()
-            }
-            FsOk::Paths(e) => {
-              f.debug_tuple("FsOk::Paths").field(e).finish()
-            }
-            FsOk::Entries(e) => {
-              f.debug_tuple("FsOk::Entries").field(e).finish()
-            }
-            FsOk::EntriesPlus(e) => {
-              f.debug_tuple("FsOk::EntriesPlus").field(e).finish()
-            }
-          }
-        }
-      }
-      pub type FsResult= ::core::result::Result<FsOk,FsError>;
-      #[derive(Clone)]
-      pub struct FsBatchReq {
-        pub mount_id: u32,
-        pub ops: _rt::Vec::<FsOp>,
-      }
-      impl ::core::fmt::Debug for FsBatchReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("FsBatchReq").field("mount-id", &self.mount_id).field("ops", &self.ops).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct ChangedFile {
-        pub path: Bytes,
-        pub removed: bool,
-      }
-      impl ::core::fmt::Debug for ChangedFile {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ChangedFile").field("path", &self.path).field("removed", &self.removed).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct Header {
-        pub name: _rt::String,
-        pub value: Bytes,
-      }
-      impl ::core::fmt::Debug for Header {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("Header").field("name", &self.name).field("value", &self.value).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct CommandCall {
-        pub name: _rt::String,
-        pub args: _rt::Vec::<Bytes>,
-        pub cwd: Bytes,
-        pub env: _rt::Vec::<EnvVar>,
-        pub fds: _rt::Vec::<FdEntry>,
-        pub input_len: u64,
-        pub xpg_echo: bool,
-      }
-      impl ::core::fmt::Debug for CommandCall {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("CommandCall").field("name", &self.name).field("args", &self.args).field("cwd", &self.cwd).field("env", &self.env).field("fds", &self.fds).field("input-len", &self.input_len).field("xpg-echo", &self.xpg_echo).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct FetchReq {
-        pub method: _rt::String,
-        pub url: _rt::String,
-        pub headers: _rt::Vec::<Header>,
-        pub input_len: u64,
-        pub follow_redirects: bool,
-        pub max_redirects: ::core::option::Option<u32>,
-        pub timeout_ms: u32,
-        pub max_response_bytes: u64,
-      }
-      impl ::core::fmt::Debug for FetchReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("FetchReq").field("method", &self.method).field("url", &self.url).field("headers", &self.headers).field("input-len", &self.input_len).field("follow-redirects", &self.follow_redirects).field("max-redirects", &self.max_redirects).field("timeout-ms", &self.timeout_ms).field("max-response-bytes", &self.max_response_bytes).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct RedirectHop {
-        pub url: _rt::String,
-        pub status: u16,
-        pub status_text: _rt::String,
-        pub headers: _rt::Vec::<Header>,
-      }
-      impl ::core::fmt::Debug for RedirectHop {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("RedirectHop").field("url", &self.url).field("status", &self.status).field("status-text", &self.status_text).field("headers", &self.headers).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct FetchResp {
-        pub status: u16,
-        pub status_text: _rt::String,
-        pub url: _rt::String,
-        pub headers: _rt::Vec::<Header>,
-        pub redirect_chain: _rt::Vec::<RedirectHop>,
-      }
-      impl ::core::fmt::Debug for FetchResp {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("FetchResp").field("status", &self.status).field("status-text", &self.status_text).field("url", &self.url).field("headers", &self.headers).field("redirect-chain", &self.redirect_chain).finish()
-        }
-      }
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum NetErrorCode {
-        AccessDenied,
-        MethodNotAllowed,
-        RedirectDenied,
-        TooManyRedirects,
-        ResponseTooLarge,
-        Timeout,
-        Network,
-      }
-      impl ::core::fmt::Debug for NetErrorCode {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            NetErrorCode::AccessDenied => {
-              f.debug_tuple("NetErrorCode::AccessDenied").finish()
-            }
-            NetErrorCode::MethodNotAllowed => {
-              f.debug_tuple("NetErrorCode::MethodNotAllowed").finish()
-            }
-            NetErrorCode::RedirectDenied => {
-              f.debug_tuple("NetErrorCode::RedirectDenied").finish()
-            }
-            NetErrorCode::TooManyRedirects => {
-              f.debug_tuple("NetErrorCode::TooManyRedirects").finish()
-            }
-            NetErrorCode::ResponseTooLarge => {
-              f.debug_tuple("NetErrorCode::ResponseTooLarge").finish()
-            }
-            NetErrorCode::Timeout => {
-              f.debug_tuple("NetErrorCode::Timeout").finish()
-            }
-            NetErrorCode::Network => {
-              f.debug_tuple("NetErrorCode::Network").finish()
-            }
-          }
-        }
-      }
-
-      impl NetErrorCode{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> NetErrorCode{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => NetErrorCode::AccessDenied,
-            1 => NetErrorCode::MethodNotAllowed,
-            2 => NetErrorCode::RedirectDenied,
-            3 => NetErrorCode::TooManyRedirects,
-            4 => NetErrorCode::ResponseTooLarge,
-            5 => NetErrorCode::Timeout,
-            6 => NetErrorCode::Network,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[derive(Clone)]
-      pub struct NetError {
-        pub code: NetErrorCode,
-        pub detail: Bytes,
-      }
-      impl ::core::fmt::Debug for NetError {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("NetError").field("code", &self.code).field("detail", &self.detail).finish()
-        }
-      }
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct ClockReading {
-        pub wall_ms: i64,
-        pub monotonic_ns: u64,
-      }
-      impl ::core::fmt::Debug for ClockReading {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("ClockReading").field("wall-ms", &self.wall_ms).field("monotonic-ns", &self.monotonic_ns).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub enum HostReq {
-        FsBatch(FsBatchReq),
-        LazyFile(Bytes),
-        CustomCommand(CommandCall),
-        Fetch(FetchReq),
-        Sleep(u64),
-        Clock,
-        Entropy(u32),
-        TraceClock,
-      }
-      impl ::core::fmt::Debug for HostReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            HostReq::FsBatch(e) => {
-              f.debug_tuple("HostReq::FsBatch").field(e).finish()
-            }
-            HostReq::LazyFile(e) => {
-              f.debug_tuple("HostReq::LazyFile").field(e).finish()
-            }
-            HostReq::CustomCommand(e) => {
-              f.debug_tuple("HostReq::CustomCommand").field(e).finish()
-            }
-            HostReq::Fetch(e) => {
-              f.debug_tuple("HostReq::Fetch").field(e).finish()
-            }
-            HostReq::Sleep(e) => {
-              f.debug_tuple("HostReq::Sleep").field(e).finish()
-            }
-            HostReq::Clock => {
-              f.debug_tuple("HostReq::Clock").finish()
-            }
-            HostReq::Entropy(e) => {
-              f.debug_tuple("HostReq::Entropy").field(e).finish()
-            }
-            HostReq::TraceClock => {
-              f.debug_tuple("HostReq::TraceClock").finish()
-            }
-          }
-        }
-      }
-      #[derive(Clone)]
-      pub enum HostOutcome {
-        Fs(_rt::Vec::<FsResult>),
-        Data(Bytes),
-        CommandExit(i32),
-        Fetched(FetchResp),
-        Clock(ClockReading),
-        Completed,
-        Denied,
-        LimitExceeded(_rt::String),
-        NetFailed(NetError),
-        Failed(Bytes),
-      }
-      impl ::core::fmt::Debug for HostOutcome {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            HostOutcome::Fs(e) => {
-              f.debug_tuple("HostOutcome::Fs").field(e).finish()
-            }
-            HostOutcome::Data(e) => {
-              f.debug_tuple("HostOutcome::Data").field(e).finish()
-            }
-            HostOutcome::CommandExit(e) => {
-              f.debug_tuple("HostOutcome::CommandExit").field(e).finish()
-            }
-            HostOutcome::Fetched(e) => {
-              f.debug_tuple("HostOutcome::Fetched").field(e).finish()
-            }
-            HostOutcome::Clock(e) => {
-              f.debug_tuple("HostOutcome::Clock").field(e).finish()
-            }
-            HostOutcome::Completed => {
-              f.debug_tuple("HostOutcome::Completed").finish()
-            }
-            HostOutcome::Denied => {
-              f.debug_tuple("HostOutcome::Denied").finish()
-            }
-            HostOutcome::LimitExceeded(e) => {
-              f.debug_tuple("HostOutcome::LimitExceeded").field(e).finish()
-            }
-            HostOutcome::NetFailed(e) => {
-              f.debug_tuple("HostOutcome::NetFailed").field(e).finish()
-            }
-            HostOutcome::Failed(e) => {
-              f.debug_tuple("HostOutcome::Failed").field(e).finish()
-            }
-          }
-        }
-      }
-      #[derive(Clone)]
-      pub struct PendingCall {
-        pub epoch: u64,
-        pub req: HostReq,
-      }
-      impl ::core::fmt::Debug for PendingCall {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("PendingCall").field("epoch", &self.epoch).field("req", &self.req).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub enum Step {
-        Done(ExecResult),
-        OutOfFuel,
-        HostCall(PendingCall),
-      }
-      impl ::core::fmt::Debug for Step {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            Step::Done(e) => {
-              f.debug_tuple("Step::Done").field(e).finish()
-            }
-            Step::OutOfFuel => {
-              f.debug_tuple("Step::OutOfFuel").finish()
-            }
-            Step::HostCall(e) => {
-              f.debug_tuple("Step::HostCall").field(e).finish()
-            }
-          }
-        }
-      }
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum CancelReason {
-        Aborted,
-        Deadline,
-        Limit,
-      }
-      impl ::core::fmt::Debug for CancelReason {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            CancelReason::Aborted => {
-              f.debug_tuple("CancelReason::Aborted").finish()
-            }
-            CancelReason::Deadline => {
-              f.debug_tuple("CancelReason::Deadline").finish()
-            }
-            CancelReason::Limit => {
-              f.debug_tuple("CancelReason::Limit").finish()
-            }
-          }
-        }
-      }
-
-      impl CancelReason{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> CancelReason{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => CancelReason::Aborted,
-            1 => CancelReason::Deadline,
-            2 => CancelReason::Limit,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum OutChannel {
-        Stdout,
-        Stderr,
-        Body,
-      }
-      impl ::core::fmt::Debug for OutChannel {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            OutChannel::Stdout => {
-              f.debug_tuple("OutChannel::Stdout").finish()
-            }
-            OutChannel::Stderr => {
-              f.debug_tuple("OutChannel::Stderr").finish()
-            }
-            OutChannel::Body => {
-              f.debug_tuple("OutChannel::Body").finish()
-            }
-          }
-        }
-      }
-
-      impl OutChannel{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> OutChannel{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => OutChannel::Stdout,
-            1 => OutChannel::Stderr,
-            2 => OutChannel::Body,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[repr(u8)]
-      #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum KernelErrorCode {
-        NotConfigured,
-        AlreadyConfigured,
-        Ceiling,
-        InvalidConfig,
-        StaleEpoch,
-        BadState,
-        TooLarge,
-        Denied,
-      }
-      impl ::core::fmt::Debug for KernelErrorCode {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            KernelErrorCode::NotConfigured => {
-              f.debug_tuple("KernelErrorCode::NotConfigured").finish()
-            }
-            KernelErrorCode::AlreadyConfigured => {
-              f.debug_tuple("KernelErrorCode::AlreadyConfigured").finish()
-            }
-            KernelErrorCode::Ceiling => {
-              f.debug_tuple("KernelErrorCode::Ceiling").finish()
-            }
-            KernelErrorCode::InvalidConfig => {
-              f.debug_tuple("KernelErrorCode::InvalidConfig").finish()
-            }
-            KernelErrorCode::StaleEpoch => {
-              f.debug_tuple("KernelErrorCode::StaleEpoch").finish()
-            }
-            KernelErrorCode::BadState => {
-              f.debug_tuple("KernelErrorCode::BadState").finish()
-            }
-            KernelErrorCode::TooLarge => {
-              f.debug_tuple("KernelErrorCode::TooLarge").finish()
-            }
-            KernelErrorCode::Denied => {
-              f.debug_tuple("KernelErrorCode::Denied").finish()
-            }
-          }
-        }
-      }
-
-      impl KernelErrorCode{
-        #[doc(hidden)]
-        pub unsafe fn _lift(val: u8) -> KernelErrorCode{
-          if !cfg!(debug_assertions) {
-            return unsafe { ::core::mem::transmute(val) };
-          }
-
-          match val {
-            0 => KernelErrorCode::NotConfigured,
-            1 => KernelErrorCode::AlreadyConfigured,
-            2 => KernelErrorCode::Ceiling,
-            3 => KernelErrorCode::InvalidConfig,
-            4 => KernelErrorCode::StaleEpoch,
-            5 => KernelErrorCode::BadState,
-            6 => KernelErrorCode::TooLarge,
-            7 => KernelErrorCode::Denied,
-
-            _ => panic!("invalid enum discriminant"),
-          }
-        }
-      }
-
-      #[derive(Clone)]
-      pub struct KernelError {
-        pub code: KernelErrorCode,
-        pub detail: _rt::String,
-      }
-      impl ::core::fmt::Debug for KernelError {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("KernelError").field("code", &self.code).field("detail", &self.detail).finish()
-        }
-      }
-      impl ::core::fmt::Display for KernelError {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          write!(f, "{:?}", self)
-        }
-      }
-      #[cfg(feature = "std")]
-      impl ::core::error::Error for KernelError {}
-      #[repr(C)]
-      #[derive(Clone, Copy)]
-      pub struct MemoryUsage {
-        pub used: u64,
-        pub ceiling: u64,
-        pub high_water: u64,
-      }
-      impl ::core::fmt::Debug for MemoryUsage {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("MemoryUsage").field("used", &self.used).field("ceiling", &self.ceiling).field("high-water", &self.high_water).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub enum TraceValue {
-        Number(f64),
-        Text(Bytes),
-      }
-      impl ::core::fmt::Debug for TraceValue {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          match self {
-            TraceValue::Number(e) => {
-              f.debug_tuple("TraceValue::Number").field(e).finish()
-            }
-            TraceValue::Text(e) => {
-              f.debug_tuple("TraceValue::Text").field(e).finish()
-            }
-          }
-        }
-      }
-      #[derive(Clone)]
-      pub struct TraceDetail {
-        pub key: _rt::String,
-        pub value: TraceValue,
-      }
-      impl ::core::fmt::Debug for TraceDetail {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("TraceDetail").field("key", &self.key).field("value", &self.value).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct TraceEvent {
-        pub category: _rt::String,
-        pub name: _rt::String,
-        pub duration_ms: f64,
-        pub details: _rt::Vec::<TraceDetail>,
-      }
-      impl ::core::fmt::Debug for TraceEvent {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("TraceEvent").field("category", &self.category).field("name", &self.name).field("duration-ms", &self.duration_ms).field("details", &self.details).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct OneshotFile {
-        pub path: Bytes,
-        pub data: Bytes,
-        pub mode: u32,
-      }
-      impl ::core::fmt::Debug for OneshotFile {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("OneshotFile").field("path", &self.path).field("data", &self.data).field("mode", &self.mode).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct OneshotReq {
-        pub files: _rt::Vec::<OneshotFile>,
-        pub config: ShellConfig,
-        pub opts: ExecOpts,
-        pub stdin: Bytes,
-        pub fuel: u64,
-      }
-      impl ::core::fmt::Debug for OneshotReq {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("OneshotReq").field("files", &self.files).field("config", &self.config).field("opts", &self.opts).field("stdin", &self.stdin).field("fuel", &self.fuel).finish()
-        }
-      }
-      #[derive(Clone)]
-      pub struct OneshotResult {
-        pub outcome: ExecResult,
-        pub stdout: Bytes,
-        pub stderr: Bytes,
-        pub changed: _rt::Vec::<OneshotFile>,
-        pub removed: _rt::Vec::<Bytes>,
-      }
-      impl ::core::fmt::Debug for OneshotResult {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-          f.debug_struct("OneshotResult").field("outcome", &self.outcome).field("stdout", &self.stdout).field("stderr", &self.stderr).field("changed", &self.changed).field("removed", &self.removed).finish()
-        }
-      }
-
-    }
-
-  }
-}
-#[allow(dead_code, clippy::all)]
 pub mod exports {
   pub mod sentropic {
     pub mod bash {
 
       #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+      pub mod types {
+        
+        use super::super::super::super::_rt;
+        pub type Bytes = _rt::Vec::<u8>;
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum Profile {
+          Micro,
+          Contain,
+          Hardened,
+          Normal,
+        }
+        impl ::core::fmt::Debug for Profile {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              Profile::Micro => {
+                f.debug_tuple("Profile::Micro").finish()
+              }
+              Profile::Contain => {
+                f.debug_tuple("Profile::Contain").finish()
+              }
+              Profile::Hardened => {
+                f.debug_tuple("Profile::Hardened").finish()
+              }
+              Profile::Normal => {
+                f.debug_tuple("Profile::Normal").finish()
+              }
+            }
+          }
+        }
+
+        impl Profile{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> Profile{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => Profile::Micro,
+              1 => Profile::Contain,
+              2 => Profile::Hardened,
+              3 => Profile::Normal,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[derive(Clone)]
+        pub struct LimitOverride {
+          pub name: _rt::String,
+          pub value: u64,
+        }
+        impl ::core::fmt::Debug for LimitOverride {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("LimitOverride").field("name", &self.name).field("value", &self.value).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct Limits {
+          pub profile: Profile,
+          pub overrides: _rt::Vec::<LimitOverride>,
+        }
+        impl ::core::fmt::Debug for Limits {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("Limits").field("profile", &self.profile).field("overrides", &self.overrides).finish()
+          }
+        }
+        crate::bindings::rt::bitflags::bitflags! {
+          #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
+          pub struct Grants: u8 {
+            const HOST_FS = 1 << 0;
+            const NETWORK = 1 << 1;
+            const REAL_CLOCK = 1 << 2;
+            const REAL_SLEEP = 1 << 3;
+            const ENTROPY = 1 << 4;
+            const CUSTOM_COMMANDS = 1 << 5;
+          }
+        }
+        #[derive(Clone)]
+        pub struct EnvVar {
+          pub name: Bytes,
+          pub value: Bytes,
+          pub exported: bool,
+        }
+        impl ::core::fmt::Debug for EnvVar {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("EnvVar").field("name", &self.name).field("value", &self.value).field("exported", &self.exported).finish()
+          }
+        }
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct FdEntry {
+          pub fd: u32,
+          pub len: u64,
+        }
+        impl ::core::fmt::Debug for FdEntry {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("FdEntry").field("fd", &self.fd).field("len", &self.len).finish()
+          }
+        }
+        /// content pulled with read-call-input
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct ProcessInfo {
+          pub pid: u32,
+          pub ppid: u32,
+          pub uid: u32,
+          pub gid: u32,
+        }
+        impl ::core::fmt::Debug for ProcessInfo {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ProcessInfo").field("pid", &self.pid).field("ppid", &self.ppid).field("uid", &self.uid).field("gid", &self.gid).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct ShellConfig {
+          pub limits: Limits,
+          pub grants: Grants,
+          pub commands: ::core::option::Option<_rt::Vec::<_rt::String>>,
+          /// none = every kernel command
+          pub custom_commands: _rt::Vec::<_rt::String>,
+          pub env: _rt::Vec::<EnvVar>,
+          pub cwd: ::core::option::Option<Bytes>,
+          pub process_info: ::core::option::Option<ProcessInfo>,
+          pub default_layout: bool,
+          pub trace: bool,
+          /// collect trace events (D.6)
+          pub coverage: bool,
+        }
+        impl ::core::fmt::Debug for ShellConfig {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ShellConfig").field("limits", &self.limits).field("grants", &self.grants).field("commands", &self.commands).field("custom-commands", &self.custom_commands).field("env", &self.env).field("cwd", &self.cwd).field("process-info", &self.process_info).field("default-layout", &self.default_layout).field("trace", &self.trace).field("coverage", &self.coverage).finish()
+          }
+        }
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct ScriptOverflow {
+          pub utf16_units: u64,
+          pub utf8_bytes: u64,
+        }
+        impl ::core::fmt::Debug for ScriptOverflow {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ScriptOverflow").field("utf16-units", &self.utf16_units).field("utf8-bytes", &self.utf8_bytes).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct ExecOpts {
+          pub script: Bytes,
+          /// at most 3 MiB; empty when script-overflow is set
+          pub script_overflow: ::core::option::Option<ScriptOverflow>,
+          pub args: _rt::Vec::<Bytes>,
+          pub env: _rt::Vec::<EnvVar>,
+          pub replace_env: bool,
+          pub cwd: ::core::option::Option<Bytes>,
+          pub raw_script: bool,
+          pub bypass_custom: ::core::option::Option<_rt::String>,
+        }
+        impl ::core::fmt::Debug for ExecOpts {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ExecOpts").field("script", &self.script).field("script-overflow", &self.script_overflow).field("args", &self.args).field("env", &self.env).field("replace-env", &self.replace_env).field("cwd", &self.cwd).field("raw-script", &self.raw_script).field("bypass-custom", &self.bypass_custom).finish()
+          }
+        }
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum ExecStatus {
+          Completed,
+          LimitExceeded,
+          Aborted,
+          Deadline,
+        }
+        impl ::core::fmt::Debug for ExecStatus {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              ExecStatus::Completed => {
+                f.debug_tuple("ExecStatus::Completed").finish()
+              }
+              ExecStatus::LimitExceeded => {
+                f.debug_tuple("ExecStatus::LimitExceeded").finish()
+              }
+              ExecStatus::Aborted => {
+                f.debug_tuple("ExecStatus::Aborted").finish()
+              }
+              ExecStatus::Deadline => {
+                f.debug_tuple("ExecStatus::Deadline").finish()
+              }
+            }
+          }
+        }
+
+        impl ExecStatus{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> ExecStatus{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => ExecStatus::Completed,
+              1 => ExecStatus::LimitExceeded,
+              2 => ExecStatus::Aborted,
+              3 => ExecStatus::Deadline,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[derive(Clone)]
+        pub struct ExecResult {
+          pub exit_code: i32,
+          pub status: ExecStatus,
+          pub limit_name: ::core::option::Option<_rt::String>,
+          pub env: _rt::Vec::<EnvVar>,
+        }
+        impl ::core::fmt::Debug for ExecResult {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ExecResult").field("exit-code", &self.exit_code).field("status", &self.status).field("limit-name", &self.limit_name).field("env", &self.env).finish()
+          }
+        }
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum NodeKind {
+          File,
+          Directory,
+          Symlink,
+        }
+        impl ::core::fmt::Debug for NodeKind {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              NodeKind::File => {
+                f.debug_tuple("NodeKind::File").finish()
+              }
+              NodeKind::Directory => {
+                f.debug_tuple("NodeKind::Directory").finish()
+              }
+              NodeKind::Symlink => {
+                f.debug_tuple("NodeKind::Symlink").finish()
+              }
+            }
+          }
+        }
+
+        impl NodeKind{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> NodeKind{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => NodeKind::File,
+              1 => NodeKind::Directory,
+              2 => NodeKind::Symlink,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct Stat {
+          pub kind: NodeKind,
+          pub size: u64,
+          pub mode: u32,
+          pub mtime_ms: i64,
+          pub dev: u64,
+          pub ino: u64,
+        }
+        impl ::core::fmt::Debug for Stat {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("Stat").field("kind", &self.kind).field("size", &self.size).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).field("dev", &self.dev).field("ino", &self.ino).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct DirEntry {
+          pub name: Bytes,
+          pub kind: NodeKind,
+        }
+        impl ::core::fmt::Debug for DirEntry {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("DirEntry").field("name", &self.name).field("kind", &self.kind).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct WalkEntry {
+          pub path: Bytes,
+          pub info: Stat,
+        }
+        impl ::core::fmt::Debug for WalkEntry {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("WalkEntry").field("path", &self.path).field("info", &self.info).finish()
+          }
+        }
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum FsErrorCode {
+          NotFound,
+          Exists,
+          NotDirectory,
+          IsDirectory,
+          NotEmpty,
+          Permission,
+          Invalid,
+          LinkLoop,
+          TooLarge,
+          NoSpace,
+          Busy,
+          CrossDevice,
+          ReadOnly,
+          Unsupported,
+          Io,
+        }
+        impl ::core::fmt::Debug for FsErrorCode {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              FsErrorCode::NotFound => {
+                f.debug_tuple("FsErrorCode::NotFound").finish()
+              }
+              FsErrorCode::Exists => {
+                f.debug_tuple("FsErrorCode::Exists").finish()
+              }
+              FsErrorCode::NotDirectory => {
+                f.debug_tuple("FsErrorCode::NotDirectory").finish()
+              }
+              FsErrorCode::IsDirectory => {
+                f.debug_tuple("FsErrorCode::IsDirectory").finish()
+              }
+              FsErrorCode::NotEmpty => {
+                f.debug_tuple("FsErrorCode::NotEmpty").finish()
+              }
+              FsErrorCode::Permission => {
+                f.debug_tuple("FsErrorCode::Permission").finish()
+              }
+              FsErrorCode::Invalid => {
+                f.debug_tuple("FsErrorCode::Invalid").finish()
+              }
+              FsErrorCode::LinkLoop => {
+                f.debug_tuple("FsErrorCode::LinkLoop").finish()
+              }
+              FsErrorCode::TooLarge => {
+                f.debug_tuple("FsErrorCode::TooLarge").finish()
+              }
+              FsErrorCode::NoSpace => {
+                f.debug_tuple("FsErrorCode::NoSpace").finish()
+              }
+              FsErrorCode::Busy => {
+                f.debug_tuple("FsErrorCode::Busy").finish()
+              }
+              FsErrorCode::CrossDevice => {
+                f.debug_tuple("FsErrorCode::CrossDevice").finish()
+              }
+              FsErrorCode::ReadOnly => {
+                f.debug_tuple("FsErrorCode::ReadOnly").finish()
+              }
+              FsErrorCode::Unsupported => {
+                f.debug_tuple("FsErrorCode::Unsupported").finish()
+              }
+              FsErrorCode::Io => {
+                f.debug_tuple("FsErrorCode::Io").finish()
+              }
+            }
+          }
+        }
+
+        impl FsErrorCode{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> FsErrorCode{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => FsErrorCode::NotFound,
+              1 => FsErrorCode::Exists,
+              2 => FsErrorCode::NotDirectory,
+              3 => FsErrorCode::IsDirectory,
+              4 => FsErrorCode::NotEmpty,
+              5 => FsErrorCode::Permission,
+              6 => FsErrorCode::Invalid,
+              7 => FsErrorCode::LinkLoop,
+              8 => FsErrorCode::TooLarge,
+              9 => FsErrorCode::NoSpace,
+              10 => FsErrorCode::Busy,
+              11 => FsErrorCode::CrossDevice,
+              12 => FsErrorCode::ReadOnly,
+              13 => FsErrorCode::Unsupported,
+              14 => FsErrorCode::Io,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[derive(Clone)]
+        pub struct FsError {
+          pub code: FsErrorCode,
+          pub path: Bytes,
+        }
+        impl ::core::fmt::Debug for FsError {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("FsError").field("code", &self.code).field("path", &self.path).finish()
+          }
+        }
+        impl ::core::fmt::Display for FsError {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            write!(f, "{:?}", self)
+          }
+        }
+        #[cfg(feature = "std")]
+        impl ::core::error::Error for FsError {}
+        #[derive(Clone)]
+        pub struct ReadReq {
+          pub path: Bytes,
+          pub offset: u64,
+          pub len: u32,
+        }
+        impl ::core::fmt::Debug for ReadReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ReadReq").field("path", &self.path).field("offset", &self.offset).field("len", &self.len).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct WriteReq {
+          pub path: Bytes,
+          pub data: Bytes,
+          pub offset: ::core::option::Option<u64>,
+          /// none = append
+          pub truncate: bool,
+          pub mode: ::core::option::Option<u32>,
+          pub mtime_ms: ::core::option::Option<i64>,
+        }
+        impl ::core::fmt::Debug for WriteReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("WriteReq").field("path", &self.path).field("data", &self.data).field("offset", &self.offset).field("truncate", &self.truncate).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct LazyReq {
+          pub path: Bytes,
+          pub mode: u32,
+          pub mtime_ms: ::core::option::Option<i64>,
+        }
+        impl ::core::fmt::Debug for LazyReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("LazyReq").field("path", &self.path).field("mode", &self.mode).field("mtime-ms", &self.mtime_ms).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct CreateReq {
+          pub path: Bytes,
+          pub mode: u32,
+          pub directory: bool,
+        }
+        impl ::core::fmt::Debug for CreateReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("CreateReq").field("path", &self.path).field("mode", &self.mode).field("directory", &self.directory).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct MkdirReq {
+          pub path: Bytes,
+          pub recursive: bool,
+          pub mode: ::core::option::Option<u32>,
+        }
+        impl ::core::fmt::Debug for MkdirReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("MkdirReq").field("path", &self.path).field("recursive", &self.recursive).field("mode", &self.mode).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct RemoveReq {
+          pub path: Bytes,
+          pub recursive: bool,
+          pub force: bool,
+        }
+        impl ::core::fmt::Debug for RemoveReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("RemoveReq").field("path", &self.path).field("recursive", &self.recursive).field("force", &self.force).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct PairReq {
+          pub source: Bytes,
+          pub target: Bytes,
+          pub recursive: bool,
+        }
+        impl ::core::fmt::Debug for PairReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("PairReq").field("source", &self.source).field("target", &self.target).field("recursive", &self.recursive).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct ChmodReq {
+          pub path: Bytes,
+          pub mode: u32,
+        }
+        impl ::core::fmt::Debug for ChmodReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ChmodReq").field("path", &self.path).field("mode", &self.mode).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct UtimesReq {
+          pub path: Bytes,
+          pub atime_ms: i64,
+          pub mtime_ms: i64,
+        }
+        impl ::core::fmt::Debug for UtimesReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("UtimesReq").field("path", &self.path).field("atime-ms", &self.atime_ms).field("mtime-ms", &self.mtime_ms).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct WalkReq {
+          pub root: Bytes,
+          pub max_depth: u32,
+          pub max_entries: u32,
+        }
+        impl ::core::fmt::Debug for WalkReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("WalkReq").field("root", &self.root).field("max-depth", &self.max_depth).field("max-entries", &self.max_entries).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub enum FsOp {
+          Stat(Bytes),
+          Lstat(Bytes),
+          Exists(Bytes),
+          ReadLink(Bytes),
+          RealPath(Bytes),
+          ReadDir(Bytes),
+          ReadDirPlus(Bytes),
+          Walk(WalkReq),
+          AllPaths,
+          ReadFile(ReadReq),
+          WriteFile(WriteReq),
+          WriteLazy(LazyReq),
+          CreateExclusive(CreateReq),
+          Mkdir(MkdirReq),
+          Remove(RemoveReq),
+          Copy(PairReq),
+          Rename(PairReq),
+          Symlink(PairReq),
+          HardLink(PairReq),
+          Chmod(ChmodReq),
+          Utimes(UtimesReq),
+        }
+        impl ::core::fmt::Debug for FsOp {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              FsOp::Stat(e) => {
+                f.debug_tuple("FsOp::Stat").field(e).finish()
+              }
+              FsOp::Lstat(e) => {
+                f.debug_tuple("FsOp::Lstat").field(e).finish()
+              }
+              FsOp::Exists(e) => {
+                f.debug_tuple("FsOp::Exists").field(e).finish()
+              }
+              FsOp::ReadLink(e) => {
+                f.debug_tuple("FsOp::ReadLink").field(e).finish()
+              }
+              FsOp::RealPath(e) => {
+                f.debug_tuple("FsOp::RealPath").field(e).finish()
+              }
+              FsOp::ReadDir(e) => {
+                f.debug_tuple("FsOp::ReadDir").field(e).finish()
+              }
+              FsOp::ReadDirPlus(e) => {
+                f.debug_tuple("FsOp::ReadDirPlus").field(e).finish()
+              }
+              FsOp::Walk(e) => {
+                f.debug_tuple("FsOp::Walk").field(e).finish()
+              }
+              FsOp::AllPaths => {
+                f.debug_tuple("FsOp::AllPaths").finish()
+              }
+              FsOp::ReadFile(e) => {
+                f.debug_tuple("FsOp::ReadFile").field(e).finish()
+              }
+              FsOp::WriteFile(e) => {
+                f.debug_tuple("FsOp::WriteFile").field(e).finish()
+              }
+              FsOp::WriteLazy(e) => {
+                f.debug_tuple("FsOp::WriteLazy").field(e).finish()
+              }
+              FsOp::CreateExclusive(e) => {
+                f.debug_tuple("FsOp::CreateExclusive").field(e).finish()
+              }
+              FsOp::Mkdir(e) => {
+                f.debug_tuple("FsOp::Mkdir").field(e).finish()
+              }
+              FsOp::Remove(e) => {
+                f.debug_tuple("FsOp::Remove").field(e).finish()
+              }
+              FsOp::Copy(e) => {
+                f.debug_tuple("FsOp::Copy").field(e).finish()
+              }
+              FsOp::Rename(e) => {
+                f.debug_tuple("FsOp::Rename").field(e).finish()
+              }
+              FsOp::Symlink(e) => {
+                f.debug_tuple("FsOp::Symlink").field(e).finish()
+              }
+              FsOp::HardLink(e) => {
+                f.debug_tuple("FsOp::HardLink").field(e).finish()
+              }
+              FsOp::Chmod(e) => {
+                f.debug_tuple("FsOp::Chmod").field(e).finish()
+              }
+              FsOp::Utimes(e) => {
+                f.debug_tuple("FsOp::Utimes").field(e).finish()
+              }
+            }
+          }
+        }
+        #[derive(Clone)]
+        pub enum FsOk {
+          None,
+          Flag(bool),
+          Info(Stat),
+          Path(Bytes),
+          Data(Bytes),
+          Paths(_rt::Vec::<Bytes>),
+          Entries(_rt::Vec::<DirEntry>),
+          EntriesPlus(_rt::Vec::<WalkEntry>),
+        }
+        impl ::core::fmt::Debug for FsOk {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              FsOk::None => {
+                f.debug_tuple("FsOk::None").finish()
+              }
+              FsOk::Flag(e) => {
+                f.debug_tuple("FsOk::Flag").field(e).finish()
+              }
+              FsOk::Info(e) => {
+                f.debug_tuple("FsOk::Info").field(e).finish()
+              }
+              FsOk::Path(e) => {
+                f.debug_tuple("FsOk::Path").field(e).finish()
+              }
+              FsOk::Data(e) => {
+                f.debug_tuple("FsOk::Data").field(e).finish()
+              }
+              FsOk::Paths(e) => {
+                f.debug_tuple("FsOk::Paths").field(e).finish()
+              }
+              FsOk::Entries(e) => {
+                f.debug_tuple("FsOk::Entries").field(e).finish()
+              }
+              FsOk::EntriesPlus(e) => {
+                f.debug_tuple("FsOk::EntriesPlus").field(e).finish()
+              }
+            }
+          }
+        }
+        pub type FsResult= ::core::result::Result<FsOk,FsError>;
+        #[derive(Clone)]
+        pub struct FsBatchReq {
+          pub mount_id: u32,
+          pub ops: _rt::Vec::<FsOp>,
+        }
+        impl ::core::fmt::Debug for FsBatchReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("FsBatchReq").field("mount-id", &self.mount_id).field("ops", &self.ops).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct ChangedFile {
+          pub path: Bytes,
+          pub removed: bool,
+        }
+        impl ::core::fmt::Debug for ChangedFile {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ChangedFile").field("path", &self.path).field("removed", &self.removed).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct Header {
+          pub name: _rt::String,
+          pub value: Bytes,
+        }
+        impl ::core::fmt::Debug for Header {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("Header").field("name", &self.name).field("value", &self.value).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct CommandCall {
+          pub name: _rt::String,
+          pub args: _rt::Vec::<Bytes>,
+          pub cwd: Bytes,
+          pub env: _rt::Vec::<EnvVar>,
+          pub fds: _rt::Vec::<FdEntry>,
+          pub input_len: u64,
+          pub xpg_echo: bool,
+        }
+        impl ::core::fmt::Debug for CommandCall {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("CommandCall").field("name", &self.name).field("args", &self.args).field("cwd", &self.cwd).field("env", &self.env).field("fds", &self.fds).field("input-len", &self.input_len).field("xpg-echo", &self.xpg_echo).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct FetchReq {
+          pub method: _rt::String,
+          pub url: _rt::String,
+          pub headers: _rt::Vec::<Header>,
+          pub input_len: u64,
+          pub follow_redirects: bool,
+          pub max_redirects: ::core::option::Option<u32>,
+          pub timeout_ms: u32,
+          pub max_response_bytes: u64,
+        }
+        impl ::core::fmt::Debug for FetchReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("FetchReq").field("method", &self.method).field("url", &self.url).field("headers", &self.headers).field("input-len", &self.input_len).field("follow-redirects", &self.follow_redirects).field("max-redirects", &self.max_redirects).field("timeout-ms", &self.timeout_ms).field("max-response-bytes", &self.max_response_bytes).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct RedirectHop {
+          pub url: _rt::String,
+          pub status: u16,
+          pub status_text: _rt::String,
+          pub headers: _rt::Vec::<Header>,
+        }
+        impl ::core::fmt::Debug for RedirectHop {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("RedirectHop").field("url", &self.url).field("status", &self.status).field("status-text", &self.status_text).field("headers", &self.headers).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct FetchResp {
+          pub status: u16,
+          pub status_text: _rt::String,
+          pub url: _rt::String,
+          pub headers: _rt::Vec::<Header>,
+          pub redirect_chain: _rt::Vec::<RedirectHop>,
+        }
+        impl ::core::fmt::Debug for FetchResp {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("FetchResp").field("status", &self.status).field("status-text", &self.status_text).field("url", &self.url).field("headers", &self.headers).field("redirect-chain", &self.redirect_chain).finish()
+          }
+        }
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum NetErrorCode {
+          AccessDenied,
+          MethodNotAllowed,
+          RedirectDenied,
+          TooManyRedirects,
+          ResponseTooLarge,
+          Timeout,
+          Network,
+        }
+        impl ::core::fmt::Debug for NetErrorCode {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              NetErrorCode::AccessDenied => {
+                f.debug_tuple("NetErrorCode::AccessDenied").finish()
+              }
+              NetErrorCode::MethodNotAllowed => {
+                f.debug_tuple("NetErrorCode::MethodNotAllowed").finish()
+              }
+              NetErrorCode::RedirectDenied => {
+                f.debug_tuple("NetErrorCode::RedirectDenied").finish()
+              }
+              NetErrorCode::TooManyRedirects => {
+                f.debug_tuple("NetErrorCode::TooManyRedirects").finish()
+              }
+              NetErrorCode::ResponseTooLarge => {
+                f.debug_tuple("NetErrorCode::ResponseTooLarge").finish()
+              }
+              NetErrorCode::Timeout => {
+                f.debug_tuple("NetErrorCode::Timeout").finish()
+              }
+              NetErrorCode::Network => {
+                f.debug_tuple("NetErrorCode::Network").finish()
+              }
+            }
+          }
+        }
+
+        impl NetErrorCode{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> NetErrorCode{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => NetErrorCode::AccessDenied,
+              1 => NetErrorCode::MethodNotAllowed,
+              2 => NetErrorCode::RedirectDenied,
+              3 => NetErrorCode::TooManyRedirects,
+              4 => NetErrorCode::ResponseTooLarge,
+              5 => NetErrorCode::Timeout,
+              6 => NetErrorCode::Network,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[derive(Clone)]
+        pub struct NetError {
+          pub code: NetErrorCode,
+          pub detail: Bytes,
+        }
+        impl ::core::fmt::Debug for NetError {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("NetError").field("code", &self.code).field("detail", &self.detail).finish()
+          }
+        }
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct ClockReading {
+          pub wall_ms: i64,
+          pub monotonic_ns: u64,
+        }
+        impl ::core::fmt::Debug for ClockReading {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("ClockReading").field("wall-ms", &self.wall_ms).field("monotonic-ns", &self.monotonic_ns).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub enum HostReq {
+          FsBatch(FsBatchReq),
+          LazyFile(Bytes),
+          CustomCommand(CommandCall),
+          Fetch(FetchReq),
+          Sleep(u64),
+          Clock,
+          Entropy(u32),
+          TraceClock,
+        }
+        impl ::core::fmt::Debug for HostReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              HostReq::FsBatch(e) => {
+                f.debug_tuple("HostReq::FsBatch").field(e).finish()
+              }
+              HostReq::LazyFile(e) => {
+                f.debug_tuple("HostReq::LazyFile").field(e).finish()
+              }
+              HostReq::CustomCommand(e) => {
+                f.debug_tuple("HostReq::CustomCommand").field(e).finish()
+              }
+              HostReq::Fetch(e) => {
+                f.debug_tuple("HostReq::Fetch").field(e).finish()
+              }
+              HostReq::Sleep(e) => {
+                f.debug_tuple("HostReq::Sleep").field(e).finish()
+              }
+              HostReq::Clock => {
+                f.debug_tuple("HostReq::Clock").finish()
+              }
+              HostReq::Entropy(e) => {
+                f.debug_tuple("HostReq::Entropy").field(e).finish()
+              }
+              HostReq::TraceClock => {
+                f.debug_tuple("HostReq::TraceClock").finish()
+              }
+            }
+          }
+        }
+        #[derive(Clone)]
+        pub enum HostOutcome {
+          Fs(_rt::Vec::<FsResult>),
+          Data(Bytes),
+          CommandExit(i32),
+          Fetched(FetchResp),
+          Clock(ClockReading),
+          Completed,
+          Denied,
+          LimitExceeded(_rt::String),
+          NetFailed(NetError),
+          Failed(Bytes),
+        }
+        impl ::core::fmt::Debug for HostOutcome {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              HostOutcome::Fs(e) => {
+                f.debug_tuple("HostOutcome::Fs").field(e).finish()
+              }
+              HostOutcome::Data(e) => {
+                f.debug_tuple("HostOutcome::Data").field(e).finish()
+              }
+              HostOutcome::CommandExit(e) => {
+                f.debug_tuple("HostOutcome::CommandExit").field(e).finish()
+              }
+              HostOutcome::Fetched(e) => {
+                f.debug_tuple("HostOutcome::Fetched").field(e).finish()
+              }
+              HostOutcome::Clock(e) => {
+                f.debug_tuple("HostOutcome::Clock").field(e).finish()
+              }
+              HostOutcome::Completed => {
+                f.debug_tuple("HostOutcome::Completed").finish()
+              }
+              HostOutcome::Denied => {
+                f.debug_tuple("HostOutcome::Denied").finish()
+              }
+              HostOutcome::LimitExceeded(e) => {
+                f.debug_tuple("HostOutcome::LimitExceeded").field(e).finish()
+              }
+              HostOutcome::NetFailed(e) => {
+                f.debug_tuple("HostOutcome::NetFailed").field(e).finish()
+              }
+              HostOutcome::Failed(e) => {
+                f.debug_tuple("HostOutcome::Failed").field(e).finish()
+              }
+            }
+          }
+        }
+        #[derive(Clone)]
+        pub struct PendingCall {
+          pub epoch: u64,
+          pub req: HostReq,
+        }
+        impl ::core::fmt::Debug for PendingCall {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("PendingCall").field("epoch", &self.epoch).field("req", &self.req).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub enum Step {
+          Done(ExecResult),
+          OutOfFuel,
+          HostCall(PendingCall),
+        }
+        impl ::core::fmt::Debug for Step {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              Step::Done(e) => {
+                f.debug_tuple("Step::Done").field(e).finish()
+              }
+              Step::OutOfFuel => {
+                f.debug_tuple("Step::OutOfFuel").finish()
+              }
+              Step::HostCall(e) => {
+                f.debug_tuple("Step::HostCall").field(e).finish()
+              }
+            }
+          }
+        }
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum CancelReason {
+          Aborted,
+          Deadline,
+          Limit,
+        }
+        impl ::core::fmt::Debug for CancelReason {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              CancelReason::Aborted => {
+                f.debug_tuple("CancelReason::Aborted").finish()
+              }
+              CancelReason::Deadline => {
+                f.debug_tuple("CancelReason::Deadline").finish()
+              }
+              CancelReason::Limit => {
+                f.debug_tuple("CancelReason::Limit").finish()
+              }
+            }
+          }
+        }
+
+        impl CancelReason{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> CancelReason{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => CancelReason::Aborted,
+              1 => CancelReason::Deadline,
+              2 => CancelReason::Limit,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum OutChannel {
+          Stdout,
+          Stderr,
+          Body,
+        }
+        impl ::core::fmt::Debug for OutChannel {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              OutChannel::Stdout => {
+                f.debug_tuple("OutChannel::Stdout").finish()
+              }
+              OutChannel::Stderr => {
+                f.debug_tuple("OutChannel::Stderr").finish()
+              }
+              OutChannel::Body => {
+                f.debug_tuple("OutChannel::Body").finish()
+              }
+            }
+          }
+        }
+
+        impl OutChannel{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> OutChannel{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => OutChannel::Stdout,
+              1 => OutChannel::Stderr,
+              2 => OutChannel::Body,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum KernelErrorCode {
+          NotConfigured,
+          AlreadyConfigured,
+          Ceiling,
+          InvalidConfig,
+          StaleEpoch,
+          BadState,
+          TooLarge,
+          Denied,
+        }
+        impl ::core::fmt::Debug for KernelErrorCode {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              KernelErrorCode::NotConfigured => {
+                f.debug_tuple("KernelErrorCode::NotConfigured").finish()
+              }
+              KernelErrorCode::AlreadyConfigured => {
+                f.debug_tuple("KernelErrorCode::AlreadyConfigured").finish()
+              }
+              KernelErrorCode::Ceiling => {
+                f.debug_tuple("KernelErrorCode::Ceiling").finish()
+              }
+              KernelErrorCode::InvalidConfig => {
+                f.debug_tuple("KernelErrorCode::InvalidConfig").finish()
+              }
+              KernelErrorCode::StaleEpoch => {
+                f.debug_tuple("KernelErrorCode::StaleEpoch").finish()
+              }
+              KernelErrorCode::BadState => {
+                f.debug_tuple("KernelErrorCode::BadState").finish()
+              }
+              KernelErrorCode::TooLarge => {
+                f.debug_tuple("KernelErrorCode::TooLarge").finish()
+              }
+              KernelErrorCode::Denied => {
+                f.debug_tuple("KernelErrorCode::Denied").finish()
+              }
+            }
+          }
+        }
+
+        impl KernelErrorCode{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> KernelErrorCode{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => KernelErrorCode::NotConfigured,
+              1 => KernelErrorCode::AlreadyConfigured,
+              2 => KernelErrorCode::Ceiling,
+              3 => KernelErrorCode::InvalidConfig,
+              4 => KernelErrorCode::StaleEpoch,
+              5 => KernelErrorCode::BadState,
+              6 => KernelErrorCode::TooLarge,
+              7 => KernelErrorCode::Denied,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
+        #[derive(Clone)]
+        pub struct KernelError {
+          pub code: KernelErrorCode,
+          pub detail: _rt::String,
+        }
+        impl ::core::fmt::Debug for KernelError {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("KernelError").field("code", &self.code).field("detail", &self.detail).finish()
+          }
+        }
+        impl ::core::fmt::Display for KernelError {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            write!(f, "{:?}", self)
+          }
+        }
+        #[cfg(feature = "std")]
+        impl ::core::error::Error for KernelError {}
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct MemoryUsage {
+          pub used: u64,
+          pub ceiling: u64,
+          pub high_water: u64,
+        }
+        impl ::core::fmt::Debug for MemoryUsage {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("MemoryUsage").field("used", &self.used).field("ceiling", &self.ceiling).field("high-water", &self.high_water).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub enum TraceValue {
+          Number(f64),
+          Text(Bytes),
+        }
+        impl ::core::fmt::Debug for TraceValue {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              TraceValue::Number(e) => {
+                f.debug_tuple("TraceValue::Number").field(e).finish()
+              }
+              TraceValue::Text(e) => {
+                f.debug_tuple("TraceValue::Text").field(e).finish()
+              }
+            }
+          }
+        }
+        #[derive(Clone)]
+        pub struct TraceDetail {
+          pub key: _rt::String,
+          pub value: TraceValue,
+        }
+        impl ::core::fmt::Debug for TraceDetail {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("TraceDetail").field("key", &self.key).field("value", &self.value).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct TraceEvent {
+          pub category: _rt::String,
+          pub name: _rt::String,
+          pub duration_ms: f64,
+          pub details: _rt::Vec::<TraceDetail>,
+        }
+        impl ::core::fmt::Debug for TraceEvent {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("TraceEvent").field("category", &self.category).field("name", &self.name).field("duration-ms", &self.duration_ms).field("details", &self.details).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct OneshotFile {
+          pub path: Bytes,
+          pub data: Bytes,
+          pub mode: u32,
+        }
+        impl ::core::fmt::Debug for OneshotFile {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("OneshotFile").field("path", &self.path).field("data", &self.data).field("mode", &self.mode).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct OneshotReq {
+          pub files: _rt::Vec::<OneshotFile>,
+          pub config: ShellConfig,
+          pub opts: ExecOpts,
+          pub stdin: Bytes,
+          pub fuel: u64,
+        }
+        impl ::core::fmt::Debug for OneshotReq {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("OneshotReq").field("files", &self.files).field("config", &self.config).field("opts", &self.opts).field("stdin", &self.stdin).field("fuel", &self.fuel).finish()
+          }
+        }
+        #[derive(Clone)]
+        pub struct OneshotResult {
+          pub outcome: ExecResult,
+          pub stdout: Bytes,
+          pub stderr: Bytes,
+          pub changed: _rt::Vec::<OneshotFile>,
+          pub removed: _rt::Vec::<Bytes>,
+        }
+        impl ::core::fmt::Debug for OneshotResult {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            f.debug_struct("OneshotResult").field("outcome", &self.outcome).field("stdout", &self.stdout).field("stderr", &self.stderr).field("changed", &self.changed).field("removed", &self.removed).finish()
+          }
+        }
+        #[doc(hidden)]
+
+        macro_rules! __export_sentropic_bash_types_0_1_0_draft_cabi{
+          ($ty:ident with_types_in $($path_to_types:tt)*) => (const _: () = {
+
+          };);
+        }
+        #[doc(hidden)]
+        pub(crate) use __export_sentropic_bash_types_0_1_0_draft_cabi;
+
+      }
+
+
+      #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
       pub mod engine {
         
         use super::super::super::super::_rt;
-        pub type Bytes = super::super::super::super::sentropic::bash::types::Bytes;
-        pub type EnvVar = super::super::super::super::sentropic::bash::types::EnvVar;
-        pub type ShellConfig = super::super::super::super::sentropic::bash::types::ShellConfig;
-        pub type ExecOpts = super::super::super::super::sentropic::bash::types::ExecOpts;
-        pub type ExecResult = super::super::super::super::sentropic::bash::types::ExecResult;
-        pub type Step = super::super::super::super::sentropic::bash::types::Step;
-        pub type HostOutcome = super::super::super::super::sentropic::bash::types::HostOutcome;
-        pub type TraceEvent = super::super::super::super::sentropic::bash::types::TraceEvent;
-        pub type CancelReason = super::super::super::super::sentropic::bash::types::CancelReason;
-        pub type OutChannel = super::super::super::super::sentropic::bash::types::OutChannel;
-        pub type FsOp = super::super::super::super::sentropic::bash::types::FsOp;
-        pub type FsResult = super::super::super::super::sentropic::bash::types::FsResult;
-        pub type FsError = super::super::super::super::sentropic::bash::types::FsError;
-        pub type ChangedFile = super::super::super::super::sentropic::bash::types::ChangedFile;
-        pub type KernelError = super::super::super::super::sentropic::bash::types::KernelError;
-        pub type MemoryUsage = super::super::super::super::sentropic::bash::types::MemoryUsage;
-        pub type OneshotReq = super::super::super::super::sentropic::bash::types::OneshotReq;
-        pub type OneshotResult = super::super::super::super::sentropic::bash::types::OneshotResult;
+        pub type Bytes = super::super::super::super::exports::sentropic::bash::types::Bytes;
+        pub type EnvVar = super::super::super::super::exports::sentropic::bash::types::EnvVar;
+        pub type ShellConfig = super::super::super::super::exports::sentropic::bash::types::ShellConfig;
+        pub type ExecOpts = super::super::super::super::exports::sentropic::bash::types::ExecOpts;
+        pub type ExecResult = super::super::super::super::exports::sentropic::bash::types::ExecResult;
+        pub type Step = super::super::super::super::exports::sentropic::bash::types::Step;
+        pub type HostOutcome = super::super::super::super::exports::sentropic::bash::types::HostOutcome;
+        pub type TraceEvent = super::super::super::super::exports::sentropic::bash::types::TraceEvent;
+        pub type CancelReason = super::super::super::super::exports::sentropic::bash::types::CancelReason;
+        pub type OutChannel = super::super::super::super::exports::sentropic::bash::types::OutChannel;
+        pub type FsOp = super::super::super::super::exports::sentropic::bash::types::FsOp;
+        pub type FsResult = super::super::super::super::exports::sentropic::bash::types::FsResult;
+        pub type FsError = super::super::super::super::exports::sentropic::bash::types::FsError;
+        pub type ChangedFile = super::super::super::super::exports::sentropic::bash::types::ChangedFile;
+        pub type KernelError = super::super::super::super::exports::sentropic::bash::types::KernelError;
+        pub type MemoryUsage = super::super::super::super::exports::sentropic::bash::types::MemoryUsage;
+        pub type OneshotReq = super::super::super::super::exports::sentropic::bash::types::OneshotReq;
+        pub type OneshotResult = super::super::super::super::exports::sentropic::bash::types::OneshotResult;
         /// identifier table; index = feature id
 
         #[derive(Debug)]
@@ -1674,7 +1678,7 @@ pub mod exports {
           } },
           Err(e) => { {
             *ptr1.add(0).cast::<u8>() = (1i32) as u8;
-            let super::super::super::super::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
             *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code2.clone() as i32) as u8;
             let vec3 = (detail2.into_bytes()).into_boxed_slice();
             let ptr3 = vec3.as_ptr().cast::<u8>();
@@ -1711,7 +1715,7 @@ pub mod exports {
         } },
         Err(e) => { {
           *ptr1.add(0).cast::<u8>() = (1i32) as u8;
-          let super::super::super::super::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
+          let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
           *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code2.clone() as i32) as u8;
           let vec3 = (detail2.into_bytes()).into_boxed_slice();
           let ptr3 = vec3.as_ptr().cast::<u8>();
@@ -1742,7 +1746,7 @@ pub mod exports {
       T_::usage()
     };
     let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
-    let super::super::super::super::sentropic::bash::types::MemoryUsage{ used:used2, ceiling:ceiling2, high_water:high_water2, } = result0;
+    let super::super::super::super::exports::sentropic::bash::types::MemoryUsage{ used:used2, ceiling:ceiling2, high_water:high_water2, } = result0;
     *ptr1.add(0).cast::<i64>() = _rt::as_i64(used2);
     *ptr1.add(8).cast::<i64>() = _rt::as_i64(ceiling2);
     *ptr1.add(16).cast::<i64>() = _rt::as_i64(high_water2);
@@ -1805,7 +1809,7 @@ match result0 {
   } },
   Err(e) => { {
     *ptr1.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code2, detail:detail2, } = e;
     *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code2.clone() as i32) as u8;
     let vec3 = (detail2.into_bytes()).into_boxed_slice();
     let ptr3 = vec3.as_ptr().cast::<u8>();
@@ -1833,7 +1837,7 @@ pub unsafe fn __post_return_static_vfs_create<T_: GuestVfs>(arg0: *mut u8,) { un
 #[allow(non_snake_case, unused_unsafe)]
 pub unsafe fn _export_method_vfs_op_cabi<T_: GuestVfs>(arg0: *mut u8,arg1: i32,arg2: *mut u8,arg3: usize,arg4: ::core::mem::MaybeUninit::<u64>,arg5: i64,arg6: i64,arg7: i64,arg8: i32,arg9: i32,arg10: i32,arg11: i32,arg12: i64,) -> *mut u8 { unsafe {#[cfg(target_arch="wasm32")]
 _rt::run_ctors_once();let result26 = {
-  use super::super::super::super::sentropic::bash::types::FsOp as V25;
+  use super::super::super::super::exports::sentropic::bash::types::FsOp as V25;
   let v25 = match arg1 {
     0 => {
       let e25 = {
@@ -1895,7 +1899,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len7 = arg3;
 
-        super::super::super::super::sentropic::bash::types::WalkReq{
+        super::super::super::super::exports::sentropic::bash::types::WalkReq{
           root: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len7, len7)),
           max_depth: arg4.assume_init() as i64 as i32 as u32,
           max_entries: arg5 as i32 as u32,
@@ -1910,7 +1914,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len8 = arg3;
 
-        super::super::super::super::sentropic::bash::types::ReadReq{
+        super::super::super::super::exports::sentropic::bash::types::ReadReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len8, len8)),
           offset: arg4.assume_init() as i64 as u64,
           len: arg5 as i32 as u32,
@@ -1923,7 +1927,7 @@ _rt::run_ctors_once();let result26 = {
         let len9 = arg3;
         let len10 = arg5 as usize;
 
-        super::super::super::super::sentropic::bash::types::WriteReq{
+        super::super::super::super::exports::sentropic::bash::types::WriteReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len9, len9)),
           data: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len10, len10)),
           offset: match arg6 as i32 {
@@ -1959,7 +1963,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len11 = arg3;
 
-        super::super::super::super::sentropic::bash::types::LazyReq{
+        super::super::super::super::exports::sentropic::bash::types::LazyReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len11, len11)),
           mode: arg4.assume_init() as i64 as i32 as u32,
           mtime_ms: match arg5 as i32 {
@@ -1978,7 +1982,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len12 = arg3;
 
-        super::super::super::super::sentropic::bash::types::CreateReq{
+        super::super::super::super::exports::sentropic::bash::types::CreateReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len12, len12)),
           mode: arg4.assume_init() as i64 as i32 as u32,
           directory: _rt::bool_lift(arg5 as i32 as u8),
@@ -1990,7 +1994,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len13 = arg3;
 
-        super::super::super::super::sentropic::bash::types::MkdirReq{
+        super::super::super::super::exports::sentropic::bash::types::MkdirReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len13, len13)),
           recursive: _rt::bool_lift(arg4.assume_init() as i64 as i32 as u8),
           mode: match arg5 as i32 {
@@ -2009,7 +2013,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len14 = arg3;
 
-        super::super::super::super::sentropic::bash::types::RemoveReq{
+        super::super::super::super::exports::sentropic::bash::types::RemoveReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len14, len14)),
           recursive: _rt::bool_lift(arg4.assume_init() as i64 as i32 as u8),
           force: _rt::bool_lift(arg5 as i32 as u8),
@@ -2022,7 +2026,7 @@ _rt::run_ctors_once();let result26 = {
         let len15 = arg3;
         let len16 = arg5 as usize;
 
-        super::super::super::super::sentropic::bash::types::PairReq{
+        super::super::super::super::exports::sentropic::bash::types::PairReq{
           source: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len15, len15)),
           target: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len16, len16)),
           recursive: _rt::bool_lift(arg6 as i32 as u8),
@@ -2035,7 +2039,7 @@ _rt::run_ctors_once();let result26 = {
         let len17 = arg3;
         let len18 = arg5 as usize;
 
-        super::super::super::super::sentropic::bash::types::PairReq{
+        super::super::super::super::exports::sentropic::bash::types::PairReq{
           source: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len17, len17)),
           target: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len18, len18)),
           recursive: _rt::bool_lift(arg6 as i32 as u8),
@@ -2048,7 +2052,7 @@ _rt::run_ctors_once();let result26 = {
         let len19 = arg3;
         let len20 = arg5 as usize;
 
-        super::super::super::super::sentropic::bash::types::PairReq{
+        super::super::super::super::exports::sentropic::bash::types::PairReq{
           source: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len19, len19)),
           target: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len20, len20)),
           recursive: _rt::bool_lift(arg6 as i32 as u8),
@@ -2061,7 +2065,7 @@ _rt::run_ctors_once();let result26 = {
         let len21 = arg3;
         let len22 = arg5 as usize;
 
-        super::super::super::super::sentropic::bash::types::PairReq{
+        super::super::super::super::exports::sentropic::bash::types::PairReq{
           source: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len21, len21)),
           target: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len22, len22)),
           recursive: _rt::bool_lift(arg6 as i32 as u8),
@@ -2073,7 +2077,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len23 = arg3;
 
-        super::super::super::super::sentropic::bash::types::ChmodReq{
+        super::super::super::super::exports::sentropic::bash::types::ChmodReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len23, len23)),
           mode: arg4.assume_init() as i64 as i32 as u32,
         }
@@ -2085,7 +2089,7 @@ _rt::run_ctors_once();let result26 = {
       let e25 = {
         let len24 = arg3;
 
-        super::super::super::super::sentropic::bash::types::UtimesReq{
+        super::super::super::super::exports::sentropic::bash::types::UtimesReq{
           path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg2.cast(), len24, len24)),
           atime_ms: arg4.assume_init() as i64,
           mtime_ms: arg5,
@@ -2100,7 +2104,7 @@ let ptr27 = (&raw mut _RET_AREA.0).cast::<u8>();
 match result26 {
   Ok(e) => { {
     *ptr27.add(0).cast::<u8>() = (0i32) as u8;
-    use super::super::super::super::sentropic::bash::types::FsOk as V40;
+    use super::super::super::super::exports::sentropic::bash::types::FsOk as V40;
     match e {
       V40::None=> {
         {
@@ -2113,7 +2117,7 @@ match result26 {
       },
       V40::Info(e) => {
         *ptr27.add(8).cast::<u8>() = (2i32) as u8;
-        let super::super::super::super::sentropic::bash::types::Stat{ kind:kind28, size:size28, mode:mode28, mtime_ms:mtime_ms28, dev:dev28, ino:ino28, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::Stat{ kind:kind28, size:size28, mode:mode28, mtime_ms:mtime_ms28, dev:dev28, ino:ino28, } = e;
         *ptr27.add(16).cast::<u8>() = (kind28.clone() as i32) as u8;
         *ptr27.add(24).cast::<i64>() = _rt::as_i64(size28);
         *ptr27.add(32).cast::<i32>() = _rt::as_i32(mode28);
@@ -2168,7 +2172,7 @@ match result26 {
         for (i, e) in vec35.into_iter().enumerate() {
           let base = result35.add(i * (3*::core::mem::size_of::<*const u8>()));
           {
-            let super::super::super::super::sentropic::bash::types::DirEntry{ name:name33, kind:kind33, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::DirEntry{ name:name33, kind:kind33, } = e;
             let vec34 = <_ as Into<_rt::Vec<_>>>::into(name33).into_boxed_slice();
             let ptr34 = vec34.as_ptr().cast::<u8>();
             let len34 = vec34.len();
@@ -2190,14 +2194,14 @@ match result26 {
         for (i, e) in vec39.into_iter().enumerate() {
           let base = result39.add(i * (48+2*::core::mem::size_of::<*const u8>()));
           {
-            let super::super::super::super::sentropic::bash::types::WalkEntry{ path:path36, info:info36, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::WalkEntry{ path:path36, info:info36, } = e;
             let vec37 = <_ as Into<_rt::Vec<_>>>::into(path36).into_boxed_slice();
             let ptr37 = vec37.as_ptr().cast::<u8>();
             let len37 = vec37.len();
             ::core::mem::forget(vec37);
             *base.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len37;
             *base.add(0).cast::<*mut u8>() = ptr37.cast_mut();
-            let super::super::super::super::sentropic::bash::types::Stat{ kind:kind38, size:size38, mode:mode38, mtime_ms:mtime_ms38, dev:dev38, ino:ino38, } = info36;
+            let super::super::super::super::exports::sentropic::bash::types::Stat{ kind:kind38, size:size38, mode:mode38, mtime_ms:mtime_ms38, dev:dev38, ino:ino38, } = info36;
             *base.add(2*::core::mem::size_of::<*const u8>()).cast::<u8>() = (kind38.clone() as i32) as u8;
             *base.add(8+2*::core::mem::size_of::<*const u8>()).cast::<i64>() = _rt::as_i64(size38);
             *base.add(16+2*::core::mem::size_of::<*const u8>()).cast::<i32>() = _rt::as_i32(mode38);
@@ -2213,7 +2217,7 @@ match result26 {
   } },
   Err(e) => { {
     *ptr27.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::FsError{ code:code41, path:path41, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::FsError{ code:code41, path:path41, } = e;
     *ptr27.add(8).cast::<u8>() = (code41.clone() as i32) as u8;
     let vec42 = <_ as Into<_rt::Vec<_>>>::into(path41).into_boxed_slice();
     let ptr42 = vec42.as_ptr().cast::<u8>();
@@ -2325,7 +2329,7 @@ match result1 {
   } },
   Err(e) => { {
     *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
     let vec4 = <_ as Into<_rt::Vec<_>>>::into(path3).into_boxed_slice();
     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -2365,7 +2369,7 @@ match result1 {
   } },
   Err(e) => { {
     *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
     let vec4 = <_ as Into<_rt::Vec<_>>>::into(path3).into_boxed_slice();
     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -2405,7 +2409,7 @@ match result1 {
   } },
   Err(e) => { {
     *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::FsError{ code:code3, path:path3, } = e;
     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
     let vec4 = <_ as Into<_rt::Vec<_>>>::into(path3).into_boxed_slice();
     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -2445,7 +2449,7 @@ let (result4, _cleanup4) = crate::bindings::rt::Cleanup::new(layout4);if let Som
 for (i, e) in vec4.into_iter().enumerate() {
   let base = result4.add(i * (3*::core::mem::size_of::<*const u8>()));
   {
-    let super::super::super::super::sentropic::bash::types::ChangedFile{ path:path2, removed:removed2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::ChangedFile{ path:path2, removed:removed2, } = e;
     let vec3 = <_ as Into<_rt::Vec<_>>>::into(path2).into_boxed_slice();
     let ptr3 = vec3.as_ptr().cast::<u8>();
     let len3 = vec3.len();
@@ -2506,7 +2510,7 @@ _rt::run_ctors_once();let result45 = {
       let bytes6 = _rt::Vec::from_raw_parts(l4.cast(), len6, len6);
       let l7 = *base.add(2*::core::mem::size_of::<*const u8>()).cast::<i64>();
 
-      super::super::super::super::sentropic::bash::types::LimitOverride{
+      super::super::super::super::exports::sentropic::bash::types::LimitOverride{
         name: _rt::string_lift(bytes6),
         value: l7 as u64,
       }
@@ -2550,7 +2554,7 @@ _rt::run_ctors_once();let result45 = {
       let len30 = l29;
       let l31 = i32::from(*base.add(4*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-      super::super::super::super::sentropic::bash::types::EnvVar{
+      super::super::super::super::exports::sentropic::bash::types::EnvVar{
         name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l25.cast(), len27, len27)),
         value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l28.cast(), len30, len30)),
         exported: _rt::bool_lift(l31 as u8),
@@ -2564,12 +2568,12 @@ _rt::run_ctors_once();let result45 = {
   let l42 = i32::from(*arg0.add(20+15*::core::mem::size_of::<*const u8>()).cast::<u8>());
   let l43 = i32::from(*arg0.add(21+15*::core::mem::size_of::<*const u8>()).cast::<u8>());
   let l44 = i32::from(*arg0.add(22+15*::core::mem::size_of::<*const u8>()).cast::<u8>());
-  T_::create(VfsBorrow::lift(core::ptr::with_exposed_provenance(l0 as u32 as usize)), super::super::super::super::sentropic::bash::types::ShellConfig{
-    limits: super::super::super::super::sentropic::bash::types::Limits{
-      profile: super::super::super::super::sentropic::bash::types::Profile::_lift(l1 as u8),
+  T_::create(VfsBorrow::lift(core::ptr::with_exposed_provenance(l0 as u32 as usize)), super::super::super::super::exports::sentropic::bash::types::ShellConfig{
+    limits: super::super::super::super::exports::sentropic::bash::types::Limits{
+      profile: super::super::super::super::exports::sentropic::bash::types::Profile::_lift(l1 as u8),
       overrides: result8,
     },
-    grants: super::super::super::super::sentropic::bash::types::Grants::empty() | super::super::super::super::sentropic::bash::types::Grants::from_bits_retain(((l9 as u8) << 0) as _),
+    grants: super::super::super::super::exports::sentropic::bash::types::Grants::empty() | super::super::super::super::exports::sentropic::bash::types::Grants::from_bits_retain(((l9 as u8) << 0) as _),
     commands: match l10 {
       0 => None,
       1 => {
@@ -2624,7 +2628,7 @@ _rt::run_ctors_once();let result45 = {
           let l40 = *arg0.add(12+15*::core::mem::size_of::<*const u8>()).cast::<i32>();
           let l41 = *arg0.add(16+15*::core::mem::size_of::<*const u8>()).cast::<i32>();
 
-          super::super::super::super::sentropic::bash::types::ProcessInfo{
+          super::super::super::super::exports::sentropic::bash::types::ProcessInfo{
             pid: l38 as u32,
             ppid: l39 as u32,
             uid: l40 as u32,
@@ -2649,7 +2653,7 @@ match result45 {
   } },
   Err(e) => { {
     *ptr46.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code47, detail:detail47, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code47, detail:detail47, } = e;
     *ptr46.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code47.clone() as i32) as u8;
     let vec48 = (detail47.into_bytes()).into_boxed_slice();
     let ptr48 = vec48.as_ptr().cast::<u8>();
@@ -2688,7 +2692,7 @@ match result1 {
   } },
   Err(e) => { {
     *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
     let vec4 = (detail3.into_bytes()).into_boxed_slice();
     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -2726,7 +2730,7 @@ let (result5, _cleanup5) = crate::bindings::rt::Cleanup::new(layout5);if let Som
 for (i, e) in vec5.into_iter().enumerate() {
   let base = result5.add(i * (5*::core::mem::size_of::<*const u8>()));
   {
-    let super::super::super::super::sentropic::bash::types::EnvVar{ name:name2, value:value2, exported:exported2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name2, value:value2, exported:exported2, } = e;
     let vec3 = <_ as Into<_rt::Vec<_>>>::into(name2).into_boxed_slice();
     let ptr3 = vec3.as_ptr().cast::<u8>();
     let len3 = vec3.len();
@@ -2837,7 +2841,7 @@ _rt::run_ctors_once();let result35 = {
       let len22 = l21;
       let l23 = i32::from(*base.add(4*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-      super::super::super::super::sentropic::bash::types::EnvVar{
+      super::super::super::super::exports::sentropic::bash::types::EnvVar{
         name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l17.cast(), len19, len19)),
         value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l20.cast(), len22, len22)),
         exported: _rt::bool_lift(l23 as u8),
@@ -2861,7 +2865,7 @@ _rt::run_ctors_once();let result35 = {
       Some(e)
     }
     _ => _rt::invalid_enum_discriminant(),
-  }, super::super::super::super::sentropic::bash::types::ExecOpts{
+  }, super::super::super::super::exports::sentropic::bash::types::ExecOpts{
     script: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l3.cast(), len5, len5)),
     script_overflow: match l6 {
       0 => None,
@@ -2870,7 +2874,7 @@ _rt::run_ctors_once();let result35 = {
           let l7 = *arg0.add(24+2*::core::mem::size_of::<*const u8>()).cast::<i64>();
           let l8 = *arg0.add(32+2*::core::mem::size_of::<*const u8>()).cast::<i64>();
 
-          super::super::super::super::sentropic::bash::types::ScriptOverflow{
+          super::super::super::super::exports::sentropic::bash::types::ScriptOverflow{
             utf16_units: l7 as u64,
             utf8_bytes: l8 as u64,
           }
@@ -2923,7 +2927,7 @@ match result35 {
   } },
   Err(e) => { {
     *ptr36.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code37, detail:detail37, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code37, detail:detail37, } = e;
     *ptr36.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code37.clone() as i32) as u8;
     let vec38 = (detail37.into_bytes()).into_boxed_slice();
     let ptr38 = vec38.as_ptr().cast::<u8>();
@@ -2961,7 +2965,7 @@ match result1 {
   } },
   Err(e) => { {
     *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
     let vec4 = (detail3.into_bytes()).into_boxed_slice();
     let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -2992,11 +2996,11 @@ _rt::run_ctors_once();let result0 = {
   T_::run(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), arg1 as u64)
 };
 let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
-use super::super::super::super::sentropic::bash::types::Step as V69;
+use super::super::super::super::exports::sentropic::bash::types::Step as V69;
 match result0 {
   V69::Done(e) => {
     *ptr1.add(0).cast::<u8>() = (0i32) as u8;
-    let super::super::super::super::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = e;
     *ptr1.add(8).cast::<i32>() = _rt::as_i32(exit_code2);
     *ptr1.add(12).cast::<u8>() = (status2.clone() as i32) as u8;
     match limit_name2 {
@@ -3021,7 +3025,7 @@ match result0 {
     for (i, e) in vec7.into_iter().enumerate() {
       let base = result7.add(i * (5*::core::mem::size_of::<*const u8>()));
       {
-        let super::super::super::super::sentropic::bash::types::EnvVar{ name:name4, value:value4, exported:exported4, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name4, value:value4, exported:exported4, } = e;
         let vec5 = <_ as Into<_rt::Vec<_>>>::into(name4).into_boxed_slice();
         let ptr5 = vec5.as_ptr().cast::<u8>();
         let len5 = vec5.len();
@@ -3047,13 +3051,13 @@ match result0 {
   }
   V69::HostCall(e) => {
     *ptr1.add(0).cast::<u8>() = (2i32) as u8;
-    let super::super::super::super::sentropic::bash::types::PendingCall{ epoch:epoch8, req:req8, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::PendingCall{ epoch:epoch8, req:req8, } = e;
     *ptr1.add(8).cast::<i64>() = _rt::as_i64(epoch8);
-    use super::super::super::super::sentropic::bash::types::HostReq as V68;
+    use super::super::super::super::exports::sentropic::bash::types::HostReq as V68;
     match req8 {
       V68::FsBatch(e) => {
         *ptr1.add(16).cast::<u8>() = (0i32) as u8;
-        let super::super::super::super::sentropic::bash::types::FsBatchReq{ mount_id:mount_id9, ops:ops9, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::FsBatchReq{ mount_id:mount_id9, ops:ops9, } = e;
         *ptr1.add(24).cast::<i32>() = _rt::as_i32(mount_id9);
         let vec49 = ops9;
         let len49 = vec49.len();
@@ -3062,7 +3066,7 @@ match result0 {
         for (i, e) in vec49.into_iter().enumerate() {
           let base = result49.add(i * (56+4*::core::mem::size_of::<*const u8>()));
           {
-            use super::super::super::super::sentropic::bash::types::FsOp as V48;
+            use super::super::super::super::exports::sentropic::bash::types::FsOp as V48;
             match e {
               V48::Stat(e) => {
                 *base.add(0).cast::<u8>() = (0i32) as u8;
@@ -3129,7 +3133,7 @@ match result0 {
               },
               V48::Walk(e) => {
                 *base.add(0).cast::<u8>() = (7i32) as u8;
-                let super::super::super::super::sentropic::bash::types::WalkReq{ root:root17, max_depth:max_depth17, max_entries:max_entries17, } = e;
+                let super::super::super::super::exports::sentropic::bash::types::WalkReq{ root:root17, max_depth:max_depth17, max_entries:max_entries17, } = e;
                 let vec18 = <_ as Into<_rt::Vec<_>>>::into(root17).into_boxed_slice();
                 let ptr18 = vec18.as_ptr().cast::<u8>();
                 let len18 = vec18.len();
@@ -3146,7 +3150,7 @@ match result0 {
               }
               V48::ReadFile(e) => {
                 *base.add(0).cast::<u8>() = (9i32) as u8;
-                let super::super::super::super::sentropic::bash::types::ReadReq{ path:path19, offset:offset19, len:len19, } = e;
+                let super::super::super::super::exports::sentropic::bash::types::ReadReq{ path:path19, offset:offset19, len:len19, } = e;
                 let vec20 = <_ as Into<_rt::Vec<_>>>::into(path19).into_boxed_slice();
                 let ptr20 = vec20.as_ptr().cast::<u8>();
                 let len20 = vec20.len();
@@ -3158,7 +3162,7 @@ match result0 {
               },
               V48::WriteFile(e) => {
                 *base.add(0).cast::<u8>() = (10i32) as u8;
-                let super::super::super::super::sentropic::bash::types::WriteReq{ path:path21, data:data21, offset:offset21, truncate:truncate21, mode:mode21, mtime_ms:mtime_ms21, } = e;
+                let super::super::super::super::exports::sentropic::bash::types::WriteReq{ path:path21, data:data21, offset:offset21, truncate:truncate21, mode:mode21, mtime_ms:mtime_ms21, } = e;
                 let vec22 = <_ as Into<_rt::Vec<_>>>::into(path21).into_boxed_slice();
                 let ptr22 = vec22.as_ptr().cast::<u8>();
                 let len22 = vec22.len();
@@ -3205,7 +3209,7 @@ match result0 {
                 };},
                 V48::WriteLazy(e) => {
                   *base.add(0).cast::<u8>() = (11i32) as u8;
-                  let super::super::super::super::sentropic::bash::types::LazyReq{ path:path24, mode:mode24, mtime_ms:mtime_ms24, } = e;
+                  let super::super::super::super::exports::sentropic::bash::types::LazyReq{ path:path24, mode:mode24, mtime_ms:mtime_ms24, } = e;
                   let vec25 = <_ as Into<_rt::Vec<_>>>::into(path24).into_boxed_slice();
                   let ptr25 = vec25.as_ptr().cast::<u8>();
                   let len25 = vec25.len();
@@ -3226,7 +3230,7 @@ match result0 {
                   };},
                   V48::CreateExclusive(e) => {
                     *base.add(0).cast::<u8>() = (12i32) as u8;
-                    let super::super::super::super::sentropic::bash::types::CreateReq{ path:path26, mode:mode26, directory:directory26, } = e;
+                    let super::super::super::super::exports::sentropic::bash::types::CreateReq{ path:path26, mode:mode26, directory:directory26, } = e;
                     let vec27 = <_ as Into<_rt::Vec<_>>>::into(path26).into_boxed_slice();
                     let ptr27 = vec27.as_ptr().cast::<u8>();
                     let len27 = vec27.len();
@@ -3238,7 +3242,7 @@ match result0 {
                   },
                   V48::Mkdir(e) => {
                     *base.add(0).cast::<u8>() = (13i32) as u8;
-                    let super::super::super::super::sentropic::bash::types::MkdirReq{ path:path28, recursive:recursive28, mode:mode28, } = e;
+                    let super::super::super::super::exports::sentropic::bash::types::MkdirReq{ path:path28, recursive:recursive28, mode:mode28, } = e;
                     let vec29 = <_ as Into<_rt::Vec<_>>>::into(path28).into_boxed_slice();
                     let ptr29 = vec29.as_ptr().cast::<u8>();
                     let len29 = vec29.len();
@@ -3259,7 +3263,7 @@ match result0 {
                     };},
                     V48::Remove(e) => {
                       *base.add(0).cast::<u8>() = (14i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::RemoveReq{ path:path30, recursive:recursive30, force:force30, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::RemoveReq{ path:path30, recursive:recursive30, force:force30, } = e;
                       let vec31 = <_ as Into<_rt::Vec<_>>>::into(path30).into_boxed_slice();
                       let ptr31 = vec31.as_ptr().cast::<u8>();
                       let len31 = vec31.len();
@@ -3271,7 +3275,7 @@ match result0 {
                     },
                     V48::Copy(e) => {
                       *base.add(0).cast::<u8>() = (15i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::PairReq{ source:source32, target:target32, recursive:recursive32, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source32, target:target32, recursive:recursive32, } = e;
                       let vec33 = <_ as Into<_rt::Vec<_>>>::into(source32).into_boxed_slice();
                       let ptr33 = vec33.as_ptr().cast::<u8>();
                       let len33 = vec33.len();
@@ -3288,7 +3292,7 @@ match result0 {
                     },
                     V48::Rename(e) => {
                       *base.add(0).cast::<u8>() = (16i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::PairReq{ source:source35, target:target35, recursive:recursive35, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source35, target:target35, recursive:recursive35, } = e;
                       let vec36 = <_ as Into<_rt::Vec<_>>>::into(source35).into_boxed_slice();
                       let ptr36 = vec36.as_ptr().cast::<u8>();
                       let len36 = vec36.len();
@@ -3305,7 +3309,7 @@ match result0 {
                     },
                     V48::Symlink(e) => {
                       *base.add(0).cast::<u8>() = (17i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::PairReq{ source:source38, target:target38, recursive:recursive38, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source38, target:target38, recursive:recursive38, } = e;
                       let vec39 = <_ as Into<_rt::Vec<_>>>::into(source38).into_boxed_slice();
                       let ptr39 = vec39.as_ptr().cast::<u8>();
                       let len39 = vec39.len();
@@ -3322,7 +3326,7 @@ match result0 {
                     },
                     V48::HardLink(e) => {
                       *base.add(0).cast::<u8>() = (18i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::PairReq{ source:source41, target:target41, recursive:recursive41, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source41, target:target41, recursive:recursive41, } = e;
                       let vec42 = <_ as Into<_rt::Vec<_>>>::into(source41).into_boxed_slice();
                       let ptr42 = vec42.as_ptr().cast::<u8>();
                       let len42 = vec42.len();
@@ -3339,7 +3343,7 @@ match result0 {
                     },
                     V48::Chmod(e) => {
                       *base.add(0).cast::<u8>() = (19i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::ChmodReq{ path:path44, mode:mode44, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::ChmodReq{ path:path44, mode:mode44, } = e;
                       let vec45 = <_ as Into<_rt::Vec<_>>>::into(path44).into_boxed_slice();
                       let ptr45 = vec45.as_ptr().cast::<u8>();
                       let len45 = vec45.len();
@@ -3350,7 +3354,7 @@ match result0 {
                     },
                     V48::Utimes(e) => {
                       *base.add(0).cast::<u8>() = (20i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::UtimesReq{ path:path46, atime_ms:atime_ms46, mtime_ms:mtime_ms46, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::UtimesReq{ path:path46, atime_ms:atime_ms46, mtime_ms:mtime_ms46, } = e;
                       let vec47 = <_ as Into<_rt::Vec<_>>>::into(path46).into_boxed_slice();
                       let ptr47 = vec47.as_ptr().cast::<u8>();
                       let len47 = vec47.len();
@@ -3377,7 +3381,7 @@ match result0 {
             },
             V68::CustomCommand(e) => {
               *ptr1.add(16).cast::<u8>() = (2i32) as u8;
-              let super::super::super::super::sentropic::bash::types::CommandCall{ name:name51, args:args51, cwd:cwd51, env:env51, fds:fds51, input_len:input_len51, xpg_echo:xpg_echo51, } = e;
+              let super::super::super::super::exports::sentropic::bash::types::CommandCall{ name:name51, args:args51, cwd:cwd51, env:env51, fds:fds51, input_len:input_len51, xpg_echo:xpg_echo51, } = e;
               let vec52 = (name51.into_bytes()).into_boxed_slice();
               let ptr52 = vec52.as_ptr().cast::<u8>();
               let len52 = vec52.len();
@@ -3414,7 +3418,7 @@ match result0 {
               for (i, e) in vec59.into_iter().enumerate() {
                 let base = result59.add(i * (5*::core::mem::size_of::<*const u8>()));
                 {
-                  let super::super::super::super::sentropic::bash::types::EnvVar{ name:name56, value:value56, exported:exported56, } = e;
+                  let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name56, value:value56, exported:exported56, } = e;
                   let vec57 = <_ as Into<_rt::Vec<_>>>::into(name56).into_boxed_slice();
                   let ptr57 = vec57.as_ptr().cast::<u8>();
                   let len57 = vec57.len();
@@ -3443,7 +3447,7 @@ match result0 {
             },
             V68::Fetch(e) => {
               *ptr1.add(16).cast::<u8>() = (3i32) as u8;
-              let super::super::super::super::sentropic::bash::types::FetchReq{ method:method61, url:url61, headers:headers61, input_len:input_len61, follow_redirects:follow_redirects61, max_redirects:max_redirects61, timeout_ms:timeout_ms61, max_response_bytes:max_response_bytes61, } = e;
+              let super::super::super::super::exports::sentropic::bash::types::FetchReq{ method:method61, url:url61, headers:headers61, input_len:input_len61, follow_redirects:follow_redirects61, max_redirects:max_redirects61, timeout_ms:timeout_ms61, max_response_bytes:max_response_bytes61, } = e;
               let vec62 = (method61.into_bytes()).into_boxed_slice();
               let ptr62 = vec62.as_ptr().cast::<u8>();
               let len62 = vec62.len();
@@ -3463,7 +3467,7 @@ match result0 {
               for (i, e) in vec67.into_iter().enumerate() {
                 let base = result67.add(i * (4*::core::mem::size_of::<*const u8>()));
                 {
-                  let super::super::super::super::sentropic::bash::types::Header{ name:name64, value:value64, } = e;
+                  let super::super::super::super::exports::sentropic::bash::types::Header{ name:name64, value:value64, } = e;
                   let vec65 = (name64.into_bytes()).into_boxed_slice();
                   let ptr65 = vec65.as_ptr().cast::<u8>();
                   let len65 = vec65.len();
@@ -3834,7 +3838,7 @@ match result0 {
     #[allow(non_snake_case, unused_unsafe)]
     pub unsafe fn _export_method_fiber_resume_cabi<T_: GuestFiber>(arg0: *mut u8,arg1: i64,arg2: i32,arg3: ::core::mem::MaybeUninit::<u64>,arg4: ::core::mem::MaybeUninit::<u64>,arg5: usize,arg6: *mut u8,arg7: usize,arg8: *mut u8,arg9: usize,arg10: *mut u8,arg11: usize,) -> *mut u8 { unsafe {#[cfg(target_arch="wasm32")]
     _rt::run_ctors_once();let result77 = {
-      use super::super::super::super::sentropic::bash::types::HostOutcome as V76;
+      use super::super::super::super::exports::sentropic::bash::types::HostOutcome as V76;
       let v76 = match arg2 {
         0 => {
           let e76 = {
@@ -3850,7 +3854,7 @@ match result0 {
                   0 => {
                     let e = {
                       let l1 = i32::from(*base.add(8).cast::<u8>());
-                      use super::super::super::super::sentropic::bash::types::FsOk as V40;
+                      use super::super::super::super::exports::sentropic::bash::types::FsOk as V40;
                       let v40 = match l1 {
                         0 => {
                           V40::None
@@ -3872,8 +3876,8 @@ match result0 {
                             let l7 = *base.add(48).cast::<i64>();
                             let l8 = *base.add(56).cast::<i64>();
 
-                            super::super::super::super::sentropic::bash::types::Stat{
-                              kind: super::super::super::super::sentropic::bash::types::NodeKind::_lift(l3 as u8),
+                            super::super::super::super::exports::sentropic::bash::types::Stat{
+                              kind: super::super::super::super::exports::sentropic::bash::types::NodeKind::_lift(l3 as u8),
                               size: l4 as u64,
                               mode: l5 as u32,
                               mtime_ms: l6,
@@ -3942,9 +3946,9 @@ match result0 {
                                 let len25 = l24;
                                 let l26 = i32::from(*base.add(2*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-                                super::super::super::super::sentropic::bash::types::DirEntry{
+                                super::super::super::super::exports::sentropic::bash::types::DirEntry{
                                   name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l23.cast(), len25, len25)),
-                                  kind: super::super::super::super::sentropic::bash::types::NodeKind::_lift(l26 as u8),
+                                  kind: super::super::super::super::exports::sentropic::bash::types::NodeKind::_lift(l26 as u8),
                                 }
                               };
                               result27.push(e27);
@@ -3976,10 +3980,10 @@ match result0 {
                                 let l37 = *base.add(32+2*::core::mem::size_of::<*const u8>()).cast::<i64>();
                                 let l38 = *base.add(40+2*::core::mem::size_of::<*const u8>()).cast::<i64>();
 
-                                super::super::super::super::sentropic::bash::types::WalkEntry{
+                                super::super::super::super::exports::sentropic::bash::types::WalkEntry{
                                   path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l30.cast(), len32, len32)),
-                                  info: super::super::super::super::sentropic::bash::types::Stat{
-                                    kind: super::super::super::super::sentropic::bash::types::NodeKind::_lift(l33 as u8),
+                                  info: super::super::super::super::exports::sentropic::bash::types::Stat{
+                                    kind: super::super::super::super::exports::sentropic::bash::types::NodeKind::_lift(l33 as u8),
                                     size: l34 as u64,
                                     mode: l35 as u32,
                                     mtime_ms: l36,
@@ -4009,8 +4013,8 @@ match result0 {
                       let l43 = *base.add(8+2*::core::mem::size_of::<*const u8>()).cast::<usize>();
                       let len44 = l43;
 
-                      super::super::super::super::sentropic::bash::types::FsError{
-                        code: super::super::super::super::sentropic::bash::types::FsErrorCode::_lift(l41 as u8),
+                      super::super::super::super::exports::sentropic::bash::types::FsError{
+                        code: super::super::super::super::exports::sentropic::bash::types::FsErrorCode::_lift(l41 as u8),
                         path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l42.cast(), len44, len44)),
                       }
                     };
@@ -4059,7 +4063,7 @@ match result0 {
                 let l53 = *base.add(3*::core::mem::size_of::<*const u8>()).cast::<usize>();
                 let len54 = l53;
 
-                super::super::super::super::sentropic::bash::types::Header{
+                super::super::super::super::exports::sentropic::bash::types::Header{
                   name: _rt::string_lift(bytes51),
                   value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l52.cast(), len54, len54)),
                 }
@@ -4098,7 +4102,7 @@ match result0 {
                     let l69 = *base.add(3*::core::mem::size_of::<*const u8>()).cast::<usize>();
                     let len70 = l69;
 
-                    super::super::super::super::sentropic::bash::types::Header{
+                    super::super::super::super::exports::sentropic::bash::types::Header{
                       name: _rt::string_lift(bytes67),
                       value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l68.cast(), len70, len70)),
                     }
@@ -4107,7 +4111,7 @@ match result0 {
                 }
                 _rt::cabi_dealloc(base71, len71 * (4*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>());
 
-                super::super::super::super::sentropic::bash::types::RedirectHop{
+                super::super::super::super::exports::sentropic::bash::types::RedirectHop{
                   url: _rt::string_lift(bytes58),
                   status: l59 as u16,
                   status_text: _rt::string_lift(bytes62),
@@ -4118,7 +4122,7 @@ match result0 {
             }
             _rt::cabi_dealloc(base72, len72 * (7*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>());
 
-            super::super::super::super::sentropic::bash::types::FetchResp{
+            super::super::super::super::exports::sentropic::bash::types::FetchResp{
               status: arg3.assume_init() as i64 as i32 as u16,
               status_text: _rt::string_lift(bytes47),
               url: _rt::string_lift(bytes48),
@@ -4129,7 +4133,7 @@ match result0 {
           V76::Fetched(e76)
         }
         4 => {
-          let e76 = super::super::super::super::sentropic::bash::types::ClockReading{
+          let e76 = super::super::super::super::exports::sentropic::bash::types::ClockReading{
             wall_ms: arg3.assume_init() as i64,
             monotonic_ns: arg4.assume_init() as i64 as u64,
           };
@@ -4154,8 +4158,8 @@ match result0 {
           let e76 = {
             let len74 = arg5;
 
-            super::super::super::super::sentropic::bash::types::NetError{
-              code: super::super::super::super::sentropic::bash::types::NetErrorCode::_lift(arg3.assume_init() as i64 as i32 as u8),
+            super::super::super::super::exports::sentropic::bash::types::NetError{
+              code: super::super::super::super::exports::sentropic::bash::types::NetErrorCode::_lift(arg3.assume_init() as i64 as i32 as u8),
               detail: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg4.as_ptr().cast::<*mut u8>().read().cast(), len74, len74)),
             }
           };
@@ -4177,11 +4181,11 @@ match result0 {
     match result77 {
       Ok(e) => { {
         *ptr78.add(0).cast::<u8>() = (0i32) as u8;
-        use super::super::super::super::sentropic::bash::types::Step as V146;
+        use super::super::super::super::exports::sentropic::bash::types::Step as V146;
         match e {
           V146::Done(e) => {
             *ptr78.add(8).cast::<u8>() = (0i32) as u8;
-            let super::super::super::super::sentropic::bash::types::ExecResult{ exit_code:exit_code79, status:status79, limit_name:limit_name79, env:env79, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code79, status:status79, limit_name:limit_name79, env:env79, } = e;
             *ptr78.add(16).cast::<i32>() = _rt::as_i32(exit_code79);
             *ptr78.add(20).cast::<u8>() = (status79.clone() as i32) as u8;
             match limit_name79 {
@@ -4206,7 +4210,7 @@ match result0 {
             for (i, e) in vec84.into_iter().enumerate() {
               let base = result84.add(i * (5*::core::mem::size_of::<*const u8>()));
               {
-                let super::super::super::super::sentropic::bash::types::EnvVar{ name:name81, value:value81, exported:exported81, } = e;
+                let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name81, value:value81, exported:exported81, } = e;
                 let vec82 = <_ as Into<_rt::Vec<_>>>::into(name81).into_boxed_slice();
                 let ptr82 = vec82.as_ptr().cast::<u8>();
                 let len82 = vec82.len();
@@ -4232,13 +4236,13 @@ match result0 {
           }
           V146::HostCall(e) => {
             *ptr78.add(8).cast::<u8>() = (2i32) as u8;
-            let super::super::super::super::sentropic::bash::types::PendingCall{ epoch:epoch85, req:req85, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::PendingCall{ epoch:epoch85, req:req85, } = e;
             *ptr78.add(16).cast::<i64>() = _rt::as_i64(epoch85);
-            use super::super::super::super::sentropic::bash::types::HostReq as V145;
+            use super::super::super::super::exports::sentropic::bash::types::HostReq as V145;
             match req85 {
               V145::FsBatch(e) => {
                 *ptr78.add(24).cast::<u8>() = (0i32) as u8;
-                let super::super::super::super::sentropic::bash::types::FsBatchReq{ mount_id:mount_id86, ops:ops86, } = e;
+                let super::super::super::super::exports::sentropic::bash::types::FsBatchReq{ mount_id:mount_id86, ops:ops86, } = e;
                 *ptr78.add(32).cast::<i32>() = _rt::as_i32(mount_id86);
                 let vec126 = ops86;
                 let len126 = vec126.len();
@@ -4247,7 +4251,7 @@ match result0 {
                 for (i, e) in vec126.into_iter().enumerate() {
                   let base = result126.add(i * (56+4*::core::mem::size_of::<*const u8>()));
                   {
-                    use super::super::super::super::sentropic::bash::types::FsOp as V125;
+                    use super::super::super::super::exports::sentropic::bash::types::FsOp as V125;
                     match e {
                       V125::Stat(e) => {
                         *base.add(0).cast::<u8>() = (0i32) as u8;
@@ -4314,7 +4318,7 @@ match result0 {
                       },
                       V125::Walk(e) => {
                         *base.add(0).cast::<u8>() = (7i32) as u8;
-                        let super::super::super::super::sentropic::bash::types::WalkReq{ root:root94, max_depth:max_depth94, max_entries:max_entries94, } = e;
+                        let super::super::super::super::exports::sentropic::bash::types::WalkReq{ root:root94, max_depth:max_depth94, max_entries:max_entries94, } = e;
                         let vec95 = <_ as Into<_rt::Vec<_>>>::into(root94).into_boxed_slice();
                         let ptr95 = vec95.as_ptr().cast::<u8>();
                         let len95 = vec95.len();
@@ -4331,7 +4335,7 @@ match result0 {
                       }
                       V125::ReadFile(e) => {
                         *base.add(0).cast::<u8>() = (9i32) as u8;
-                        let super::super::super::super::sentropic::bash::types::ReadReq{ path:path96, offset:offset96, len:len96, } = e;
+                        let super::super::super::super::exports::sentropic::bash::types::ReadReq{ path:path96, offset:offset96, len:len96, } = e;
                         let vec97 = <_ as Into<_rt::Vec<_>>>::into(path96).into_boxed_slice();
                         let ptr97 = vec97.as_ptr().cast::<u8>();
                         let len97 = vec97.len();
@@ -4343,7 +4347,7 @@ match result0 {
                       },
                       V125::WriteFile(e) => {
                         *base.add(0).cast::<u8>() = (10i32) as u8;
-                        let super::super::super::super::sentropic::bash::types::WriteReq{ path:path98, data:data98, offset:offset98, truncate:truncate98, mode:mode98, mtime_ms:mtime_ms98, } = e;
+                        let super::super::super::super::exports::sentropic::bash::types::WriteReq{ path:path98, data:data98, offset:offset98, truncate:truncate98, mode:mode98, mtime_ms:mtime_ms98, } = e;
                         let vec99 = <_ as Into<_rt::Vec<_>>>::into(path98).into_boxed_slice();
                         let ptr99 = vec99.as_ptr().cast::<u8>();
                         let len99 = vec99.len();
@@ -4390,7 +4394,7 @@ match result0 {
                         };},
                         V125::WriteLazy(e) => {
                           *base.add(0).cast::<u8>() = (11i32) as u8;
-                          let super::super::super::super::sentropic::bash::types::LazyReq{ path:path101, mode:mode101, mtime_ms:mtime_ms101, } = e;
+                          let super::super::super::super::exports::sentropic::bash::types::LazyReq{ path:path101, mode:mode101, mtime_ms:mtime_ms101, } = e;
                           let vec102 = <_ as Into<_rt::Vec<_>>>::into(path101).into_boxed_slice();
                           let ptr102 = vec102.as_ptr().cast::<u8>();
                           let len102 = vec102.len();
@@ -4411,7 +4415,7 @@ match result0 {
                           };},
                           V125::CreateExclusive(e) => {
                             *base.add(0).cast::<u8>() = (12i32) as u8;
-                            let super::super::super::super::sentropic::bash::types::CreateReq{ path:path103, mode:mode103, directory:directory103, } = e;
+                            let super::super::super::super::exports::sentropic::bash::types::CreateReq{ path:path103, mode:mode103, directory:directory103, } = e;
                             let vec104 = <_ as Into<_rt::Vec<_>>>::into(path103).into_boxed_slice();
                             let ptr104 = vec104.as_ptr().cast::<u8>();
                             let len104 = vec104.len();
@@ -4423,7 +4427,7 @@ match result0 {
                           },
                           V125::Mkdir(e) => {
                             *base.add(0).cast::<u8>() = (13i32) as u8;
-                            let super::super::super::super::sentropic::bash::types::MkdirReq{ path:path105, recursive:recursive105, mode:mode105, } = e;
+                            let super::super::super::super::exports::sentropic::bash::types::MkdirReq{ path:path105, recursive:recursive105, mode:mode105, } = e;
                             let vec106 = <_ as Into<_rt::Vec<_>>>::into(path105).into_boxed_slice();
                             let ptr106 = vec106.as_ptr().cast::<u8>();
                             let len106 = vec106.len();
@@ -4444,7 +4448,7 @@ match result0 {
                             };},
                             V125::Remove(e) => {
                               *base.add(0).cast::<u8>() = (14i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::RemoveReq{ path:path107, recursive:recursive107, force:force107, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::RemoveReq{ path:path107, recursive:recursive107, force:force107, } = e;
                               let vec108 = <_ as Into<_rt::Vec<_>>>::into(path107).into_boxed_slice();
                               let ptr108 = vec108.as_ptr().cast::<u8>();
                               let len108 = vec108.len();
@@ -4456,7 +4460,7 @@ match result0 {
                             },
                             V125::Copy(e) => {
                               *base.add(0).cast::<u8>() = (15i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::PairReq{ source:source109, target:target109, recursive:recursive109, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source109, target:target109, recursive:recursive109, } = e;
                               let vec110 = <_ as Into<_rt::Vec<_>>>::into(source109).into_boxed_slice();
                               let ptr110 = vec110.as_ptr().cast::<u8>();
                               let len110 = vec110.len();
@@ -4473,7 +4477,7 @@ match result0 {
                             },
                             V125::Rename(e) => {
                               *base.add(0).cast::<u8>() = (16i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::PairReq{ source:source112, target:target112, recursive:recursive112, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source112, target:target112, recursive:recursive112, } = e;
                               let vec113 = <_ as Into<_rt::Vec<_>>>::into(source112).into_boxed_slice();
                               let ptr113 = vec113.as_ptr().cast::<u8>();
                               let len113 = vec113.len();
@@ -4490,7 +4494,7 @@ match result0 {
                             },
                             V125::Symlink(e) => {
                               *base.add(0).cast::<u8>() = (17i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::PairReq{ source:source115, target:target115, recursive:recursive115, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source115, target:target115, recursive:recursive115, } = e;
                               let vec116 = <_ as Into<_rt::Vec<_>>>::into(source115).into_boxed_slice();
                               let ptr116 = vec116.as_ptr().cast::<u8>();
                               let len116 = vec116.len();
@@ -4507,7 +4511,7 @@ match result0 {
                             },
                             V125::HardLink(e) => {
                               *base.add(0).cast::<u8>() = (18i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::PairReq{ source:source118, target:target118, recursive:recursive118, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::PairReq{ source:source118, target:target118, recursive:recursive118, } = e;
                               let vec119 = <_ as Into<_rt::Vec<_>>>::into(source118).into_boxed_slice();
                               let ptr119 = vec119.as_ptr().cast::<u8>();
                               let len119 = vec119.len();
@@ -4524,7 +4528,7 @@ match result0 {
                             },
                             V125::Chmod(e) => {
                               *base.add(0).cast::<u8>() = (19i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::ChmodReq{ path:path121, mode:mode121, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::ChmodReq{ path:path121, mode:mode121, } = e;
                               let vec122 = <_ as Into<_rt::Vec<_>>>::into(path121).into_boxed_slice();
                               let ptr122 = vec122.as_ptr().cast::<u8>();
                               let len122 = vec122.len();
@@ -4535,7 +4539,7 @@ match result0 {
                             },
                             V125::Utimes(e) => {
                               *base.add(0).cast::<u8>() = (20i32) as u8;
-                              let super::super::super::super::sentropic::bash::types::UtimesReq{ path:path123, atime_ms:atime_ms123, mtime_ms:mtime_ms123, } = e;
+                              let super::super::super::super::exports::sentropic::bash::types::UtimesReq{ path:path123, atime_ms:atime_ms123, mtime_ms:mtime_ms123, } = e;
                               let vec124 = <_ as Into<_rt::Vec<_>>>::into(path123).into_boxed_slice();
                               let ptr124 = vec124.as_ptr().cast::<u8>();
                               let len124 = vec124.len();
@@ -4562,7 +4566,7 @@ match result0 {
                     },
                     V145::CustomCommand(e) => {
                       *ptr78.add(24).cast::<u8>() = (2i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::CommandCall{ name:name128, args:args128, cwd:cwd128, env:env128, fds:fds128, input_len:input_len128, xpg_echo:xpg_echo128, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::CommandCall{ name:name128, args:args128, cwd:cwd128, env:env128, fds:fds128, input_len:input_len128, xpg_echo:xpg_echo128, } = e;
                       let vec129 = (name128.into_bytes()).into_boxed_slice();
                       let ptr129 = vec129.as_ptr().cast::<u8>();
                       let len129 = vec129.len();
@@ -4599,7 +4603,7 @@ match result0 {
                       for (i, e) in vec136.into_iter().enumerate() {
                         let base = result136.add(i * (5*::core::mem::size_of::<*const u8>()));
                         {
-                          let super::super::super::super::sentropic::bash::types::EnvVar{ name:name133, value:value133, exported:exported133, } = e;
+                          let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name133, value:value133, exported:exported133, } = e;
                           let vec134 = <_ as Into<_rt::Vec<_>>>::into(name133).into_boxed_slice();
                           let ptr134 = vec134.as_ptr().cast::<u8>();
                           let len134 = vec134.len();
@@ -4628,7 +4632,7 @@ match result0 {
                     },
                     V145::Fetch(e) => {
                       *ptr78.add(24).cast::<u8>() = (3i32) as u8;
-                      let super::super::super::super::sentropic::bash::types::FetchReq{ method:method138, url:url138, headers:headers138, input_len:input_len138, follow_redirects:follow_redirects138, max_redirects:max_redirects138, timeout_ms:timeout_ms138, max_response_bytes:max_response_bytes138, } = e;
+                      let super::super::super::super::exports::sentropic::bash::types::FetchReq{ method:method138, url:url138, headers:headers138, input_len:input_len138, follow_redirects:follow_redirects138, max_redirects:max_redirects138, timeout_ms:timeout_ms138, max_response_bytes:max_response_bytes138, } = e;
                       let vec139 = (method138.into_bytes()).into_boxed_slice();
                       let ptr139 = vec139.as_ptr().cast::<u8>();
                       let len139 = vec139.len();
@@ -4648,7 +4652,7 @@ match result0 {
                       for (i, e) in vec144.into_iter().enumerate() {
                         let base = result144.add(i * (4*::core::mem::size_of::<*const u8>()));
                         {
-                          let super::super::super::super::sentropic::bash::types::Header{ name:name141, value:value141, } = e;
+                          let super::super::super::super::exports::sentropic::bash::types::Header{ name:name141, value:value141, } = e;
                           let vec142 = (name141.into_bytes()).into_boxed_slice();
                           let ptr142 = vec142.as_ptr().cast::<u8>();
                           let len142 = vec142.len();
@@ -4704,7 +4708,7 @@ match result0 {
             } },
             Err(e) => { {
               *ptr78.add(0).cast::<u8>() = (1i32) as u8;
-              let super::super::super::super::sentropic::bash::types::KernelError{ code:code147, detail:detail147, } = e;
+              let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code147, detail:detail147, } = e;
               *ptr78.add(8).cast::<u8>() = (code147.clone() as i32) as u8;
               let vec148 = (detail147.into_bytes()).into_boxed_slice();
               let ptr148 = vec148.as_ptr().cast::<u8>();
@@ -5056,7 +5060,7 @@ match result0 {
           } },
           Err(e) => { {
             *ptr1.add(0).cast::<u8>() = (1i32) as u8;
-            let super::super::super::super::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
             *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
             let vec4 = (detail3.into_bytes()).into_boxed_slice();
             let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -5091,7 +5095,7 @@ match result0 {
       pub unsafe fn _export_method_fiber_push_call_data_cabi<T_: GuestFiber>(arg0: *mut u8,arg1: i64,arg2: i32,arg3: *mut u8,arg4: usize,) -> *mut u8 { unsafe {#[cfg(target_arch="wasm32")]
       _rt::run_ctors_once();let result1 = {
         let len0 = arg4;
-        T_::push_call_data(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), arg1 as u64, super::super::super::super::sentropic::bash::types::OutChannel::_lift(arg2 as u8), <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg3.cast(), len0, len0)))
+        T_::push_call_data(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), arg1 as u64, super::super::super::super::exports::sentropic::bash::types::OutChannel::_lift(arg2 as u8), <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(arg3.cast(), len0, len0)))
       };
       let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
       match result1 {
@@ -5100,7 +5104,7 @@ match result0 {
         } },
         Err(e) => { {
           *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-          let super::super::super::super::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
+          let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code3, detail:detail3, } = e;
           *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code3.clone() as i32) as u8;
           let vec4 = (detail3.into_bytes()).into_boxed_slice();
           let ptr4 = vec4.as_ptr().cast::<u8>();
@@ -5150,7 +5154,7 @@ match result0 {
       } },
       Err(e) => { {
         *ptr4.add(0).cast::<u8>() = (1i32) as u8;
-        let super::super::super::super::sentropic::bash::types::KernelError{ code:code5, detail:detail5, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code5, detail:detail5, } = e;
         *ptr4.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code5.clone() as i32) as u8;
         let vec6 = (detail5.into_bytes()).into_boxed_slice();
         let ptr6 = vec6.as_ptr().cast::<u8>();
@@ -5192,7 +5196,7 @@ match result0 {
         let len5 = l4;
         let l6 = i32::from(*base.add(4*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-        super::super::super::super::sentropic::bash::types::EnvVar{
+        super::super::super::super::exports::sentropic::bash::types::EnvVar{
           name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l0.cast(), len2, len2)),
           value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l3.cast(), len5, len5)),
           exported: _rt::bool_lift(l6 as u8),
@@ -5210,7 +5214,7 @@ match result0 {
     } },
     Err(e) => { {
       *ptr9.add(0).cast::<u8>() = (1i32) as u8;
-      let super::super::super::super::sentropic::bash::types::KernelError{ code:code10, detail:detail10, } = e;
+      let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code10, detail:detail10, } = e;
       *ptr9.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code10.clone() as i32) as u8;
       let vec11 = (detail10.into_bytes()).into_boxed_slice();
       let ptr11 = vec11.as_ptr().cast::<u8>();
@@ -5238,10 +5242,10 @@ pub unsafe fn __post_return_method_fiber_set_call_env<T_: GuestFiber>(arg0: *mut
 #[allow(non_snake_case, unused_unsafe)]
 pub unsafe fn _export_method_fiber_cancel_cabi<T_: GuestFiber>(arg0: *mut u8,arg1: i32,) -> *mut u8 { unsafe {#[cfg(target_arch="wasm32")]
 _rt::run_ctors_once();let result0 = {
-  T_::cancel(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), super::super::super::super::sentropic::bash::types::CancelReason::_lift(arg1 as u8))
+  T_::cancel(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), super::super::super::super::exports::sentropic::bash::types::CancelReason::_lift(arg1 as u8))
 };
 let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
-let super::super::super::super::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = result0;
+let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = result0;
 *ptr1.add(0).cast::<i32>() = _rt::as_i32(exit_code2);
 *ptr1.add(4).cast::<u8>() = (status2.clone() as i32) as u8;
 match limit_name2 {
@@ -5266,7 +5270,7 @@ let (result7, _cleanup7) = crate::bindings::rt::Cleanup::new(layout7);if let Som
 for (i, e) in vec7.into_iter().enumerate() {
   let base = result7.add(i * (5*::core::mem::size_of::<*const u8>()));
   {
-    let super::super::super::super::sentropic::bash::types::EnvVar{ name:name4, value:value4, exported:exported4, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name4, value:value4, exported:exported4, } = e;
     let vec5 = <_ as Into<_rt::Vec<_>>>::into(name4).into_boxed_slice();
     let ptr5 = vec5.as_ptr().cast::<u8>();
     let len5 = vec5.len();
@@ -5381,7 +5385,7 @@ let (result10, _cleanup10) = crate::bindings::rt::Cleanup::new(layout10);if let 
 for (i, e) in vec10.into_iter().enumerate() {
   let base = result10.add(i * (8+6*::core::mem::size_of::<*const u8>()));
   {
-    let super::super::super::super::sentropic::bash::types::TraceEvent{ category:category2, name:name2, duration_ms:duration_ms2, details:details2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::TraceEvent{ category:category2, name:name2, duration_ms:duration_ms2, details:details2, } = e;
     let vec3 = (category2.into_bytes()).into_boxed_slice();
     let ptr3 = vec3.as_ptr().cast::<u8>();
     let len3 = vec3.len();
@@ -5402,14 +5406,14 @@ for (i, e) in vec10.into_iter().enumerate() {
     for (i, e) in vec9.into_iter().enumerate() {
       let base = result9.add(i * (8+4*::core::mem::size_of::<*const u8>()));
       {
-        let super::super::super::super::sentropic::bash::types::TraceDetail{ key:key5, value:value5, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::TraceDetail{ key:key5, value:value5, } = e;
         let vec6 = (key5.into_bytes()).into_boxed_slice();
         let ptr6 = vec6.as_ptr().cast::<u8>();
         let len6 = vec6.len();
         ::core::mem::forget(vec6);
         *base.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len6;
         *base.add(0).cast::<*mut u8>() = ptr6.cast_mut();
-        use super::super::super::super::sentropic::bash::types::TraceValue as V8;
+        use super::super::super::super::exports::sentropic::bash::types::TraceValue as V8;
         match value5 {
           V8::Number(e) => {
             *base.add(2*::core::mem::size_of::<*const u8>()).cast::<u8>() = (0i32) as u8;
@@ -5523,7 +5527,7 @@ _rt::run_ctors_once();let result90 = {
       let len7 = l6;
       let l8 = *base.add(4*::core::mem::size_of::<*const u8>()).cast::<i32>();
 
-      super::super::super::super::sentropic::bash::types::OneshotFile{
+      super::super::super::super::exports::sentropic::bash::types::OneshotFile{
         path: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l2.cast(), len4, len4)),
         data: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l5.cast(), len7, len7)),
         mode: l8 as u32,
@@ -5547,7 +5551,7 @@ _rt::run_ctors_once();let result90 = {
       let bytes15 = _rt::Vec::from_raw_parts(l13.cast(), len15, len15);
       let l16 = *base.add(2*::core::mem::size_of::<*const u8>()).cast::<i64>();
 
-      super::super::super::super::sentropic::bash::types::LimitOverride{
+      super::super::super::super::exports::sentropic::bash::types::LimitOverride{
         name: _rt::string_lift(bytes15),
         value: l16 as u64,
       }
@@ -5591,7 +5595,7 @@ _rt::run_ctors_once();let result90 = {
       let len39 = l38;
       let l40 = i32::from(*base.add(4*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-      super::super::super::super::sentropic::bash::types::EnvVar{
+      super::super::super::super::exports::sentropic::bash::types::EnvVar{
         name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l34.cast(), len36, len36)),
         value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l37.cast(), len39, len39)),
         exported: _rt::bool_lift(l40 as u8),
@@ -5642,7 +5646,7 @@ _rt::run_ctors_once();let result90 = {
       let len73 = l72;
       let l74 = i32::from(*base.add(4*::core::mem::size_of::<*const u8>()).cast::<u8>());
 
-      super::super::super::super::sentropic::bash::types::EnvVar{
+      super::super::super::super::exports::sentropic::bash::types::EnvVar{
         name: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l68.cast(), len70, len70)),
         value: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l71.cast(), len73, len73)),
         exported: _rt::bool_lift(l74 as u8),
@@ -5659,14 +5663,14 @@ _rt::run_ctors_once();let result90 = {
   let l87 = *arg0.add(48+31*::core::mem::size_of::<*const u8>()).cast::<usize>();
   let len88 = l87;
   let l89 = *arg0.add(48+32*::core::mem::size_of::<*const u8>()).cast::<i64>();
-  T_::exec_oneshot(super::super::super::super::sentropic::bash::types::OneshotReq{
+  T_::exec_oneshot(super::super::super::super::exports::sentropic::bash::types::OneshotReq{
     files: result9,
-    config: super::super::super::super::sentropic::bash::types::ShellConfig{
-      limits: super::super::super::super::sentropic::bash::types::Limits{
-        profile: super::super::super::super::sentropic::bash::types::Profile::_lift(l10 as u8),
+    config: super::super::super::super::exports::sentropic::bash::types::ShellConfig{
+      limits: super::super::super::super::exports::sentropic::bash::types::Limits{
+        profile: super::super::super::super::exports::sentropic::bash::types::Profile::_lift(l10 as u8),
         overrides: result17,
       },
-      grants: super::super::super::super::sentropic::bash::types::Grants::empty() | super::super::super::super::sentropic::bash::types::Grants::from_bits_retain(((l18 as u8) << 0) as _),
+      grants: super::super::super::super::exports::sentropic::bash::types::Grants::empty() | super::super::super::super::exports::sentropic::bash::types::Grants::from_bits_retain(((l18 as u8) << 0) as _),
       commands: match l19 {
         0 => None,
         1 => {
@@ -5721,7 +5725,7 @@ _rt::run_ctors_once();let result90 = {
             let l49 = *arg0.add(12+16*::core::mem::size_of::<*const u8>()).cast::<i32>();
             let l50 = *arg0.add(16+16*::core::mem::size_of::<*const u8>()).cast::<i32>();
 
-            super::super::super::super::sentropic::bash::types::ProcessInfo{
+            super::super::super::super::exports::sentropic::bash::types::ProcessInfo{
               pid: l47 as u32,
               ppid: l48 as u32,
               uid: l49 as u32,
@@ -5736,7 +5740,7 @@ _rt::run_ctors_once();let result90 = {
       trace: _rt::bool_lift(l52 as u8),
       coverage: _rt::bool_lift(l53 as u8),
     },
-    opts: super::super::super::super::sentropic::bash::types::ExecOpts{
+    opts: super::super::super::super::exports::sentropic::bash::types::ExecOpts{
       script: <_ as From<_rt::Vec<_>>>::from(_rt::Vec::from_raw_parts(l54.cast(), len56, len56)),
       script_overflow: match l57 {
         0 => None,
@@ -5745,7 +5749,7 @@ _rt::run_ctors_once();let result90 = {
             let l58 = *arg0.add(32+18*::core::mem::size_of::<*const u8>()).cast::<i64>();
             let l59 = *arg0.add(40+18*::core::mem::size_of::<*const u8>()).cast::<i64>();
 
-            super::super::super::super::sentropic::bash::types::ScriptOverflow{
+            super::super::super::super::exports::sentropic::bash::types::ScriptOverflow{
               utf16_units: l58 as u64,
               utf8_bytes: l59 as u64,
             }
@@ -5797,8 +5801,8 @@ let ptr91 = (&raw mut _RET_AREA.0).cast::<u8>();
 match result90 {
   Ok(e) => { {
     *ptr91.add(0).cast::<u8>() = (0i32) as u8;
-    let super::super::super::super::sentropic::bash::types::OneshotResult{ outcome:outcome92, stdout:stdout92, stderr:stderr92, changed:changed92, removed:removed92, } = e;
-    let super::super::super::super::sentropic::bash::types::ExecResult{ exit_code:exit_code93, status:status93, limit_name:limit_name93, env:env93, } = outcome92;
+    let super::super::super::super::exports::sentropic::bash::types::OneshotResult{ outcome:outcome92, stdout:stdout92, stderr:stderr92, changed:changed92, removed:removed92, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code93, status:status93, limit_name:limit_name93, env:env93, } = outcome92;
     *ptr91.add(::core::mem::size_of::<*const u8>()).cast::<i32>() = _rt::as_i32(exit_code93);
     *ptr91.add(4+1*::core::mem::size_of::<*const u8>()).cast::<u8>() = (status93.clone() as i32) as u8;
     match limit_name93 {
@@ -5823,7 +5827,7 @@ match result90 {
     for (i, e) in vec98.into_iter().enumerate() {
       let base = result98.add(i * (5*::core::mem::size_of::<*const u8>()));
       {
-        let super::super::super::super::sentropic::bash::types::EnvVar{ name:name95, value:value95, exported:exported95, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::EnvVar{ name:name95, value:value95, exported:exported95, } = e;
         let vec96 = <_ as Into<_rt::Vec<_>>>::into(name95).into_boxed_slice();
         let ptr96 = vec96.as_ptr().cast::<u8>();
         let len96 = vec96.len();
@@ -5860,7 +5864,7 @@ match result90 {
     for (i, e) in vec104.into_iter().enumerate() {
       let base = result104.add(i * (5*::core::mem::size_of::<*const u8>()));
       {
-        let super::super::super::super::sentropic::bash::types::OneshotFile{ path:path101, data:data101, mode:mode101, } = e;
+        let super::super::super::super::exports::sentropic::bash::types::OneshotFile{ path:path101, data:data101, mode:mode101, } = e;
         let vec102 = <_ as Into<_rt::Vec<_>>>::into(path101).into_boxed_slice();
         let ptr102 = vec102.as_ptr().cast::<u8>();
         let len102 = vec102.len();
@@ -5898,7 +5902,7 @@ match result90 {
   } },
   Err(e) => { {
     *ptr91.add(0).cast::<u8>() = (1i32) as u8;
-    let super::super::super::super::sentropic::bash::types::KernelError{ code:code107, detail:detail107, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::KernelError{ code:code107, detail:detail107, } = e;
     *ptr91.add(::core::mem::size_of::<*const u8>()).cast::<u8>() = (code107.clone() as i32) as u8;
     let vec108 = (detail107.into_bytes()).into_boxed_slice();
     let ptr108 = vec108.as_ptr().cast::<u8>();
@@ -6890,6 +6894,7 @@ mod _rt {
 macro_rules! __export_kernel_impl {
   ($ty:ident) => (self::export!($ty with_types_in self););
   ($ty:ident with_types_in $($path_to_types_root:tt)*) => (
+  $($path_to_types_root)*::exports::sentropic::bash::types::__export_sentropic_bash_types_0_1_0_draft_cabi!($ty with_types_in $($path_to_types_root)*::exports::sentropic::bash::types);
   $($path_to_types_root)*::exports::sentropic::bash::engine::__export_sentropic_bash_engine_0_1_0_draft_cabi!($ty with_types_in $($path_to_types_root)*::exports::sentropic::bash::engine);
   )
 }
@@ -6975,7 +6980,7 @@ usage\x03\0w\x01q\x02\x06number\x01u\0\x04text\x01\x01\0\x04\0\x0btrace-value\x0
 \x01\x01p\x81\x01\x01r\x05\x05files\x82\x01\x06config\x17\x04opts\x1e\x05stdin\x01\
 \x04fuelw\x04\0\x0boneshot-req\x03\0\x83\x01\x01r\x05\x07outcome\"\x06stdout\x01\
 \x06stderr\x01\x07changed\x82\x01\x07removed\x1b\x04\0\x0eoneshot-result\x03\0\x85\
-\x01\x03\0\x20sentropic:bash/types@0.1.0-draft\x05\0\x02\x03\0\0\x05bytes\x02\x03\
+\x01\x04\0\x20sentropic:bash/types@0.1.0-draft\x05\0\x02\x03\0\0\x05bytes\x02\x03\
 \0\0\x07env-var\x02\x03\0\0\x0cshell-config\x02\x03\0\0\x09exec-opts\x02\x03\0\0\
 \x0bexec-result\x02\x03\0\0\x04step\x02\x03\0\0\x0chost-outcome\x02\x03\0\0\x0bt\
 race-event\x02\x03\0\0\x0dcancel-reason\x02\x03\0\0\x0bout-channel\x02\x03\0\0\x05\
