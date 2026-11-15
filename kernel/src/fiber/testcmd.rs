@@ -5,6 +5,25 @@ use crate::fs::{Code, Ok_, Op};
 use crate::shell::{G_ENTROPY, G_HOST_FS, G_NETWORK, G_REAL_CLOCK, G_REAL_SLEEP};
 use crate::util::parse_u64;
 
+/// The names of the test-only commands, matched by index so that they exist as data in this build only.
+const CMDS: [&[u8]; 16] = [b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write", b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap"];
+const C_OUT: usize = 0;
+const C_ERR: usize = 1;
+const C_STDIN: usize = 2;
+const C_ALLOC: usize = 3;
+const C_SPIN: usize = 4;
+const C_EXIT: usize = 5;
+const C_SETENV: usize = 6;
+const C_WRITE: usize = 7;
+const C_CAT: usize = 8;
+const C_HOSTFS: usize = 9;
+const C_LAZY: usize = 10;
+const C_FETCH: usize = 11;
+const C_SLEEP: usize = 12;
+const C_CLOCK: usize = 13;
+const C_ENTROPY: usize = 14;
+const C_TRAP: usize = 15;
+
 const T_HOSTFS: u8 = 1;
 const T_LAZY: u8 = 2;
 const T_FETCH: u8 = 3;
@@ -39,15 +58,16 @@ impl Fiber {
 
     pub(super) fn exec_test(&mut self, name: &[u8], args: &[&[u8]]) -> Option<Flow> {
         let num = |i: usize| args.get(i).and_then(|a| parse_u64(a));
-        let flow = match name {
-            b"__out" | b"__err" => {
+        let Some(idx) = CMDS.iter().position(|c| *c == name) else { return None };
+        let flow = match idx {
+            C_OUT | C_ERR => {
                 let Some(n) = num(0) else { return Some(self.t_bad(name)) };
-                let c = if name == b"__out" { Chan::Stdout } else { Chan::Stderr };
+                let c = if idx == C_OUT { Chan::Stdout } else { Chan::Stderr };
                 self.last_exit = 0;
                 let r = self.fill_out(c, b'a', n);
                 self.t_ok(r)
             }
-            b"__stdin" => {
+            C_STDIN => {
                 let start = self.stdin_pos.min(self.stdin.len());
                 self.stdin_pos = self.stdin.len();
                 let data = core::mem::replace(&mut self.stdin, KBytes::new_in(&self.scratch));
@@ -56,7 +76,7 @@ impl Fiber {
                 self.last_exit = 0;
                 self.t_ok(r)
             }
-            b"__alloc" => {
+            C_ALLOC => {
                 let Some(n) = num(0) else { return Some(self.t_bad(name)) };
                 let Ok(n) = usize::try_from(n) else { return Some(Flow::Fail(Fail::Mem(MemError::Overflow))) };
                 match KBytes::with_capacity_in(n, &self.live).and_then(|b| self.kept.try_push(b)) {
@@ -67,13 +87,13 @@ impl Fiber {
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
             }
-            b"__spin" => Flow::Spin,
-            b"__exit" => {
+            C_SPIN => Flow::Spin,
+            C_EXIT => {
                 let Some(n) = num(0) else { return Some(self.t_bad(name)) };
                 self.last_exit = n as i32;
                 Flow::Exit
             }
-            b"__setenv" => {
+            C_SETENV => {
                 let (Some(k), Some(v)) = (args.first(), args.get(1)) else { return Some(self.t_bad(name)) };
                 match self.env.set(k, v, true) {
                     Ok(()) => {
@@ -83,12 +103,12 @@ impl Fiber {
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
             }
-            b"__write" => {
+            C_WRITE => {
                 let (Some(p), Some(t)) = (args.first(), args.get(1)) else { return Some(self.t_bad(name)) };
                 let r = self.shell.root.op(Op::WriteFile { path: p, data: t, offset: Some(0), truncate: true, mode: None, mtime_ms: None });
                 self.fs_exit(r.map(|_| ()), p)
             }
-            b"__cat" => {
+            C_CAT => {
                 let Some(p) = args.first() else { return Some(self.t_bad(name)) };
                 let mut offset = 0u64;
                 loop {
@@ -108,7 +128,7 @@ impl Fiber {
                     }
                 }
             }
-            b"__hostfs" => {
+            C_HOSTFS => {
                 let (Some(id), Some(p)) = (num(0), args.get(1)) else { return Some(self.t_bad(name)) };
                 if !self.shell.granted(G_HOST_FS) {
                     return Some(self.t_denied());
@@ -118,7 +138,7 @@ impl Fiber {
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
             }
-            b"__lazy" => {
+            C_LAZY => {
                 let Some(p) = args.first() else { return Some(self.t_bad(name)) };
                 if !self.shell.granted(G_HOST_FS) {
                     return Some(self.t_denied());
@@ -128,7 +148,7 @@ impl Fiber {
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
             }
-            b"__fetch" => {
+            C_FETCH => {
                 let Some(u) = args.first() else { return Some(self.t_bad(name)) };
                 if !self.shell.granted(G_NETWORK) {
                     return Some(self.t_denied());
@@ -138,7 +158,7 @@ impl Fiber {
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
             }
-            b"__sleep" => {
+            C_SLEEP => {
                 let Some(ms) = num(0) else { return Some(self.t_bad(name)) };
                 if self.shell.granted(G_REAL_SLEEP) {
                     Flow::Host(Pending::Test(T_SLEEP, 0), HostReq::Sleep(ms))
@@ -148,7 +168,7 @@ impl Fiber {
                     Flow::Next
                 }
             }
-            b"__clock" => {
+            C_CLOCK => {
                 if self.shell.granted(G_REAL_CLOCK) {
                     Flow::Host(Pending::Test(T_CLOCK, 0), HostReq::Clock)
                 } else {
@@ -158,7 +178,7 @@ impl Fiber {
                     self.t_ok(r)
                 }
             }
-            b"__entropy" => {
+            C_ENTROPY => {
                 let Some(n) = num(0) else { return Some(self.t_bad(name)) };
                 if self.shell.granted(G_ENTROPY) {
                     Flow::Host(Pending::Test(T_ENTROPY, 0), HostReq::Entropy(n as u32))
@@ -172,7 +192,7 @@ impl Fiber {
                     self.t_ok(r)
                 }
             }
-            b"__trap" => {
+            C_TRAP => {
                 #[cfg(target_arch = "wasm32")]
                 core::arch::wasm32::unreachable();
                 #[cfg(not(target_arch = "wasm32"))]

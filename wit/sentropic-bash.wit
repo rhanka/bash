@@ -174,5 +174,8 @@ interface engine {
 }
 
 world kernel {
+  // `types` is exported next to `engine`: `engine` uses its types, and without this line the component would
+  // import the (type-only) `types` instance, breaking the zero-import rule (EVOL D2, gate G1).
+  export types;
   export engine;
 }
