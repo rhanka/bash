@@ -28,7 +28,9 @@ per-builtin cost) and for security. Companion packages are allowed (`@sentropic/
 
 ## WASM-first and performance (MANDATORY)
 - Hot paths (parser, interpreter, builtins) target WASM. Startup time and per-function cost are tracked by
-  a reproducible benchmark against `just-bash` and MoonBash on the same machine.
+  a reproducible benchmark against `just-bash` on the same machine.
+- Features are aligned with `just-bash` (the authority) and compared with MoonBash through a feature
+  matrix built from its sources; MoonBash is not built or benchmarked for performance.
 - A perf regression greater than the agreed budget fails the gate.
 
 ## Security (MANDATORY)
