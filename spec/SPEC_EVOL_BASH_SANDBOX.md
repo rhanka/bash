@@ -1,4 +1,4 @@
-# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.3)
+# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.4)
 
 Status: normative. Derived from `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 (called "the study" below), which
 holds the evidence, measurements and alternatives; this document holds the decisions. Where both speak,
@@ -13,7 +13,7 @@ Conventions:
 - Lot ids are those of study section 7.
 - v1.1 reconciles the adversarial review of v1 (Annex J). v1.2 applies the owner answers of 15/11 on
   runtimes, tracing and defense-in-depth (section 3). v1.3 closes the review (R1-R5, Annex J); the lot plan
-  is `plan/PLAN_BASH_SANDBOX_V1.md`.
+  is `plan/PLAN_BASH_SANDBOX_V1.md`. v1.4 applies the owner answers of 15/11 on names and host disk access (D26).
 - A build lane reads this document without the reference: every behaviour it needs is stated here or in a
   lot spec, never by a bare `JB:` pointer. `JB:` paths are kept only as provenance for reviewers.
 
@@ -46,6 +46,7 @@ Conventions:
 | D23 | Divergence list | Owner |
 | D24 | Go/no-go points | Consensus |
 | D25 | Evolution path: runtime companions `@sentropic/python` and `@sentropic/js` | Owner / Consensus |
+| D26 | Names, and host disk access denied by default on every target | Owner |
 
 ## 2. Decisions
 
@@ -302,10 +303,12 @@ Conventions:
 ### D18 — Published artefacts
 - **Decision.** One npm package `@sentropic/bash` with empty `dependencies` and no install script,
   containing: `kernel.component.wasm`, `wit/`, the generated `js/` (core module, glue, types), the facade,
-  and the unplugged session drivers. The same component bytes are pushed to an OCI registry. `*.wasm` is
+  the unplugged session drivers and the `stpsh` binary (D26). The same component bytes are pushed to an OCI
+  registry as `sentropic-bash` (for example `ghcr.io/rhanka/sentropic-bash`). `*.wasm` is
   never committed; consumers use published packages. Pre-release `0.x` under the `next` tag once tier A/B
   parity passes.
-- **Posed by.** Owner. **Track.** `01M7FTJ933E69W3QN9THHCWDDY`, `01M7DXY6KTXZZCRJ70ZG0GNT75`.
+- **Posed by.** Owner. **Track.** `01M7FTJ933E69W3QN9THHCWDDY`, `01M7DXY6KTXZZCRJ70ZG0GNT75`,
+  `01M7G4KVMH4GVS2JBBYNJ67841` (names).
 - **Rationale.** TS consumers get everything from npm; wasmCloud deployments pull from OCI.
 - **Acceptance.** On every PR, offline: `npm pack` content test, then install of the tarball in an empty
   project with no native tool, running `exec('echo hi')`. At release: the npm component digest equals the
@@ -399,6 +402,42 @@ Conventions:
   own study and EVOL; kernel gates G1 and G6 unchanged with the companion installed; oracle snapshots of
   the reference's runtime commands.
 - **Binds.** New post-parity lots (plan rung): companion study, `@sentropic/python`, `@sentropic/js`.
+
+### D26 — Names, and host disk access denied by default on every target
+- **Decision.**
+  *Names.* The npm library is `@sentropic/bash`; the OCI artefact is `sentropic-bash`; the WIT package
+  stays `sentropic:bash`. There is **one binary, `stpsh`**, replacing the reference's `just-bash` and
+  `just-bash-shell`: `stpsh script.sh`, `stpsh -c '<script>'` or a script on stdin runs a script; a bare
+  `stpsh` on a terminal opens the interactive shell.
+  *Host disk.* No target gives a script access to a host disk unless the embedder or operator grants it
+  explicitly; the reference's behaviour is always one flag or option away:
+
+  | Target | Default | Explicit grant |
+  |---|---|---|
+  | Local CLI (`stpsh`) | Empty in-memory filesystem; no host file is readable | `--root <dir>` mounts that directory read-only, at the reference's mount point `/home/user/project`, which becomes the working directory; `--allow-write` permits writes as the reference's flag does; `--just-bash` reproduces every default of the reference's CLIs (script mode: the current directory mounted read-only at `/home/user/project`; interactive mode: the current directory mounted at `/`, working directory and `HOME` `/`) |
+  | Node library | `InMemoryFs`, as the reference | An `fs` adapter (`OverlayFs`, `ReadWriteFs`, custom `IFileSystem`), as the reference (D10) |
+  | Browser | `InMemoryFs` seeded by the page, as the reference | A custom `IFileSystem` supplied by the page, for example one backed by the origin-private file system |
+  | wasmCloud and Kubernetes | `session-pure`: no filesystem import at all | `session-fs`: the directory or volume the host grants (a preopened directory: a Kubernetes volume, a wasmCloud configuration) is mounted as the root |
+
+  Other `stpsh` options keep the reference's names and meaning: `-c`, `-e`/`--errexit`, `--cwd`,
+  `--json`, `--python`, `--javascript` (effective once the companions exist, D25), `-h`, `-v`, and
+  `--network` for the interactive shell (an explicit grant of full network access, as in the reference).
+- **Rationale.** Default deny is a mandatory rule of the project; an implicit read of the working
+  directory would expose local files to scripts run by an agent. One binary name of our own avoids
+  shadowing an installed reference CLI.
+- **Posed by.** Owner. **Track.** `01M7G4KVMH4GVS2JBBYNJ67841` (names), `01M7G4KVWXWGS3WA2EBETGZFH8`
+  (host disk).
+- **Acceptance.** Per target: (CLI) with no flag, a script cannot read a sentinel file placed in the
+  current directory; with `--root` it reads it and a write fails; with `--allow-write` the write succeeds
+  as on the reference; with `--just-bash` the outputs equal snapshots recorded from the reference's two
+  CLIs; a bare `stpsh` with a terminal on stdin enters the interactive shell and with a pipe runs the
+  script. (Node) a default `new Bash()` cannot read a host sentinel file; with `OverlayFs` it can.
+  (Browser) the suite runs with a page-supplied async `IFileSystem`. (wasmCloud, Kubernetes) the composed
+  `session-pure` component lists no filesystem import; `session-fs` under `wasmtime` with one preopened
+  directory sees it as `/` and cannot reach its parent; without a preopen it sees no host file. A smoke run
+  on the owner's wasmCloud host is a conductor gate.
+- **Binds.** L17a (CLI), L1b and L7b (Node), L19 (browser), L1c (session drivers), L0 and the release
+  (artefact names).
 
 ---
 
@@ -726,7 +765,7 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 | B | `OverlayFs`, `ReadWriteFs`, `MountableFs` | Same options, own implementation (D10) |
 | B | `NetworkConfig` and typed network errors (D.4) | Same (D11) |
 | B | ESM and CJS entries, `./browser` entry | Same; browser runs every kernel command |
-| C (after parity) | `Sandbox`, `SandboxCommand`; CLI binaries | Later lot (L17a) |
+| C (after parity) | `Sandbox`, `SandboxCommand`; CLI binaries `just-bash`, `just-bash-shell` | `Sandbox` as the reference; one binary `stpsh` with the defaults of D26 (lot L17a) |
 | Not in v1 | `parse`, AST types, `BashTransformPipeline`, plugins, `serialize`, `registerTransformPlugin`, `transform` | Absent; the two methods throw "not supported" |
 | Deferred to companions (D25) | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | In v1 the option is accepted and has no effect and the exports are absent; they are exported by the companion packages |
 | Companions (D25) | `python`, `javascript` options; `getPythonCommandNames`, `getJavaScriptCommandNames` | Options accepted; without the companion the commands are absent (exit 127); helpers return the names |
@@ -967,6 +1006,7 @@ above is put to the owner at L2 with the numbers; it is not adopted before.
 | V3 | Not available in v1: `parse`, AST types, transform pipeline and plugins | Consensus, B3 |
 | V4 | The browser entry runs `tar` and `yq`, which the reference's browser bundle excludes, and `gzip`/`gunzip`/`zcat`, which the reference registers but which fail at run time in a browser | Owner, P1 |
 | V5 | Deferred to companions: in the v1 kernel `defenseInDepth` is accepted and has no effect, and `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported; they are exported by the companion packages (D25) | Owner, 15/11 |
+| V8 | Command line: one binary `stpsh` instead of `just-bash` and `just-bash-shell`; by default it mounts no host directory (the reference mounts the current directory), `--root` and `--just-bash` restore the reference's behaviour (D26) | Owner, 15/11 |
 | V6 | Additions that do not alter existing behaviour and add no oracle exclusion: `execSync`, `precompile`, `compact`, journal, profiles `contain`/`micro`, byte helpers and `MethodNotAllowedError` exported from `./browser` as well, the component and its WIT | Consensus |
 
 ## 3. Questions for the owner
