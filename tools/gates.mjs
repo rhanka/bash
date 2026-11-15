@@ -225,8 +225,8 @@ export function g6ZeroCrate(ctx) {
 
 // ---------------------------------------------------------------------------------------------- G7
 
-export function checkRootManifest(root) {
-  const f = join(root, "package.json");
+export function checkRootManifest(root, file = "package.json") {
+  const f = join(root, file);
   if (!existsSync(f)) return "package.json is missing";
   const p = readJson(f);
   for (const k of ["dependencies", "peerDependencies", "optionalDependencies"]) {
@@ -239,7 +239,7 @@ export function checkRootManifest(root) {
 }
 
 export function g7Manifests(ctx) {
-  const own = checkRootManifest(ctx.root);
+  const own = checkRootManifest(ctx.root, ctx.manifestFile);
   if (own) return own;
   if (ctx.skipMake) return null;
   for (const target of ["check-attribution", "check-no-python", "check-no-deps"]) {
