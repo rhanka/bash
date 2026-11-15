@@ -159,3 +159,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Ceiling<A> {
         p
     }
 }
+
+/// Native only: removes the ceiling before a trap, so that the panic machinery can allocate.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn lift() {
+    CEILING.store(u64::MAX, Relaxed);
+}
