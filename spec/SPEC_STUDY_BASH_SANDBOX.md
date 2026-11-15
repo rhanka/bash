@@ -935,7 +935,7 @@ Consequences of B1 applied in this version:
 - Script size follows the reference's effective cap of 1 000 000 UTF-16 code units
   (`JB:src/parser/parser.ts:136`, `JB:src/parser/types.ts:10`), not `maxSourceBytes`.
 - The divergence list contains no semantic divergence. It is limited to owner-approved deltas: the
-  `contain` default (O1), features out of v1 (A4, B3), and the browser command set if P1 is confirmed.
+  `contain` default (O1), features out of v1 (A4, B3), and the browser command set (P1).
   Differences between just-bash and GNU bash are an informational note, not a target.
 - The oracle is just-bash itself (section 4.4), not the system bash.
 
@@ -961,9 +961,9 @@ Consequences of B1 applied in this version:
 
 No dispute remains between the two lanes.
 
-### 6.3 Open for the owner (upstream features)
+### 6.3 Upstream-feature questions (ANSWERED by the owner, 15/11)
 
-**P1 — Browser command set.**
+**P1 — Browser command set. ANSWERED (Owner, 15/11): (a), every kernel command is exposed in the browser.**
 What just-bash does: its browser bundle excludes `tar`, `yq`, `xan`, `sqlite3`, `python3`, `python`
 (`JB:src/commands/browser-excluded.ts`, `JB:src/commands/registry.ts:490-510`), because its implementations
 depend on Node-only modules; a script using them in the browser gets an "not available" error.
@@ -975,7 +975,7 @@ Consequence: with (a), `getCommandNames()` and script behaviour in the browser d
 `tar` and `yq`; this is listed as an owner-approved delta. With (b), parity is exact and working features
 are switched off.
 
-**P2 — Numeric artefacts of the reference.**
+**P2 — Numeric artefacts of the reference. ANSWERED (Owner, 15/11): (a), reproduce exactly.**
 What just-bash does: arithmetic runs on JavaScript numbers (`JB:src/interpreter/arithmetic.ts:44-98`; its
 own header lists this as a known limitation, lines 14-18). Results beyond 2^53 lose precision or switch to
 exponent notation: `echo $((2**70))` prints `1.1805916207174113e+21` (GNU bash prints `0`), and
@@ -1179,8 +1179,8 @@ and read-only inspection of published sources (`wit-bindgen` 0.63.0, `jco` 1.42.
 | D3 B8 lock timing | accepted | Carbon, adopted by consensus | 6.2: `0.1.0-draft` at EVOL, frozen after L2 and L1c |
 | D4 `yq` lots and fuzz gate | accepted | Carbon, adopted by consensus | Section 7: L15b-1/2/3, value model first in L15a, L11 gated on them |
 | D5 MoonBash cleanup | accepted | Carbon, adopted by consensus | 2.6 and 5.3 rows removed, L12 shrunk to 2 points, L12b added |
-| P1 browser command set | open | recommendation by Fable 5.2 + Carbon | 6.3 |
-| P2 numeric artefacts of the reference | open | recommendation by Fable 5.2 + Carbon | 6.3 |
+| P1 browser command set | ANSWERED (Owner): (a) expose every kernel command | recommendation by Fable 5.2 + Carbon | 6.3 |
+| P2 numeric artefacts of the reference | ANSWERED (Owner): (a) reproduce exactly | recommendation by Fable 5.2 + Carbon | 6.3 |
 
 Earlier rows of this appendix that mention GNU bash semantics, 64-bit arithmetic, the confined system-bash
 oracle, the MoonBash benchmark or open questions O1-O10 are superseded by section 6.
