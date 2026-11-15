@@ -1,6 +1,11 @@
 {
   "components": {
-    "probe": { "crate": "sentropic-bash-probe", "witDir": "probe/wit", "world": "probe", "wasmOpt": false },
+    "probe": {
+      "crate": "sentropic-bash-probe",
+      "witDir": "probe/wit",
+      "world": "probe",
+      "wasmOpt": false
+    },
     "kernel": {
       "crate": "sentropic-bash-kernel",
       "witDir": "wit",
@@ -10,9 +15,25 @@
         "dir": "kernel/src/bindings",
         "witDir": "wit",
         "world": "kernel",
-        "args": ["--std-feature", "--runtime-path", "crate::bindings::rt", "--bitflags-path", "crate::bindings::rt::bitflags", "--disable-custom-section-link-helpers"]
+        "args": [
+          "--std-feature",
+          "--runtime-path",
+          "crate::bindings::rt",
+          "--bitflags-path",
+          "crate::bindings::rt::bitflags",
+          "--disable-custom-section-link-helpers"
+        ]
       }
     },
-    "kernel-test": { "crate": "sentropic-bash-kernel", "witDir": "wit", "world": "kernel", "wasmOpt": false, "features": ["test-commands"] }
+    "kernel-test": {
+      "crate": "sentropic-bash-kernel",
+      "witDir": "wit",
+      "world": "kernel",
+      "wasmOpt": false,
+      "features": [
+        "test-commands"
+      ],
+      "test": true
+    }
   }
 }
