@@ -23,6 +23,8 @@ mod map;
 mod rc;
 mod reserve;
 mod string;
+#[cfg(all(feature = "mem-test-exports", target_arch = "wasm32"))]
+mod testexports;
 mod transfer;
 mod vec;
 

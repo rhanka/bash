@@ -7,3 +7,7 @@ publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[features]
+# Exports plain integer functions that run allocator workloads inside the wasm module (lot L1a-2 tests).
+mem-test-exports = []
