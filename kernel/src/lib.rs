@@ -1,5 +1,10 @@
-//! Kernel of @sentropic/bash. Empty in L0; later lots add the behaviour.
+//! Kernel of @sentropic/bash. The kernel exports nothing yet; later lots add the behaviour.
+//! Every heap allocation of the kernel goes through [`mem`].
 #![cfg_attr(target_arch = "wasm32", no_std)]
+
+extern crate alloc;
+
+pub mod mem;
 
 #[cfg(all(target_arch = "wasm32", not(test)))]
 #[panic_handler]
