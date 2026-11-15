@@ -1,9 +1,9 @@
-# PLAN — @sentropic/bash v1 (rung 3: lot plan, v1.1)
+# PLAN — @sentropic/bash v1 (rung 3: lot plan, v1.2)
 
 Status: executable plan for v1 parity, derived from `spec/SPEC_EVOL_BASH_SANDBOX.md` v1.3 ("EVOL") and
 `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 ("the study"). Decisions are in EVOL; this document schedules and
 prices the work. v1.1 reconciles the adversarial review of v1 (section 13). Post-parity work is section 9.
-One item is pending an owner answer (section 12); it concerns the last lot only.
+v1.2 applies the owner answers of 15/11 on names and host disk access (EVOL D26, section 12).
 
 Units: a point is the size unit of the study (S = 1, M = 3, L = 8, with intermediate values). A build unit
 is one point at the Cheap tier. All figures are estimates; they are re-based after the two go/no-go gates.
@@ -12,17 +12,19 @@ is one point at the Cheap tier. All figures are estimates; they are re-based aft
 
 | | Points | Build units | Share of points | Share of build cost |
 |---|---:|---:|---:|---:|
-| Strong | 96 | 480 | 52% | 73% |
-| Mid | 58.5 | 146.25 | 32% | 22% |
+| Strong | 96.5 | 482.5 | 52% | 73% |
+| Mid | 60.5 | 151.25 | 32% | 23% |
 | Cheap | 30 | 30 | 16% | 5% |
-| **v1 parity** | **184.5** | **656.25** | | |
+| **v1 parity** | **187** | **663.75** | | |
 
-Design and review overhead (tier-weighted, section 2): 221.15 units (34% of build cost). **Total: 877.4 units.**
-Routing every lot to the Strong tier would cost 922.5 build units; this routing saves 29%.
+Design and review overhead (tier-weighted, section 2): 223.9 units (34% of build cost). **Total: 887.65 units.**
+Routing every lot to the Strong tier would cost 935 build units; this routing saves 29%.
 
 Against v1 of this plan (183.5 points, 684 build units, 959.25 in total): the lot list gains the package
 skeleton in L0, the reference's minimal builtins and three hash commands, and loses the standalone facades
 (moved to section 9); nine lots are re-routed (section 13); overhead is weighted by tier instead of flat.
+v1.2 adds 2.5 points for EVOL D26: L17a +1.5 (single binary with both modes and the disk flags), L19 +0.5
+(page-supplied filesystem), L1c +0.5 (granted-directory mount tests).
 
 ## 2. Model pool, routing and overhead
 
@@ -58,15 +60,15 @@ lots one after the other. Slot A carries the critical path until W7.
 | W3 | L2 | L7b | 11.5 | 57.5 | 17.25 | 74.75 | 187.75 |
 | W4 | L3 | L8a | 16 | 80 | 24 | 104 | 291.75 |
 | W5 | L4 | L8b then L1d | 13.5 | 55 | 17.75 | 72.75 | 364.5 |
-| W6 | L5 | L7a then L12 then L1c | 16.5 | 70 | 22.25 | 92.25 | 456.75 |
-| W7 | L6a | L16b | 6 | 30 | 9 | 39 | 495.75 |
-| W8 | L13 | L9a-1 then L16d | 16.5 | 41.25 | 16.5 | 57.75 | 553.5 |
-| W9 | L14a then L14b | L15a-1 then L15a-2 | 17 | 67.5 | 22.13 | 89.63 | 643.13 |
-| W10 | L9b | L9a-2 then L6b-1 then L6b-2 | 17.5 | 28.75 | 15 | 43.75 | 686.88 |
-| W11 | L15b-1 then L15b-3 | L16a-1 then L15b-2 | 18.5 | 68 | 23 | 91 | 777.88 |
-| W12 | L10b | L16a-2 then L16c then L12b | 17.5 | 22 | 10.03 | 32.03 | 809.9 |
-| W13 | L11a then L19 | L11b | 13 | 45 | 15.5 | 60.5 | 870.4 |
-| W14 | L17a | — | 2 | 5 | 2 | 7 | 877.4 |
+| W6 | L5 | L7a then L12 then L1c | 17 | 72.5 | 23 | 95.5 | 460 |
+| W7 | L6a | L16b | 6 | 30 | 9 | 39 | 499 |
+| W8 | L13 | L9a-1 then L16d | 16.5 | 41.25 | 16.5 | 57.75 | 556.75 |
+| W9 | L14a then L14b | L15a-1 then L15a-2 | 17 | 67.5 | 22.13 | 89.63 | 646.38 |
+| W10 | L9b | L9a-2 then L6b-1 then L6b-2 | 17.5 | 28.75 | 15 | 43.75 | 690.13 |
+| W11 | L15b-1 then L15b-3 | L16a-1 then L15b-2 | 18.5 | 68 | 23 | 91 | 781.13 |
+| W12 | L10b | L16a-2 then L16c then L12b | 17.5 | 22 | 10.03 | 32.03 | 813.15 |
+| W13 | L11a then L19 | L11b | 13.5 | 46.25 | 16 | 62.25 | 875.4 |
+| W14 | L17a | — | 3.5 | 8.75 | 3.5 | 12.25 | 887.65 |
 
 Wave rules:
 - `active lanes <= 4` at all times. A third build lane may be opened only while the design lane or the
@@ -124,7 +126,7 @@ Strong tier. Everything else hangs off L2 or later and has slack.
    allowed paths.
 8. A lane does not change rooms within a lot.
 
-Scope exceptions: forbidden paths of `harness.profile.json` are touched by two lots only. L0 declares three
+Scope exceptions: forbidden paths of `harness.profile.json` are touched by two lots only (the `bin` entry of L17a is `stpsh`). L0 declares three
 exceptions (`Makefile`, `package.json`, `.github/workflows/**`) and moves all build and gate logic into
 `tools/`; L17a declares one (`package.json`, for `bin`). The exception ids take the branch number assigned
 by the conductor (`BR<n>-EX<k>`), each with its reason, impact and rollback in the branch's `BRANCH.md`.
@@ -193,7 +195,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Cost.** Build 30 units + overhead 9 = 39 units.
 - **Depends on.** L1a-1.
 - **Entry.** Lot spec merged (section 6); L1a-1 merged.
-- **Exit gates.** `node:test`: stale `resume` returns `stale-epoch`; denied host calls never reach a recording driver; late continuation after abort cannot resume; two shells on one `InMemoryFs` are isolated (S14); an oversized payload gets `limit-exceeded` from the driver pre-check without a trap (D6); `python: true` and `javascript: {}` construct, the four commands exit 127 and the name helpers return the names; `defenseInDepth` has no effect; after the test-only trap every call rejects with the typed error (S12); binding regeneration check; `tsc --noEmit` on facade declarations. `make check` green.
+- **Exit gates.** `node:test`: stale `resume` returns `stale-epoch`; denied host calls never reach a recording driver; late continuation after abort cannot resume; two shells on one `InMemoryFs` are isolated (S14); an oversized payload gets `limit-exceeded` from the driver pre-check without a trap (D6); `python: true` and `javascript: {}` construct, the four commands exit 127 and the name helpers return the names; `defenseInDepth` has no effect; after the test-only trap every call rejects with the typed error (S12); a default `new Bash()` cannot read a host sentinel file (EVOL D26); binding regeneration check; `tsc --noEmit` on facade declarations. `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l1b-wit-facade` (worktree `tmp/l1b-wit-facade`).
 
@@ -226,7 +228,7 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Cost.** Build 15 units + overhead 4.5 = 19.5 units.
 - **Depends on.** L1b.
 - **Entry.** Lot spec merged (section 6); L1b merged.
-- **Exit gates.** Adversarial suite in `node:test` with one case per item of D10 (traversal, symlink, FIFO/socket/device, exclusive-create race, broken-symlink leaf, hard link, error-message leakage); a 1 000-file listing costs at most one host round trip per directory; S7 holds. `make check` green.
+- **Exit gates.** Adversarial suite in `node:test` with one case per item of D10 (traversal, symlink, FIFO/socket/device, exclusive-create race, broken-symlink leaf, hard link, error-message leakage); a 1 000-file listing costs at most one host round trip per directory; S7 holds; with `OverlayFs` on a directory the sentinel file is readable and the host file is unchanged after a write (EVOL D26). `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l7b-host-fs` (worktree `tmp/l7b-host-fs`).
 
@@ -320,13 +322,14 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Branch.** `feat/l12-bench` (worktree `tmp/l12-bench`).
 
 ### L1c — Session drivers and composition
-- **Scope.** Session driver components (`session-pure`, `session-fs`, `session-net`) and their WIT, `wac` composition, `wasmtime` smoke test under a 256 MiB limiter and an epoch deadline, `exec-oneshot` (EVOL D15). Its report triggers the WIT freeze (D3).
-- **Room.** Room 2 (build). **Wave.** W6, slot B. **Size.** 3 points, Strong.
+- **Scope.** Session driver components (`session-pure`, `session-fs`, `session-net`) and their WIT, `wac` composition, `wasmtime` smoke test under a 256 MiB limiter and an epoch deadline, `exec-oneshot` (EVOL D15), the wasmCloud and Kubernetes disk rule of EVOL D26 (`session-pure` has no filesystem import; `session-fs` mounts the granted directory as root). Its report triggers the WIT freeze (D3).
+- **Room.** Room 2 (build). **Wave.** W6, slot B. **Size.** 3.5 points, Strong.
 - **Builder.** Gemini 4 Argon; fallback Sonnet 5.5.
-- **Cost.** Build 15 units + overhead 4.5 = 19.5 units.
+- **Cost.** Build 17.5 units + overhead 5.25 = 22.75 units.
 - **Depends on.** L2.
 - **Entry.** Lot spec merged (section 6); L2 merged; `wac` and `wasmtime` pinned.
-- **Exit gates.** Composed component runs the L2 snapshot subset under `wasmtime` with 0 failure; import lists equal the driver worlds; `exec-oneshot` round trip; composed-component measurements reported; freeze commit of `sentropic:bash@0.1.0`. `make check` green.
+- **Exit gates.** Composed component runs the L2 snapshot subset under `wasmtime` with 0 failure; import lists equal the driver worlds and `session-pure` lists no filesystem import; `session-fs` with one preopened directory sees it as `/` and cannot read its parent, and with no preopen sees no host file; `exec-oneshot` round trip; composed-component measurements reported; freeze commit of `sentropic:bash@0.1.0`. `make check` green.
+- **Also.** Conductor gate: smoke run of the composed component on the wasmCloud host of the owner, with a granted volume.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l1c-session-wac` (worktree `tmp/l1c-session-wac`).
 
@@ -573,13 +576,13 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Branch.** `feat/l11a-fuzz` (worktree `tmp/l11a-fuzz`).
 
 ### L19 — Browser entry verification
-- **Scope.** Headless Chrome for Testing rig over the DevTools protocol, `precompile`, streaming compile, staging queue, trace and coverage in the browser (no `cmd:flag` hit), the commands of divergence V4, metric M1b.
-- **Room.** Room 2 (build). **Wave.** W13, slot A. **Size.** 3.5 points, Mid.
+- **Scope.** Headless Chrome for Testing rig over the DevTools protocol, `precompile`, streaming compile, staging queue, trace and coverage in the browser (no `cmd:flag` hit), the commands of divergence V4, a page-supplied asynchronous `IFileSystem` backed by the origin-private file system as the explicit disk grant (EVOL D26), metric M1b.
+- **Room.** Room 2 (build). **Wave.** W13, slot A. **Size.** 4 points, Mid.
 - **Builder.** Codex Sol 6.1 medium; fallback Sonnet 5.5.
-- **Cost.** Build 8.75 units + overhead 3.5 = 12.25 units.
+- **Cost.** Build 10 units + overhead 4 = 14 units.
 - **Depends on.** L1d, L9a-2, L16a-1, L15b-1, L15b-2, L15b-3.
 - **Entry.** Lot spec merged (section 6); Chrome for Testing pinned with its hash.
-- **Exit gates.** Browser suite passes with 0 failure, including `tar`, `gzip`, `yq` cases; G2 browser-graph check; M1b reported. Rerun at the parity gate. `make check` green.
+- **Exit gates.** Browser suite passes with 0 failure, including `tar`, `gzip`, `yq` cases and a run over the page-supplied `IFileSystem` (files written by a script are read back through the adapter; without it no page storage is touched); G2 browser-graph check; M1b reported. Rerun at the parity gate. `make check` green.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l19-browser` (worktree `tmp/l19-browser`).
 
@@ -594,14 +597,14 @@ committed snapshot of the lot replays identically, apart from cases on the diver
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l11b-security` (worktree `tmp/l11b-security`).
 
-### L17a — Tier C: `Sandbox` facade and CLI
-- **Scope.** `Sandbox` facade and `SandboxCommand` (argument quoting included), CLI binaries. **Pending owner Q1**: default host filesystem mount and binary names (section 12). Standalone facades (`grep`, `ls`, `awk`, `jq`) are post-parity (section 9).
-- **Room.** Room 2 (build). **Wave.** W14, slot A. **Size.** 2 points, Mid.
+### L17a — Tier C: `Sandbox` facade and the `stpsh` binary
+- **Scope.** `Sandbox` facade and `SandboxCommand` (argument quoting included), the single binary `stpsh` (EVOL D26): script mode (`stpsh file`, `-c`, stdin), interactive shell on a terminal, empty filesystem by default, `--root`, `--allow-write`, `--just-bash`, and the reference option set. Standalone facades (`grep`, `ls`, `awk`, `jq`) are post-parity (section 9).
+- **Room.** Room 2 (build). **Wave.** W14, slot A. **Size.** 3.5 points, Mid.
 - **Builder.** Codex Sol 6.1 medium; fallback Sonnet 5.5.
-- **Cost.** Build 5 units + overhead 2 = 7 units.
+- **Cost.** Build 8.75 units + overhead 3.5 = 12.25 units.
 - **Depends on.** parity gate.
-- **Entry.** Lot spec merged (section 6); Parity gate passed; owner answer to Q1.
-- **Exit gates.** API snapshots for `Sandbox` pass with 0 failure, including arguments with quotes and spaces; CLI tests for each documented option. `make check` green.
+- **Entry.** Lot spec merged (section 6); Parity gate passed; snapshots of the reference CLIs recorded by Room 1 for the `--just-bash` cases.
+- **Exit gates.** API snapshots for `Sandbox` pass with 0 failure, including arguments with quotes and spaces; `stpsh` tests: with no flag a script cannot read a sentinel file of the current directory; with `--root` it reads it and a write fails; with `--allow-write` the write succeeds as on the reference; with `--just-bash` outputs equal the recorded snapshots of both reference CLIs; a bare `stpsh` with a terminal enters the interactive shell and with a pipe runs the script; one test per documented option. `make check` green.
 - **Also.** Scope exception to declare: `BR<n>-EX1` `package.json` (`bin`). Release gate (conductor): npm component digest equals the OCI digest.
 - **Review.** Carbon, full review of every PR, dispatched only on a green `make check`.
 - **Branch.** `feat/l17a-tier-c` (worktree `tmp/l17a-tier-c`).
@@ -653,7 +656,7 @@ lot ids; they become Track item ids at creation. Decisions referenced by the lot
 | L5 | L5 — Interpreter semantics | W6 | L4 | 55.25 |
 | L7a | L7a — VFS completion | W6 | L2 | 10.5 |
 | L12 | L12 — Benchmark harness | W6 | L2 | 7 |
-| L1c | L1c — Session drivers and composition | W6 | L2 | 19.5 |
+| L1c | L1c — Session drivers and composition | W6 | L2 | 22.75 |
 | L6a | L6a — State-coupled builtins | W7 | L5 | 19.5 |
 | L16b | L16b — Network adapter and curl | W7 | L2, L10a | 19.5 |
 | L13 | L13 — sed | W8 | L8a, L7a, L1d, L12 | 29.75 |
@@ -676,9 +679,9 @@ lot ids; they become Track item ids at creation. Decisions referenced by the lot
 | L16c | L16c — Leaf tier-3 commands | W12 | L7a, L8b, L1d | 6.13 |
 | L12b | L12b — Feature matrix | W12 | — | 2.8 |
 | L11a | L11a — Fuzz harnesses and campaigns | W13 | L5, L8a, L16a-1, L16b, L15a-1, L15b-1, L15b-2, L15b-3 | 15.75 |
-| L19 | L19 — Browser entry verification | W13 | L1d, L9a-2, L16a-1, L15b-1, L15b-2, L15b-3 | 12.25 |
+| L19 | L19 — Browser entry verification | W13 | L1d, L9a-2, L16a-1, L15b-1, L15b-2, L15b-3 | 14 |
 | L11b | L11b — Security suites and triage | W13 | L1d, L7a, L7b, L16b; findings of L11a | 32.5 |
-| L17a | L17a — Tier C: Sandbox facade and CLI | W14 | parity gate | 7 |
+| L17a | L17a — Tier C: Sandbox facade and the stpsh binary | W14 | parity gate | 12.25 |
 
 Milestone items (kind `milestone`): `Gate L0` (after L0), `Gate L2` (after L2), `WIT freeze` (after L1c),
 `Parity gate and 0.x pre-release` (after W13). Deferred items (kind `task`, status deferred): the six rows
@@ -692,24 +695,20 @@ of section 9.
 - The two-slot waves follow from the four-lane cap; if the cap is raised, slot B lots can run in parallel
   without changing dependencies.
 
-## 12. Pending owner question (blocks L17a only)
+## 12. Owner answer on names and host disk access (ANSWERED, 15/11)
 
-**Q1 — CLI defaults and binary names.**
-What just-bash does: its package publishes two binaries, `just-bash` and `just-bash-shell`
-(`JB:package.json:57-60`). Without `--root`, both mount the host current directory through `OverlayFs`
-(host files readable, writes kept in memory) (`JB:src/cli/just-bash.ts:120,331-334`,
-`JB:src/cli/shell.ts:47-51`); `just-bash-shell --network` enables full internet access
-(`JB:src/cli/shell.ts:65-67`). `rules/MASTER.md` requires default deny: no host filesystem or network
-access without an explicit grant.
-(i) Default mount. Options: (a) in-memory filesystem by default, host access only with an explicit
-`--root <dir>`, recorded as a divergence in EVOL Annex I; (b) mirror the reference and mount the current
-directory by default.
-(ii) Binary names. Options: (a) `sentropic-bash` and `sentropic-bash-shell`; (b) the reference's names.
-Position of the design lane: (i) (a) and (ii) (a). An implicit read of the working directory contradicts
-the mandatory default-deny rule and exposes local secrets to scripts run by an agent; the reference
-behaviour stays one flag away (`--root .`). Our own names avoid shadowing an installed just-bash on `PATH`
-and avoid presenting our binary under another project's name. Carbon's position is recorded with the
-answer.
+Decision EVOL D26 (Track `01M7G4KVMH4GVS2JBBYNJ67841`, `01M7G4KVWXWGS3WA2EBETGZFH8`): one binary `stpsh`; npm
+library `@sentropic/bash`; OCI artefact `sentropic-bash`; WIT package `sentropic:bash`; host disk access
+denied by default on every target, the reference's behaviour one flag or option away. Owning lot and
+observable gate per target:
+
+| Target | Default and grant | Owning lot | Exit gate |
+|---|---|---|---|
+| Local CLI | Empty filesystem; `--root`, `--allow-write`, `--just-bash` | L17a | Sentinel-file tests for each flag; `--just-bash` equals snapshots of the reference CLIs; terminal versus pipe mode |
+| Node library | `InMemoryFs`; `fs` adapters | L1b (default), L7b (adapters) | Default instance cannot read a host sentinel; `OverlayFs` reads it and leaves the host file unchanged |
+| Browser | `InMemoryFs`; page-supplied `IFileSystem` | L19 | Suite run over an adapter backed by the origin-private file system |
+| wasmCloud, Kubernetes | `session-pure` without disk; `session-fs` mounting the granted directory as root | L1c | Import lists; preopened-directory tests under `wasmtime`; conductor smoke run on the owner's wasmCloud host |
+| Artefact names | npm, OCI, WIT names | L0 (package), release | Package-content test; OCI push under `sentropic-bash` with the npm component's digest |
 
 ## 13. Reconciliation of the review of v1
 
@@ -735,4 +734,4 @@ answer.
 | m1 lot spec contents, matrix refresh | accepted | consensus | Section 6 steps 1 and 7; parity gate |
 | m2 companion invariants | accepted | consensus | Section 9 |
 | m3 Track mapping | accepted | consensus | Section 10 |
-| Owner question Q1 | pending | Fable 5.2 position stated; Carbon's with the answer | Section 12, L17a |
+| Owner question Q1 | answered by the owner (15/11) | Owner | EVOL D26 and V8; section 12; L17a, L19, L1c, L1b, L7b |
