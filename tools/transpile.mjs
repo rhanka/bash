@@ -2,7 +2,7 @@
 // Generates dependency-free JavaScript bindings for a component with jco-transpile.
 // Usage: node tools/transpile.mjs <component.wasm> <out-dir>
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { toolsDir } from "./lib.mjs";
 
@@ -24,12 +24,19 @@ export async function transpileComponent(componentPath, outDir) {
   if (result.imports.length !== 0) throw new Error(`component has imports: ${result.imports.join(", ")}`);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
-  for (const [file, bytes] of Object.entries(result.files).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const dest = join(outDir, file);
+  writeFiles(outDir, result.files);
+  return readdirSync(outDir).sort();
+}
+
+/** Writes generated files under outDir; a name that resolves outside it is refused. */
+export function writeFiles(outDir, files) {
+  const base = resolve(outDir);
+  for (const [file, bytes] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const dest = resolve(base, file);
+    if (!dest.startsWith(base + sep)) throw new Error(`generated file escapes the output directory: ${file}`);
     mkdirSync(join(dest, ".."), { recursive: true });
     writeFileSync(dest, bytes);
   }
-  return readdirSync(outDir).sort();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

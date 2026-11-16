@@ -4,13 +4,16 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { repoRoot, readJson, sha256, toolsDir, toolDir, toolProblem, tryRun } from "./lib.mjs";
+import { repoRoot, readJson, sha256, sha256File, toolsDir, toolDir, toolProblem, tryRun, lockResolution, lockProblem, markerText, nonRegularEntries, pinsProblem } from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const offline = args.includes("--offline");
 const skipNpm = args.includes("--skip-npm");
 const pinsFile = process.env.SENTROPIC_PINS ? resolve(process.env.SENTROPIC_PINS) : join(repoRoot, "tools", "pins.json");
 const dir = toolsDir();
+// A non-https pin is accepted only for the test hook (SENTROPIC_PINS); the committed tools/pins.json is
+// held to https by gate G8.
+const testPins = Boolean(process.env.SENTROPIC_PINS);
 let failed = false;
 
 function fail(msg) {
@@ -19,12 +22,13 @@ function fail(msg) {
 }
 
 async function fetchNative(pin) {
-  const out = toolDir(pin);
-  if (toolProblem(pin) === null) {
+  const out = toolDir(pin, dir);
+  if (toolProblem(pin, dir) === null) {
     console.log(`tool ${pin.name} ${pin.version} verified`);
     return;
   }
-  if (offline) return fail(`tool ${pin.name} ${pin.version} ERROR offline and not verified: ${toolProblem(pin)}`);
+  if (offline) return fail(`tool ${pin.name} ${pin.version} ERROR offline and not verified: ${toolProblem(pin, dir)}`);
+  if (!pin.url.startsWith("https://") && !(testPins && pin.url.startsWith("file:"))) return fail(`tool ${pin.name} ${pin.version} ERROR url is not https`);
   let buf;
   try {
     if (pin.url.startsWith("file:")) buf = readFileSync(fileURLToPath(pin.url));
@@ -44,10 +48,20 @@ async function fetchNative(pin) {
   writeFileSync(archive, buf);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  const r = tryRun("tar", ["-xzf", archive, "-C", out, "--strip-components=1", "--no-same-owner"]);
+  const r = tryRun("tar", ["-xzf", archive, "-C", out, "--strip-components=1", "--no-same-owner", "--no-same-permissions"]);
   if (r.status !== 0) return fail(`tool ${pin.name} ${pin.version} ERROR extraction failed: ${r.stderr.trim()}`);
-  writeFileSync(join(out, ".verified"), pin.sha256 + "\n");
-  const problem = toolProblem(pin);
+  const odd = nonRegularEntries(out);
+  if (odd.length) {
+    rmSync(out, { recursive: true, force: true });
+    return fail(`tool ${pin.name} ${pin.version} ERROR archive holds symbolic links or special files: ${odd.join(", ")}`);
+  }
+  const exe = join(out, pin.bin);
+  if (!existsSync(exe)) {
+    rmSync(out, { recursive: true, force: true });
+    return fail(`tool ${pin.name} ${pin.version} ERROR missing executable ${pin.bin}`);
+  }
+  writeFileSync(join(out, ".verified"), markerText(pin, sha256File(exe)));
+  const problem = toolProblem(pin, dir);
   if (problem) {
     rmSync(join(out, ".verified"), { force: true });
     return fail(`tool ${pin.name} ${pin.version} ERROR ${problem}`);
@@ -71,15 +85,11 @@ function fetchNpm() {
   const npmDir = join(dir, "npm");
   const lockSrc = readJson(join(src, "package-lock.json"));
   const want = readJson(join(src, "package.json")).devDependencies;
-  // npm versions rewrite lockfile metadata differently, so the check compares what was resolved: the same
-  // package set, each with the same version, resolved URL and integrity.
-  const resolved = (lock) =>
-    JSON.stringify(
-      Object.entries(lock.packages ?? {})
-        .filter(([key]) => key !== "")
-        .map(([key, p]) => [key, p.version, p.resolved, p.integrity])
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-    );
+  // The manifest, the lockfile root and the integrity of every package are checked before npm runs.
+  const early = lockProblem(lockSrc, readJson(join(src, "package.json")));
+  if (early) return fail(`tool npm-tools ERROR ${early}`);
+  // npm versions rewrite lockfile metadata differently, so the check compares what was resolved.
+  const resolved = lockResolution;
   const same = () =>
     existsSync(join(npmDir, "package-lock.json")) &&
     resolved(readJson(join(npmDir, "package-lock.json"))) === resolved(lockSrc);
@@ -101,6 +111,13 @@ function fetchNpm() {
 }
 
 const pins = readJson(pinsFile).tools;
+if (!testPins) {
+  const bad = pinsProblem(pins);
+  if (bad) {
+    console.log(bad);
+    process.exit(1);
+  }
+}
 for (const pin of pins) await fetchNative(pin);
 if (!skipNpm) fetchNpm();
 process.exit(failed ? 1 : 0);
