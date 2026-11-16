@@ -38,7 +38,10 @@ mod wasm {
         }
         let cur = &mut *BUMP.cur.get();
         let end = &mut *BUMP.end.get();
-        let mut start = (*cur + align - 1) & !(align - 1);
+        let mut start = match cur.checked_add(align - 1) {
+            Some(v) => v & !(align - 1),
+            None => unreachable(),
+        };
         if start == 0 || start.checked_add(size).map_or(true, |e| e > *end) {
             let need = match size.checked_add(align) {
                 Some(n) => n,
@@ -51,7 +54,10 @@ mod wasm {
             }
             let base = first * PAGE;
             *end = base + pages * PAGE;
-            start = (base + align - 1) & !(align - 1);
+            start = match base.checked_add(align - 1) {
+                Some(v) => v & !(align - 1),
+                None => unreachable(),
+            };
         }
         *cur = start + size;
         start as *mut u8
@@ -79,7 +85,9 @@ mod wasm {
     #[export_name = "echo-bytes"]
     pub unsafe extern "C" fn echo_bytes(ptr: *const u8, len: usize) -> *mut u32 {
         let out = bump_alloc(len, 1);
-        core::ptr::copy_nonoverlapping(ptr, out, len);
+        if len != 0 && !ptr.is_null() {
+            core::ptr::copy_nonoverlapping(ptr, out, len);
+        }
         let ret = &mut *BUMP.ret.get();
         ret[0] = out as u32;
         ret[1] = len as u32;
