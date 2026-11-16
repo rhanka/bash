@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, cpSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync, cpSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot, scratch } from "./helpers.mjs";
 import { toolsDir, toolBin, run, readJson, toolProblem, markerText, sha256File, lockProblem, pinsProblem } from "../tools/lib.mjs";
@@ -39,7 +39,7 @@ test("G6 fails on a foreign crate in Cargo.lock", () => {
 });
 
 test("G6 fails on alloc::vec outside kernel/src/mem", () => {
-  assert.match(gates.g6ZeroCrate({ ...real(), root: fx("g6-alloc") }), /uses the alloc crate/);
+  assert.match(gates.g6ZeroCrate({ ...real(), root: g6root(readFileSync(join(fx("g6-alloc"), "kernel", "src", "lib.rs"), "utf8")) }), /uses the alloc crate/);
 });
 
 test("G7 fails on a dependency and on an install script", () => {
@@ -95,7 +95,47 @@ test("G2 fails on getBuiltinModule and createRequire outside host/node/", () => 
 });
 
 test("G2 fails on a relative import whose target does not exist", () => {
-  assert.match(g2({ "host/browser.js": 'import "./missing.js";' }), /does not exist/);
+  assert.match(g2({ "host/browser.js": 'import "./missing.js";' }), /not a regular script file/);
+});
+
+test("G2 sees imports hidden behind // comments", () => {
+  assert.match(g2({ "host/browser.js": 'import //\n"lodash";' }), /bare specifier "lodash"/);
+  assert.match(g2({ "host/browser.js": 'const x = import //\n(name);' }), /non-literal/);
+  assert.match(g2({ "host/browser.js": 'require //\n("fs");' }), /require\(\)/);
+  assert.match(g2({ "host/browser.js": 'import {\n a, // it\'s ( here\n b } from "lodash";' }), /bare specifier "lodash"/);
+});
+
+test("G2 reads ES2022 quoted names and braces holding quotes or parentheses", () => {
+  assert.match(g2({ "host/browser.js": 'import { "readFileSync" as r } from "node:fs";' }), /bare specifier "node:fs"/);
+  assert.match(g2({ "host/browser.js": 'import { "a)b" as c, "}" as d } from "lodash";' }), /bare specifier "lodash"/);
+  assert.match(g2({ "host/browser.js": 'export { "x y" as z } from "lodash";' }), /bare specifier "lodash"/);
+});
+
+test("G2 refuses a relative import that leaves host/ and dist/js/, or is not a regular script", () => {
+  assert.match(g2({ "host/browser.js": 'import "../types/x.js";', "types/x.js": "export {};" }), /leaves host\/ and dist\/js\//);
+  assert.match(g2({ "host/browser.js": 'import "./data.json";', "host/data.json": "{}" }), /not a regular script file/);
+});
+
+test("G2 scans types/ for bare and escaping imports", () => {
+  assert.match(g2({ "types/a.d.ts": 'import type { X } from "lodash";' }), /types\/a\.d\.ts: bare specifier "lodash"/);
+  assert.match(g2({ "types/a.d.ts": 'import type { X } from "./missing.js";' }), /does not resolve/);
+  assert.equal(g2({ "types/a.d.ts": 'import type { X } from "./b.js";', "types/b.d.ts": "export type X = 1;" }), null);
+});
+
+test("G2 fails on a symlink inside host/, dist/js/ or types/", () => {
+  for (const dir of ["host", "js", "types"]) {
+    const root = tree("g2-link", { [`${dir}/real.js`]: "export {};" });
+    symlinkSync(join(root, dir, "real.js"), join(root, dir, "link.js"));
+    assert.match(gates.g2NoBareImport({ ...real(), root, out: root }), /symbolic link/, dir);
+  }
+});
+
+test("G2 applies the full rules to files reached from host/browser.js", () => {
+  // The reached file lives in dist/js (not under host/), so only the browser walk and the main scan see it.
+  const r = g2({ "host/browser.js": 'import "../js/a.js";', "js/a.js": 'import "lodash";' });
+  assert.match(r, /bare specifier "lodash"/);
+  assert.match(g2({ "host/browser.js": 'import "../js/a.js";', "js/a.js": "new Function('x');" }), /Function constructor/);
+  assert.match(g2({ "host/browser.js": 'import "./node/n.js";', "host/node/n.js": "export {};" }), /host\/node\//);
 });
 
 test("G2 accepts a relative import of an existing file and node: inside host/node/", () => {
@@ -172,6 +212,27 @@ test("G6 accepts alloc inside kernel/src/mem and a path that only contains the w
   mkdirSync(join(root, "kernel", "src", "mem"));
   writeFileSync(join(root, "kernel", "src", "mem", "mod.rs"), "extern crate alloc;\nuse alloc::vec::Vec;\n");
   assert.equal(gates.g6ZeroCrate({ ...real(), root }), null);
+});
+
+test("G6 fails on alloc paths behind a reference or bracket", () => {
+  for (const rs of ["pub fn f(_: &::alloc::string::String) {}", "pub fn f(_: [::alloc::vec::Vec<u8>; 1]) {}"])
+    assert.match(gates.g6ZeroCrate({ ...real(), root: g6root(rs) }), /uses the alloc crate/, rs);
+});
+
+test("G6 exempts only the declared bindings directory", () => {
+  const root = g6root("pub mod bindings;");
+  mkdirSync(join(root, "kernel", "src", "bindings"));
+  writeFileSync(join(root, "kernel", "src", "bindings", "glue.rs"), "use alloc::vec::Vec;\n");
+  assert.match(gates.g6ZeroCrate({ ...real(), root }), /kernel\/src\/bindings\/glue\.rs uses the alloc crate/);
+});
+
+test("G6 fails on a symlink inside kernel/src or probe/src", () => {
+  const root = g6root("");
+  symlinkSync(join(root, "kernel", "src", "lib.rs"), join(root, "kernel", "src", "link.rs"));
+  assert.match(gates.g6ZeroCrate({ ...real(), root }), /symbolic link/);
+  const root2 = g6root("");
+  symlinkSync(join(root2, "kernel", "src", "lib.rs"), join(root2, "probe", "src", "link.rs"));
+  assert.match(gates.g6ZeroCrate({ ...real(), root: root2 }), /symbolic link/);
 });
 
 test("G6 fails on a Cargo.lock package with a source", () => {
