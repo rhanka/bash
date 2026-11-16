@@ -53,5 +53,14 @@ test("G8 fails on a wrong pinned hash", () => {
   const pins = readJson(join(repoRoot, "tools", "pins.json"));
   pins.tools[0].sha256 = "0".repeat(64);
   writeFileSync(join(root, "tools", "pins.json"), JSON.stringify(pins));
-  assert.match(gates.g8ToolPins({ ...real(), root }), /marker hash differs/);
+  // The scratch root has no tools of its own: point it at the real tools directory, whether or not
+  // SENTROPIC_TOOLS_DIR is set, so the marker exists and only the pinned hash differs.
+  const saved = process.env.SENTROPIC_TOOLS_DIR;
+  process.env.SENTROPIC_TOOLS_DIR = toolsDir(repoRoot);
+  try {
+    assert.match(gates.g8ToolPins({ ...real(), root }), /marker hash differs/);
+  } finally {
+    if (saved === undefined) delete process.env.SENTROPIC_TOOLS_DIR;
+    else process.env.SENTROPIC_TOOLS_DIR = saved;
+  }
 });
