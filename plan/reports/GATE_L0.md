@@ -93,7 +93,7 @@ fb0a28aa22da243731bbd0cedcc4af7dd27e3a3b91fa4d8d5725b9cf89f645fa  probe.componen
 588c05fcab3ea12f6ccbe46b50bfb1cbafcd94a7364909b54897334ccb28c04b  probe.core.wasm
 ```
 
-`make check` exits 0 and runs 47 tests in 9 files, all passing (probe, entries with `import` and `require`, gates on fixtures, pack with offline install, fetch-tools).
+`make check` exits 0 and runs 47 tests in 8 files, all passing (probe, entries with `import` and `require`, gates on fixtures, pack with offline install, fetch-tools).
 
 ## 8. Section 12 confirmations
 
