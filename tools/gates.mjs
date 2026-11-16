@@ -2,7 +2,7 @@
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { components, lockProblem, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { components, lockProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 
 const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.toolsDir, ctx.root);
@@ -29,19 +29,67 @@ export function g1ZeroImport(ctx) {
 
 // ---------------------------------------------------------------------------------------------- G2
 
-// Whitespace between tokens, including block comments, so a comment cannot split a token pair.
-const W = String.raw`(?:\s|/\*[\s\S]*?\*/)*`;
-const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:[^'"();` + "`" + String.raw`]*?${W}\bfrom${W})?(['"])([^'"\n]+)\1`, "g");
+// Whitespace between tokens, including both comment forms, so a comment cannot split a token pair.
+const W = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*)*`;
+// A braced name list: quoted names (ES2022) may hold any character, including } ( ) and comment markers.
+const NAMES = String.raw`\{(?:"[^"]*"|'[^']*'|[^}"'])*\}`;
+const CLAUSE = String.raw`(?:${NAMES}|[\w$*,\s])*?`;
+const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:${CLAUSE}${W}\bfrom${W})?(['"])([^'"\n]+)\1`, "g");
 const DYNAMIC_LITERAL = new RegExp(String.raw`\bimport${W}\(${W}(['"])([^'"` + "`" + String.raw`\n$\\]*)\1${W}\)`, "g");
 const DYNAMIC_ANY = new RegExp(String.raw`\bimport${W}\(`, "g");
 
+/** Replaces JS comments by a space, leaving string and template literals and regex literals intact. */
+export function stripComments(src) {
+  let out = "";
+  let i = 0;
+  let prev = ""; // last significant character, to tell a regex literal from a division
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === "/" && d === "*") {
+      const e = src.indexOf("*/", i + 2);
+      i = e < 0 ? n : e + 2;
+      out += " ";
+    } else if (c === "/" && d === "/") {
+      const e = src.indexOf("\n", i);
+      i = e < 0 ? n : e;
+      out += " ";
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < n && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      prev = c;
+    } else if (c === "/" && (prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev))) {
+      let j = i + 1;
+      let cls = false;
+      while (j < n && src[j] !== "\n" && (cls || src[j] !== "/")) {
+        if (src[j] === "\\") j++;
+        else if (src[j] === "[") cls = true;
+        else if (src[j] === "]") cls = false;
+        j++;
+      }
+      out += src.slice(i, j + 1);
+      i = j + 1;
+      prev = "/";
+    } else {
+      out += c;
+      i++;
+      if (!/\s/.test(c)) prev = c;
+    }
+  }
+  return out;
+}
+
 /** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
-export function scanImports(src) {
+export function scanImports(raw) {
+  const src = stripComments(raw);
   const specifiers = [];
   for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
   for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
   const nonLiteralDynamic = [...src.matchAll(DYNAMIC_ANY)].length > [...src.matchAll(DYNAMIC_LITERAL)].length;
-  return { specifiers, nonLiteralDynamic };
+  return { specifiers, nonLiteralDynamic, src };
 }
 
 // Constructs that reach a module, a code evaluator or a node API by a route the import scan cannot see.
@@ -58,29 +106,62 @@ const NODE_ONLY = [
 
 const isRelative = (s) => s.startsWith("./") || s.startsWith("../");
 const SCRIPT = (p) => /\.(?:js|mjs|cjs)$/.test(p);
+const isRegularFile = (p) => existsSync(p) && lstatSync(p).isFile();
+const inside = (dir, p) => p.startsWith(dir + sep);
+
+/** Symbolic links and special files under any of the directories, as a failure reason or null. */
+function oddEntries(ctx, dirs) {
+  for (const d of dirs) {
+    if (!existsSync(d)) continue;
+    const odd = nonRegularEntries(d);
+    if (odd.length) return `${relative(ctx.root, d)}: symbolic link or special file: ${odd.join(", ")}`;
+  }
+  return null;
+}
 
 export function g2NoBareImport(ctx) {
   const hostDir = join(ctx.root, "host");
+  const jsDir = join(ctx.out, "js");
+  const typesDir = join(ctx.root, "types");
   const nodeDir = join(hostDir, "node") + sep;
-  const files = [...walk(join(ctx.out, "js"), SCRIPT), ...walk(hostDir, SCRIPT)];
-  for (const f of files) {
+  const link = oddEntries(ctx, [hostDir, jsDir, typesDir]);
+  if (link) return link;
+  // Scripts: every file of host/ and dist/js/. A relative specifier must reach a regular script file in them.
+  function checkScript(f, inNodeDir) {
     const rel = relative(ctx.root, f);
-    const src = readFileSync(f, "utf8");
-    const { specifiers, nonLiteralDynamic } = scanImports(src);
+    const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
-    const inNodeDir = f.startsWith(nodeDir);
     for (const [re, what] of FORBIDDEN) if (re.test(src)) return `${rel}: uses ${what}`;
     if (!inNodeDir) for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: uses ${what} outside host/node/`;
     for (const s of specifiers) {
       if (isRelative(s)) {
-        if (!existsSync(resolve(dirname(f), s))) return `${rel}: relative import "${s}" does not exist`;
+        const target = resolve(dirname(f), s);
+        if (!inside(hostDir, target) && !inside(jsDir, target)) return `${rel}: relative import "${s}" leaves host/ and dist/js/`;
+        if (!isRegularFile(target) || !SCRIPT(target)) return `${rel}: relative import "${s}" is not a regular script file`;
         continue;
       }
       if (s.startsWith("node:") && inNodeDir) continue;
       return `${rel}: bare specifier "${s}"`;
     }
+    return null;
   }
-  // The browser entry must not reach host/node/ or any node-only construct.
+  for (const f of [...walk(jsDir, SCRIPT), ...walk(hostDir, SCRIPT)]) {
+    const r = checkScript(f, f.startsWith(nodeDir));
+    if (r) return r;
+  }
+  // Declarations: the same specifier rules; a relative one must reach a declaration file inside types/.
+  for (const f of walk(typesDir, (p) => p.endsWith(".ts"))) {
+    const rel = relative(ctx.root, f);
+    const { specifiers, nonLiteralDynamic } = scanImports(readFileSync(f, "utf8"));
+    if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
+    for (const s of specifiers) {
+      if (!isRelative(s)) return `${rel}: bare specifier "${s}"`;
+      const t = resolve(dirname(f), s);
+      const ok = [t, t.replace(/\.js$/, ".d.ts")].some((c) => inside(typesDir, c) && isRegularFile(c));
+      if (!ok) return `${rel}: relative import "${s}" does not resolve to a regular file in types/`;
+    }
+  }
+  // The browser entry must not reach host/node/, and every file it reaches obeys the full script rules.
   const entry = join(hostDir, "browser.js");
   if (!existsSync(entry)) return null;
   const seen = new Set();
@@ -91,13 +172,9 @@ export function g2NoBareImport(ctx) {
     seen.add(f);
     const rel = relative(ctx.root, f);
     if (f.startsWith(nodeDir)) return `${rel}: reachable from host/browser.js but lives in host/node/`;
-    if (!existsSync(f)) return `${rel}: imported from host/browser.js but missing`;
-    const src = readFileSync(f, "utf8");
-    for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: reachable from host/browser.js and uses ${what}`;
-    for (const s of scanImports(src).specifiers) {
-      if (s.startsWith("node:")) return `${rel}: reachable from host/browser.js and imports ${s}`;
-      if (isRelative(s)) queue.push(resolve(dirname(f), s));
-    }
+    const r = checkScript(f, false);
+    if (r) return `reachable from host/browser.js: ${r}`;
+    for (const s of scanImports(readFileSync(f, "utf8")).specifiers) queue.push(resolve(dirname(f), s));
   }
   return null;
 }
@@ -237,7 +314,7 @@ export function g5OneCoreModule(ctx) {
 // ---------------------------------------------------------------------------------------------- G6
 
 // Any path into the alloc crate: `alloc::...`, `::alloc::...`, `use alloc`, `extern crate alloc`.
-const ALLOC_PATH = /(?<![\w:])alloc\s*::|(?:^|[\s({,;=<])::\s*alloc\b|\buse\s+alloc\b|\bextern\s+crate\s+alloc\b/m;
+const ALLOC_PATH = /(?<![\w:])alloc\s*::|(?<![\w:])::\s*alloc\b|\buse\s+alloc\b|\bextern\s+crate\s+alloc\b/m;
 const ALLOC_CRATE = ALLOC_PATH;
 
 const withoutLineComments = (src) =>
@@ -273,12 +350,18 @@ export function g6ZeroCrate(ctx) {
   }
   if (/^\s*source\s*=/m.test(lock)) return "Cargo.lock has a package with a source (registry or git)";
   const kernelSrc = join(ctx.root, "kernel", "src");
+  const probeSrc = join(ctx.root, "probe", "src");
+  const link = oddEntries(ctx, [kernelSrc, probeSrc]);
+  if (link) return link;
+  // Only the declared, verified bindings directories are exempt from the heap rule, besides mem/.
+  const bindingDirs = Object.values(components(ctx.root))
+    .filter((d) => d.bindings)
+    .map((d) => join(ctx.root, d.bindings.dir) + sep);
   for (const f of sourcesUnder(kernelSrc)) {
     const rel = relative(kernelSrc, f);
-    if (rel.startsWith("mem/") || rel.startsWith("bindings/")) continue;
-    if (ALLOC_PATH.test(withoutLineComments(readFileSync(f, "utf8")))) return `kernel/src/${rel} uses the alloc crate outside kernel/src/mem/ and kernel/src/bindings/`;
+    if (rel.startsWith("mem/") || bindingDirs.some((d) => f.startsWith(d))) continue;
+    if (ALLOC_PATH.test(withoutLineComments(readFileSync(f, "utf8")))) return `kernel/src/${rel} uses the alloc crate outside kernel/src/mem/ and the declared bindings directories`;
   }
-  const probeSrc = join(ctx.root, "probe", "src");
   for (const f of sourcesUnder(probeSrc)) {
     if (ALLOC_CRATE.test(withoutLineComments(readFileSync(f, "utf8")))) return `probe/src/${relative(probeSrc, f)} uses the alloc crate`;
   }
