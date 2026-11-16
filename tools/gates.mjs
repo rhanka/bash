@@ -1,40 +1,41 @@
 // The eight gates of tools/check.mjs. Each gate takes a context { root, out, toolsDir, quick } and returns
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { components, lockResolution, pins, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { components, lockProblem, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { bindingsProblems } from "./bindings.mjs";
 
-const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.root);
+const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.toolsDir, ctx.root);
 
-function builtComponents(ctx) {
-  if (!existsSync(ctx.out)) return [];
-  return readdirSync(ctx.out)
-    .filter((f) => f.endsWith(".component.wasm"))
-    .sort()
-    .map((f) => join(ctx.out, f));
+/** One entry per component declared in tools/components.json: { name, def, path } (path may not exist). */
+function declared(ctx) {
+  return Object.entries(components(ctx.root)).map(([name, def]) => ({ name, def, path: join(ctx.out, `${name}.component.wasm`) }));
 }
 
 // ---------------------------------------------------------------------------------------------- G1
 
 export function g1ZeroImport(ctx) {
-  const list = builtComponents(ctx);
-  if (list.length === 0) return "no built component found";
-  for (const c of list) {
-    const r = tryRun(wasmToolsOf(ctx), ["component", "wit", c]);
-    if (r.status !== 0) return `${relative(ctx.root, c)}: wasm-tools component wit failed: ${r.stderr.trim()}`;
+  const list = declared(ctx);
+  if (list.length === 0) return "no component is declared in tools/components.json";
+  for (const { name, path } of list) {
+    if (!existsSync(path)) return `${name}: ${relative(ctx.root, path)} was not built`;
+    const r = tryRun(wasmToolsOf(ctx), ["component", "wit", path]);
+    if (r.status !== 0) return `${relative(ctx.root, path)}: wasm-tools component wit failed: ${r.stderr.trim()}`;
     const line = r.stdout.split("\n").find((l) => /^\s*import\b/.test(l));
-    if (line) return `${relative(ctx.root, c)} has an import: ${line.trim()}`;
+    if (line) return `${relative(ctx.root, path)} has an import: ${line.trim()}`;
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------------------------- G2
 
-const STATIC_IMPORT = /\b(?:import|export)\s+(?:[^'"();]*?\s+from\s+)?(['"])([^'"\n]+)\1/g;
-const DYNAMIC_LITERAL = /\bimport\s*\(\s*(['"`])([^'"`\n]*)\1\s*\)/g;
-const DYNAMIC_ANY = /\bimport\s*\(/g;
+// Whitespace between tokens, including block comments, so a comment cannot split a token pair.
+const W = String.raw`(?:\s|/\*[\s\S]*?\*/)*`;
+const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:[^'"();` + "`" + String.raw`]*?${W}\bfrom${W})?(['"])([^'"\n]+)\1`, "g");
+const DYNAMIC_LITERAL = new RegExp(String.raw`\bimport${W}\(${W}(['"])([^'"` + "`" + String.raw`\n$\\]*)\1${W}\)`, "g");
+const DYNAMIC_ANY = new RegExp(String.raw`\bimport${W}\(`, "g");
 
-/** Returns { specifiers, nonLiteralDynamic }. */
+/** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
 export function scanImports(src) {
   const specifiers = [];
   for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
@@ -43,23 +44,43 @@ export function scanImports(src) {
   return { specifiers, nonLiteralDynamic };
 }
 
+// Constructs that reach a module, a code evaluator or a node API by a route the import scan cannot see.
+const FORBIDDEN = [
+  [new RegExp(String.raw`\brequire${W}\(`), "require()"],
+  [new RegExp(String.raw`\beval${W}\(`), "eval()"],
+  [/\bFunction\b/, "the Function constructor"],
+  [new RegExp(String.raw`\b(?:globalThis|global|self|window|process)${W}(?:\?\.)?${W}\[`), "a bracket lookup on a global object"],
+];
+const NODE_ONLY = [
+  [/\bgetBuiltinModule\b/, "getBuiltinModule"],
+  [/\bcreateRequire\b/, "createRequire"],
+];
+
 const isRelative = (s) => s.startsWith("./") || s.startsWith("../");
+const SCRIPT = (p) => /\.(?:js|mjs|cjs)$/.test(p);
 
 export function g2NoBareImport(ctx) {
   const hostDir = join(ctx.root, "host");
-  const files = [...walk(join(ctx.out, "js"), (p) => p.endsWith(".js")), ...walk(hostDir, (p) => p.endsWith(".js"))];
+  const nodeDir = join(hostDir, "node") + sep;
+  const files = [...walk(join(ctx.out, "js"), SCRIPT), ...walk(hostDir, SCRIPT)];
   for (const f of files) {
     const rel = relative(ctx.root, f);
-    const { specifiers, nonLiteralDynamic } = scanImports(readFileSync(f, "utf8"));
+    const src = readFileSync(f, "utf8");
+    const { specifiers, nonLiteralDynamic } = scanImports(src);
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
-    const inNodeDir = f.startsWith(join(hostDir, "node") + "/");
+    const inNodeDir = f.startsWith(nodeDir);
+    for (const [re, what] of FORBIDDEN) if (re.test(src)) return `${rel}: uses ${what}`;
+    if (!inNodeDir) for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: uses ${what} outside host/node/`;
     for (const s of specifiers) {
-      if (isRelative(s)) continue;
+      if (isRelative(s)) {
+        if (!existsSync(resolve(dirname(f), s))) return `${rel}: relative import "${s}" does not exist`;
+        continue;
+      }
       if (s.startsWith("node:") && inNodeDir) continue;
       return `${rel}: bare specifier "${s}"`;
     }
   }
-  // The browser entry must not reach any node-only construct.
+  // The browser entry must not reach host/node/ or any node-only construct.
   const entry = join(hostDir, "browser.js");
   if (!existsSync(entry)) return null;
   const seen = new Set();
@@ -68,15 +89,14 @@ export function g2NoBareImport(ctx) {
     const f = queue.pop();
     if (seen.has(f)) continue;
     seen.add(f);
-    const src = readFileSync(f, "utf8");
     const rel = relative(ctx.root, f);
-    if (/process\s*\.\s*getBuiltinModule|\bcreateRequire\b/.test(src)) return `${rel}: reachable from host/browser.js and uses a node-only API`;
+    if (f.startsWith(nodeDir)) return `${rel}: reachable from host/browser.js but lives in host/node/`;
+    if (!existsSync(f)) return `${rel}: imported from host/browser.js but missing`;
+    const src = readFileSync(f, "utf8");
+    for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: reachable from host/browser.js and uses ${what}`;
     for (const s of scanImports(src).specifiers) {
       if (s.startsWith("node:")) return `${rel}: reachable from host/browser.js and imports ${s}`;
-      if (isRelative(s)) {
-        const target = resolve(dirname(f), s);
-        if (existsSync(target)) queue.push(target);
-      }
+      if (isRelative(s)) queue.push(resolve(dirname(f), s));
     }
   }
   return null;
@@ -87,6 +107,16 @@ export function g2NoBareImport(ctx) {
 function trackedAndNew(root) {
   const r = run("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root });
   return r.split("\0").filter((p) => p && existsSync(join(root, p)));
+}
+
+/** Map of relative path -> sha256 for the reproducible artefacts of a dist directory. */
+function distHashes(dist) {
+  const map = new Map();
+  for (const p of walk(dist, (f) => !relative(dist, f).startsWith("target/"))) {
+    const rel = relative(dist, p);
+    if (rel.endsWith(".core.wasm") || rel.endsWith(".component.wasm") || rel.startsWith("js/")) map.set(rel, sha256File(p));
+  }
+  return map;
 }
 
 export function g3TwoBuildIdentity(ctx) {
@@ -106,13 +136,7 @@ export function g3TwoBuildIdentity(ctx) {
         env: { ...process.env, SENTROPIC_TOOLS_DIR: ctx.toolsDir },
       });
       if (r.status !== 0) return `build failed in ${relative(ctx.root, d)}: ${(r.stderr || r.stdout).trim().slice(0, 400)}`;
-      const dist = join(d, "dist");
-      const map = new Map();
-      for (const p of walk(dist, (f) => !relative(dist, f).startsWith("target/"))) {
-        const rel = relative(dist, p);
-        if (rel.endsWith(".core.wasm") || rel.endsWith(".component.wasm") || rel.startsWith("js/")) map.set(rel, sha256File(p));
-      }
-      hashes.push(map);
+      hashes.push(distHashes(join(d, "dist")));
     }
   } finally {
     for (const d of ["g3-a", "g3-b"]) rmSync(join(base, d), { recursive: true, force: true });
@@ -122,53 +146,86 @@ export function g3TwoBuildIdentity(ctx) {
   for (const k of new Set([...a.keys(), ...b.keys()])) {
     if (a.get(k) !== b.get(k)) return `${k} differs between the two builds (${a.get(k)} vs ${b.get(k)})`;
   }
+  // The shipped dist/ must be the artefact the two reproducible builds produce.
+  const shipped = distHashes(ctx.out);
+  for (const k of new Set([...a.keys(), ...shipped.keys()])) {
+    if (a.get(k) !== shipped.get(k)) return `${k} in ${relative(ctx.root, ctx.out)} differs from the reproducible build (${shipped.get(k)} vs ${a.get(k)})`;
+  }
   ctx.detail = [...a].map(([k, v]) => `  ${v}  ${k}`);
   return null;
 }
 
 // ---------------------------------------------------------------------------------------------- G4
 
-function worldKeys(json, worldName) {
+const DROP = new Set(["docs", "package", "stability", "owner"]);
+
+/** Expands type and interface ids of a wasm-tools WIT JSON document into a self-contained structure, so
+ * two documents compare by what they declare (functions, types, interfaces) and not by their ids. */
+export function normalizeWorld(json, worldName) {
   const w = json.worlds.find((x) => x.name === worldName) ?? (json.worlds.length === 1 ? json.worlds[0] : null);
   if (!w) return null;
-  const names = (o) => Object.keys(o ?? {}).sort();
-  return { imports: names(w.imports), exports: names(w.exports) };
+  const type = (id) => walkValue(json.types[id]);
+  const iface = (id) => walkValue(json.interfaces[id]);
+  function walkValue(v, key = "") {
+    if (Array.isArray(v)) return v.map((x) => walkValue(x, key));
+    if (v && typeof v === "object") {
+      const o = {};
+      for (const k of Object.keys(v).sort()) {
+        if (DROP.has(k)) continue;
+        o[k] = k === "interface" && typeof v[k]?.id === "number" ? iface(v[k].id) : walkValue(v[k], k);
+      }
+      return o;
+    }
+    if (typeof v === "number" && key !== "length") return type(v);
+    return v;
+  }
+  const side = (m) => Object.fromEntries(Object.keys(m ?? {}).sort().map((k) => [k, walkValue(m[k], k)]));
+  return { imports: side(w.imports), exports: side(w.exports) };
 }
 
 export function g4ComponentValidity(ctx) {
-  const defs = components(ctx.root);
-  const list = builtComponents(ctx);
-  if (list.length === 0) return "no built component found";
+  const list = declared(ctx);
+  if (list.length === 0) return "no component is declared in tools/components.json";
   const wt = wasmToolsOf(ctx);
-  for (const c of list) {
-    const name = c.split("/").pop().replace(/\.component\.wasm$/, "");
-    const def = defs[name];
-    if (!def) return `${name}: not listed in tools/components.json`;
-    const v = tryRun(wt, ["validate", c]);
+  // Annex A: the committed WIT package must parse and resolve.
+  const annexA = join(ctx.root, "wit");
+  if (existsSync(annexA)) {
+    const r = tryRun(wt, ["component", "wit", annexA]);
+    if (r.status !== 0) return `wit/: wasm-tools component wit failed: ${r.stderr.trim()}`;
+  }
+  for (const { name, def, path } of list) {
+    if (!existsSync(path)) return `${name}: ${relative(ctx.root, path)} was not built`;
+    const v = tryRun(wt, ["validate", path]);
     if (v.status !== 0) return `${name}: wasm-tools validate failed: ${v.stderr.trim()}`;
-    const t = tryRun(wt, ["component", "targets", "-w", def.world, join(ctx.root, def.witDir), c]);
+    const t = tryRun(wt, ["component", "targets", "-w", def.world, join(ctx.root, def.witDir), path]);
     if (t.status !== 0) return `${name}: component does not conform to world ${def.world}: ${t.stderr.trim()}`;
-    const got = tryRun(wt, ["component", "wit", "--json", c]);
+    const got = tryRun(wt, ["component", "wit", "--json", path]);
     const want = tryRun(wt, ["component", "wit", "--json", join(ctx.root, def.witDir)]);
     if (got.status !== 0 || want.status !== 0) return `${name}: cannot print WIT as JSON`;
-    const a = worldKeys(JSON.parse(got.stdout), "root");
-    const b = worldKeys(JSON.parse(want.stdout), def.world);
+    const a = normalizeWorld(JSON.parse(got.stdout), "root");
+    const b = normalizeWorld(JSON.parse(want.stdout), def.world);
     if (!a || !b) return `${name}: world ${def.world} not found`;
-    if (JSON.stringify(a) !== JSON.stringify(b)) return `${name}: printed WIT ${JSON.stringify(a)} differs from committed ${JSON.stringify(b)}`;
+    if (JSON.stringify(a) !== JSON.stringify(b)) return `${name}: the component's interface differs from the committed WIT world ${def.world}`;
   }
+  const extra = readdirOrEmpty(ctx.out).filter((f) => f.endsWith(".component.wasm") && !(f.replace(/\.component\.wasm$/, "") in components(ctx.root)));
+  if (extra.length) return `${extra.join(", ")}: not listed in tools/components.json`;
   return null;
+}
+
+function readdirOrEmpty(dir) {
+  return existsSync(dir) ? readdirSync(dir) : [];
 }
 
 // ---------------------------------------------------------------------------------------------- G5
 
 export function g5OneCoreModule(ctx) {
-  const jsRoot = join(ctx.out, "js");
-  if (!existsSync(jsRoot)) return "no generated JavaScript found";
-  for (const d of readdirSync(jsRoot).sort()) {
-    const dir = join(jsRoot, d);
-    if (!statSync(dir).isDirectory()) continue;
+  const list = declared(ctx);
+  if (list.length === 0) return "no component is declared in tools/components.json";
+  for (const { name } of list) {
+    const dir = join(ctx.out, "js", name);
+    if (!existsSync(dir)) return `${name}: no generated JavaScript in ${relative(ctx.root, dir)}`;
     const wasm = walk(dir, (p) => p.endsWith(".wasm"));
-    if (wasm.length !== 1) return `${d}: expected exactly one .wasm, found ${wasm.length}`;
+    if (wasm.length !== 1) return `${name}: expected exactly one .wasm, found ${wasm.length}`;
     for (const js of walk(dir, (p) => p.endsWith(".js"))) {
       const m = readFileSync(js, "utf8").match(/[A-Za-z0-9+/]{1000,}={0,2}/);
       if (m) return `${relative(ctx.root, js)} embeds a base64 literal of ${m[0].length} characters`;
@@ -179,11 +236,15 @@ export function g5OneCoreModule(ctx) {
 
 // ---------------------------------------------------------------------------------------------- G6
 
-const HEAP_USES = [
-  /\buse\s+alloc::(?:\{[^}]*\b(?:vec|string|collections|boxed|rc|fmt)\b[^}]*\}|(?:vec|string|collections|boxed|rc|fmt)\b)/,
-  /\balloc::borrow::ToOwned\b/,
-];
-const ALLOC_CRATE = /\bextern\s+crate\s+alloc\b|\buse\s+alloc\b|\balloc::/;
+// Any path into the alloc crate: `alloc::...`, `::alloc::...`, `use alloc`, `extern crate alloc`.
+const ALLOC_PATH = /(?<![\w:])alloc\s*::|(?:^|[\s({,;=<])::\s*alloc\b|\buse\s+alloc\b|\bextern\s+crate\s+alloc\b/m;
+const ALLOC_CRATE = ALLOC_PATH;
+
+const withoutLineComments = (src) =>
+  src
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith("//"))
+    .join("\n");
 
 function workspaceNames(root) {
   const manifest = readFileSync(join(root, "Cargo.toml"), "utf8");
@@ -206,19 +267,26 @@ export function g6ZeroCrate(ctx) {
   const lockPath = join(ctx.root, "Cargo.lock");
   if (!existsSync(lockPath)) return "Cargo.lock is missing";
   const members = workspaceNames(ctx.root);
-  for (const m of readFileSync(lockPath, "utf8").matchAll(/\[\[package\]\]\s*\nname\s*=\s*"([^"]+)"/g)) {
+  const lock = readFileSync(lockPath, "utf8");
+  for (const m of lock.matchAll(/\[\[package\]\]\s*\nname\s*=\s*"([^"]+)"/g)) {
     if (!members.has(m[1])) return `Cargo.lock contains the non-workspace package ${m[1]}`;
   }
+  if (/^\s*source\s*=/m.test(lock)) return "Cargo.lock has a package with a source (registry or git)";
   const kernelSrc = join(ctx.root, "kernel", "src");
   for (const f of sourcesUnder(kernelSrc)) {
     const rel = relative(kernelSrc, f);
     if (rel.startsWith("mem/") || rel.startsWith("bindings/")) continue;
-    const src = readFileSync(f, "utf8");
-    if (HEAP_USES.some((re) => re.test(src))) return `kernel/src/${rel} uses an alloc heap type outside kernel/src/mem/ and kernel/src/bindings/`;
+    if (ALLOC_PATH.test(withoutLineComments(readFileSync(f, "utf8")))) return `kernel/src/${rel} uses the alloc crate outside kernel/src/mem/ and kernel/src/bindings/`;
   }
   const probeSrc = join(ctx.root, "probe", "src");
   for (const f of sourcesUnder(probeSrc)) {
-    if (ALLOC_CRATE.test(readFileSync(f, "utf8"))) return `probe/src/${relative(probeSrc, f)} uses the alloc crate`;
+    if (ALLOC_CRATE.test(withoutLineComments(readFileSync(f, "utf8")))) return `probe/src/${relative(probeSrc, f)} uses the alloc crate`;
+  }
+  // kernel/src/bindings/ is exempt from the heap rule only because it is exactly the generated output.
+  for (const [name, def] of Object.entries(components(ctx.root))) {
+    if (!def.bindings) continue;
+    const problems = bindingsProblems(ctx.root, name, def.bindings, toolBin("wit-bindgen", ctx.toolsDir, ctx.root));
+    if (problems.length) return problems[0];
   }
   return null;
 }
@@ -257,7 +325,7 @@ function findNodeModules(dir, root, found) {
     const p = join(dir, name);
     let st;
     try {
-      st = statSync(p);
+      st = lstatSync(p);
     } catch {
       continue;
     }
@@ -269,12 +337,17 @@ function findNodeModules(dir, root, found) {
 }
 
 export function g8ToolPins(ctx) {
-  for (const pin of pins(ctx.root)) {
-    const problem = toolProblem(pin, ctx.root);
+  const list = pins(ctx.root);
+  const bad = pinsProblem(list);
+  if (bad) return bad;
+  for (const pin of list) {
+    const problem = toolProblem(pin, ctx.toolsDir);
     if (problem) return problem;
   }
-  const staged = join(ctx.toolsDir, "npm", "package-lock.json");
   const committed = join(ctx.root, "tools", "package-lock.json");
+  const early = lockProblem(readJson(committed), readJson(join(ctx.root, "tools", "package.json")));
+  if (early) return early;
+  const staged = join(ctx.toolsDir, "npm", "package-lock.json");
   if (!existsSync(staged)) return "staged npm lockfile is missing";
   if (lockResolution(readJson(staged)) !== lockResolution(readJson(committed))) return "staged npm lockfile resolves differently from tools/package-lock.json";
   const nm = findNodeModules(ctx.root, ctx.root, []);
