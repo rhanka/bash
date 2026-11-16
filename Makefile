@@ -20,7 +20,7 @@ build:
 	node tools/build.mjs
 
 test: build
-	node --test 'test/*.test.mjs'
+	node tools/run-tests.mjs
 
 bench:
 	@if [ -f bench/run.mjs ]; then node bench/run.mjs; else echo "bench: no bench/run.mjs yet"; fi

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Runs the eight gates, then the node:test suite. Usage: node tools/check.mjs [--quick] [--only G<k>]
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { repoRoot, toolsDir } from "./lib.mjs";
 import { GATES } from "./gates.mjs";
+import { runTests } from "./run-tests.mjs";
 
 const argv = process.argv.slice(2);
 const quick = argv.includes("--quick");
@@ -31,6 +31,5 @@ for (const [id, name, fn] of GATES) {
 }
 if (failed) process.exit(1);
 if (!only) {
-  const r = spawnSync("node", ["--test", "test/*.test.mjs"], { cwd: repoRoot, stdio: "inherit" });
-  process.exit(r.status ?? 1);
+  process.exit(runTests());
 }
