@@ -42,7 +42,7 @@ world root {
 }
 ```
 
-Retained recipe: the one above, implemented in `tools/build.mjs`. The printed package is `root:component` (the embed step does not carry the probe package name); G4 therefore compares the world's import and export name sets, and runs `wasm-tools component targets`.
+Retained recipe: the one above, implemented in `tools/build.mjs`. The printed package is `root:component` (the embed step does not carry the probe package name); G4 therefore runs `wasm-tools validate` and `wasm-tools component targets`, then compares the normalized WIT definitions of the built component and of the committed world (functions, types and interfaces with ids expanded, names kept, docs and package dropped), and parses `wit/`.
 
 Extra check (spec section 12): the same build **without** `-C link-self-contained=no` yields a byte-identical component. For a `no_std` crate no C library is linked in either case, so the flag has no effect on the probe. It is kept as specified; its effect on a crate that links `std` is unknown (the kernel is `no_std`).
 
