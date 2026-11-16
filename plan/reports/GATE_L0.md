@@ -93,7 +93,7 @@ fb0a28aa22da243731bbd0cedcc4af7dd27e3a3b91fa4d8d5725b9cf89f645fa  probe.componen
 588c05fcab3ea12f6ccbe46b50bfb1cbafcd94a7364909b54897334ccb28c04b  probe.core.wasm
 ```
 
-`make check` exits 0 and runs 20 tests in 5 files, all passing (probe, entries with `import` and `require`, gates on fixtures, pack with offline install, fetch-tools).
+`make check` exits 0 and runs 48 tests in 8 files, all passing (probe, entries with `import` and `require`, gates on fixtures, pack with offline install, fetch-tools).
 
 ## 8. Section 12 confirmations
 
@@ -105,12 +105,12 @@ fb0a28aa22da243731bbd0cedcc4af7dd27e3a3b91fa4d8d5725b9cf89f645fa  probe.componen
 
 ## 9. Deviations from the spec
 
-1. `npm ci` replaced by `npm install --ignore-scripts --no-audit --no-fund` in `<tools>/npm/`, followed by a byte comparison of the lockfile (conductor instruction: `npm ci` fails with TypeScript 7 in that layout). Verified: the lockfile is unchanged afterwards.
-2. `node --test test/` does not work on node 22.22.1 (the directory is run as a module). The Makefile and `check.mjs` use `node --test 'test/*.test.mjs'`.
+1. `npm ci` replaced by `npm install --ignore-scripts --no-audit --no-fund` in `<tools>/npm/` (conductor instruction: `npm ci` fails with TypeScript 7 in that layout). Before install, the root `devDependencies` of the lockfile must equal `tools/package.json`, and every package must carry a `sha512-` integrity and an https `resolved` URL. After install, the staged lockfile is compared by resolution (package path, version, resolved URL, integrity), not by bytes, because npm versions rewrite other metadata; gate G8 repeats the comparison.
+2. `node --test test/` does not work on node 22.22.1 (the directory is run as a module). `tools/run-tests.mjs` walks `test/**/*.test.mjs` recursively and is the single runner for `make test` and `tools/check.mjs`.
 3. G3 copies `git ls-files --cached --others --exclude-standard` (tracked plus untracked, not ignored) instead of tracked files only, so it also covers a tree before commit; on a clean checkout the two sets are equal.
 4. `fetch-tools.mjs` accepts `file:` URLs and the `SENTROPIC_PINS` and `--skip-npm` test hooks, used by `test/fetch-tools.test.mjs` (no network in the test).
 5. Hand-written probe glue (section 3).
-6. `.github/workflows/check.yml` carries placeholders `ACTION_SHA_CHECKOUT`, `ACTION_SHA_SETUP_NODE` and `ACTION_SHA_CACHE`: full commit SHAs of third-party actions cannot be resolved without network. They must be filled by the conductor before the workflow can run.
+6. `.github/workflows/check.yml` pins every third-party action to a full commit SHA (checkout, setup-node, cache), with the release tag in a comment. Checkout uses `fetch-depth: 0` and `persist-credentials: false` so the attribution check sees the PR commits; the toolchain step runs `rustup toolchain install && rustup target add wasm32-wasip2`.
 7. Branch id: the conductor gave no branch number, so the exceptions are `BR1-EX1` to `BR1-EX3`.
 8. `plan/reports/GATE_L0.md` was added to the allowed paths, as section 11 says.
 
@@ -120,4 +120,4 @@ fb0a28aa22da243731bbd0cedcc4af7dd27e3a3b91fa4d8d5725b9cf89f645fa  probe.componen
 - L1b: generated glue needs `alloc` and a global allocator (section 3); decide the glue strategy before the facade. The jco runtime size (section 5). The generated `d.ts` names the world `root:component/root`; the facade should alias types. Package name of the embedded world is `root:component` unless the embed step is given a package.
 - L2: `wasm-opt` is a no-op hook (`wasmOpt: false`; setting it to true throws until the tool is pinned). The pinned jco-transpile has an `optimize` option that was left off.
 - Reproducibility is proven for a `no_std` crate only; a kernel with `core::fmt` panics paths may embed paths (the remap and `strip = true` are in place, to be re-proven by G3 at each lot).
-- CI is unproven (placeholders above); `rustup show active-toolchain || rustup toolchain install` relies on the runner's rustup.
+- CI is unproven (not run on a GitHub runner yet). Local simulation: tests run with `SENTROPIC_TOOLS_DIR` unset and `tmp/tools` linked to a verified tools directory. The `.verified` marker now holds the archive hash and the hash of the extracted executable; the executable is re-hashed on every check, so a restored cache is not trusted on the marker alone.
