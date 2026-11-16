@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Builds the components: core module, component, validation, JavaScript bindings.
 // Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { repoRoot, components, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
+import { bindingsProblems } from "./bindings.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
 const argv = process.argv.slice(2);
@@ -33,9 +34,9 @@ function buildCore(c, def) {
     `--remap-path-prefix=${repoRoot}=.`,
   ].join(" ");
   const target = join(out, "target");
-  run("cargo", ["build", "--release", "--offline", "--target", "wasm32-wasip2", "-p", def.crate], {
+  run("cargo", ["build", "--release", "--locked", "--offline", "--target", "wasm32-wasip2", "-p", def.crate], {
     cwd: repoRoot,
-    env: { ...process.env, RUSTFLAGS: rustflags, CARGO_TARGET_DIR: target, CARGO_ENCODED_RUSTFLAGS: undefined },
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC", RUSTFLAGS: rustflags, CARGO_TARGET_DIR: target, CARGO_ENCODED_RUSTFLAGS: undefined },
   });
   const built = join(target, "wasm32-wasip2", "release", def.crate.replace(/-/g, "_") + ".wasm");
   const core = join(out, `${c}.core.wasm`);
@@ -71,6 +72,8 @@ async function main() {
   }
   if (checkBindings) return verifyBindings();
   mkdirSync(out, { recursive: true });
+  // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
+  if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
   for (const c of names) {
     const def = all[c];
     const core = buildCore(c, def);
@@ -91,19 +94,9 @@ function verifyBindings() {
       console.log(`bindings ${c}: none committed (hand-written glue)`);
       continue;
     }
-    const tmp = mkdtempSync(join(repoRoot, "tmp", "bindings-"));
-    try {
-      run(toolBin("wit-bindgen"), ["rust", join(repoRoot, b.witDir), "--world", b.world, "--out-dir", tmp, ...b.args]);
-      for (const file of readdirSync(tmp)) {
-        const want = readFileSync(join(tmp, file));
-        const have = readFileSync(join(repoRoot, b.dir, file));
-        if (!want.equals(have)) {
-          console.log(`bindings ${c}: ${file} differs from the committed file`);
-          bad = true;
-        }
-      }
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
+    for (const p of bindingsProblems(repoRoot, c, b, toolBin("wit-bindgen"))) {
+      console.log(p);
+      bad = true;
     }
   }
   if (bad) process.exit(1);
