@@ -1,0 +1,9 @@
+{
+  "id": "l2/lists-and-shortcircuit",
+  "steps": [
+    {
+      "script": "echo a && echo b || echo c\n! echo d && echo e || echo f\n! ! echo g\necho q=$?"
+    }
+  ],
+  "title": "Lists and shortcircuit"
+}

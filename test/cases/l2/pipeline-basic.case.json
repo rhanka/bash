@@ -1,0 +1,9 @@
+{
+  "id": "l2/pipeline-basic",
+  "steps": [
+    {
+      "script": "echo left | echo right\n! echo one | echo two\necho status=$?"
+    }
+  ],
+  "title": "Pipeline basic"
+}
