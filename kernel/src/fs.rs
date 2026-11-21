@@ -1,7 +1,7 @@
 //! First slice of the filesystem (spec section 6): an in-memory tree keyed by normalized absolute paths.
 //! Content is charged to the volume budget (`maxFileSystemBytes`). Every operation outside the slice is
 //! `unsupported` and belongs to L7a.
-use crate::mem::{Budget, KBytes, KMap, KVec, LimitId, MemError, MemResult};
+use crate::mem::{Budget, KChunks, KBytes, KMap, KVec, LimitId, MemError, MemResult};
 use crate::util::bytes_in;
 use core::cell::RefCell;
 
@@ -59,7 +59,7 @@ pub enum Ok_ {
 
 struct Node {
     kind: Kind,
-    data: KBytes,
+    data: KChunks,
     mode: u32,
     mtime_ms: i64,
     ino: u64,
@@ -89,7 +89,7 @@ impl Vfs {
         let scratch = Budget::root(LimitId::HEADROOM, u64::MAX)?;
         let mut map = KMap::new_in(&budget);
         let root = bytes_in(b"/", &budget)?;
-        map.try_insert(root, Node { kind: Kind::Dir, data: KBytes::new_in(&budget), mode: 0o755, mtime_ms: 0, ino: 1 })?;
+        map.try_insert(root, Node { kind: Kind::Dir, data: KChunks::new_in(&budget), mode: 0o755, mtime_ms: 0, ino: 1 })?;
         Ok(Vfs { budget, scratch, inner: RefCell::new(Inner { map, next_ino: 2 }) })
     }
 
@@ -98,6 +98,16 @@ impl Vfs {
     }
 
     /// Normalizes a path: absolute, `.` and `..` collapsed, never above `/`.
+    pub(crate) fn resolve(&self, cwd: &[u8], path: &[u8]) -> Result<KBytes, Code> {
+        if path.starts_with(b"/") {
+            return self.norm(path);
+        }
+        let mut full = bytes_in(cwd, &self.scratch).map_err(map_mem)?;
+        full.try_push(b'/').map_err(map_mem)?;
+        full.try_extend_from_slice(path).map_err(map_mem)?;
+        self.norm(&full)
+    }
+
     fn norm(&self, path: &[u8]) -> Result<KBytes, Code> {
         let mut out = KBytes::new_in(&self.scratch);
         for comp in path.split(|&c| c == b'/') {
@@ -137,13 +147,15 @@ impl Vfs {
         Ok(k)
     }
 
+    pub(crate) fn stat_normalized(&self, path: &[u8]) -> Result<Stat, Code> {
+        self.inner.borrow().map.get(path).map(stat_of).ok_or(Code::NotFound)
+    }
+
     pub fn op(&self, op: Op<'_>) -> Result<Ok_, Code> {
         match op {
             Op::Stat(p) | Op::Lstat(p) => {
                 let p = self.norm(p)?;
-                let inner = self.inner.borrow();
-                let n = inner.map.get(p.as_slice()).ok_or(Code::NotFound)?;
-                Ok(Ok_::Info(stat_of(n)))
+                self.stat_normalized(&p).map(Ok_::Info)
             }
             Op::Exists(p) => {
                 let p = self.norm(p)?;
@@ -165,10 +177,11 @@ impl Vfs {
                 if n.kind == Kind::Dir {
                     return Err(Code::IsDirectory);
                 }
-                let size = n.data.len() as u64;
-                let start = offset.min(size) as usize;
-                let end = (offset.saturating_add(len as u64)).min(size) as usize;
-                Ok(Ok_::Data(bytes_in(&n.data[start..end], &self.scratch).map_err(map_mem)?))
+                let len = (n.data.len().saturating_sub(offset)).min(len as u64) as usize;
+                let mut bytes = KBytes::new_in(&self.scratch);
+                bytes.try_resize(len, 0).map_err(map_mem)?;
+                n.data.read_at(offset, bytes.as_mut_slice());
+                Ok(Ok_::Data(bytes))
             }
             Op::WriteFile { path, data, offset, truncate, mode, mtime_ms } => self.write_file(path, data, offset, truncate, mode, mtime_ms),
             Op::Mkdir { path, recursive, mode } => self.mkdir(path, recursive, mode.unwrap_or(0o755)),
@@ -216,20 +229,16 @@ impl Vfs {
             }
             let len = n.data.len();
             let start = match offset {
-                Some(o) => usize::try_from(o).map_err(|_| Code::NoSpace)?,
+                Some(o) => o,
                 None if truncate => 0,
                 None => len,
             };
-            let end = start.checked_add(data.len()).ok_or(Code::NoSpace)?;
-            // Reserve before changing file content or metadata. Resizing now uses the reserved space.
-            n.data.try_reserve_exact(end.saturating_sub(len)).map_err(map_mem)?;
+            let end = start.checked_add(data.len() as u64).ok_or(Code::NoSpace)?;
+            // Chunk growth reserves first, so a refused write leaves the existing file intact.
+            n.data.try_write_at(start, data).map_err(map_mem)?;
             if truncate {
-                n.data.truncate(start);
+                n.data.truncate(end);
             }
-            if end > n.data.len() {
-                n.data.try_resize(end, 0).map_err(map_mem)?;
-            }
-            n.data[start..end].copy_from_slice(data);
             if let Some(m) = mode {
                 n.mode = m;
             }
@@ -242,13 +251,29 @@ impl Vfs {
             write(n)?;
         } else {
             let ino = inner.next_ino;
-            let mut node = Node { kind: Kind::File, data: KBytes::new_in(&self.budget), mode: 0o644, mtime_ms: 0, ino };
+            let mut node = Node { kind: Kind::File, data: KChunks::new_in(&self.budget), mode: 0o644, mtime_ms: 0, ino };
             write(&mut node)?;
             let key = bytes_in(&p, &self.budget).map_err(map_mem)?;
             inner.map.try_insert(key, node).map_err(map_mem)?;
             inner.next_ino += 1;
         }
         Ok(Ok_::None)
+    }
+
+    #[cfg(feature = "test-commands")]
+    pub(crate) fn allocate_file(&self, path: &[u8], len: u64) -> MemResult<()> {
+        if len > self.budget.cap().saturating_sub(self.budget.used()) {
+            return Err(MemError::Limit(self.budget.limit()));
+        }
+        let path = self.norm(path).map_err(|_| MemError::Ceiling)?;
+        let mut inner = self.inner.borrow_mut();
+        let ino = inner.next_ino;
+        let mut data = KChunks::new_in(&self.budget);
+        // Extending an empty sequence zero-fills its chunks after the allocation succeeds.
+        data.try_write_at(len, &[])?;
+        inner.map.try_insert(path, Node { kind: Kind::File, data, mode: 0o644, mtime_ms: 0, ino })?;
+        inner.next_ino += 1;
+        Ok(())
     }
 
     fn mkdir(&self, path: &[u8], recursive: bool, mode: u32) -> Result<Ok_, Code> {
@@ -287,7 +312,7 @@ impl Vfs {
     fn insert_dir(&self, inner: &mut Inner, path: &[u8], mode: u32) -> Result<(), Code> {
         let key = bytes_in(path, &self.budget).map_err(map_mem)?;
         let ino = inner.next_ino;
-        inner.map.try_insert(key, Node { kind: Kind::Dir, data: KBytes::new_in(&self.budget), mode, mtime_ms: 0, ino }).map_err(map_mem)?;
+        inner.map.try_insert(key, Node { kind: Kind::Dir, data: KChunks::new_in(&self.budget), mode, mtime_ms: 0, ino }).map_err(map_mem)?;
         inner.next_ino += 1;
         Ok(())
     }
@@ -322,7 +347,7 @@ impl Vfs {
 }
 
 fn stat_of(n: &Node) -> Stat {
-    Stat { kind: n.kind, size: n.data.len() as u64, mode: n.mode, mtime_ms: n.mtime_ms, ino: n.ino }
+    Stat { kind: n.kind, size: n.data.len(), mode: n.mode, mtime_ms: n.mtime_ms, ino: n.ino }
 }
 
 #[cfg(test)]

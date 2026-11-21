@@ -9,6 +9,7 @@ const EXPECTED = [
   "DIVERGENCES.md",
   "LICENSE",
   "README.md",
+  "dist/js/kernel/commands.js",
   "dist/js/kernel/interfaces/exports/sentropic-bash-engine.d.ts",
   "dist/js/kernel/interfaces/exports/sentropic-bash-types.d.ts",
   "dist/js/kernel/interfaces/sentropic-bash-engine.d.ts",
@@ -17,12 +18,7 @@ const EXPECTED = [
   "dist/js/kernel/kernel.d.ts",
   "dist/js/kernel/kernel.js",
   "dist/js/kernel/kernel.shims.js",
-  "dist/js/probe/probe.core.wasm",
-  "dist/js/probe/probe.d.ts",
-  "dist/js/probe/probe.js",
   "dist/kernel.component.wasm",
-  "dist/probe.component.wasm",
-  "host/browser-probe.js",
   "host/browser.js",
   "host/core/bytes.js",
   "host/core/driver.js",
@@ -36,12 +32,10 @@ const EXPECTED = [
   "host/core/paths.js",
   "host/index.js",
   "host/node/load.js",
-  "host/node/probe.js",
   "package.json",
   "types/browser.d.ts",
   "types/core.d.ts",
   "types/index.d.ts",
-  "types/probe.d.ts",
   "wit/sentropic-bash.wit",
 ];
 
@@ -65,10 +59,9 @@ test("the tarball holds exactly the expected files and installs offline", () => 
   assert.equal(i.status, 0, i.stderr);
   writeFileSync(
     join(consumer, "main.mjs"),
-    'import { Bash, pipelineProbe } from "@sentropic/bash";\nconsole.log((await pipelineProbe()).ping(1));\nconst r = await new Bash().exec("");\nconsole.log(r.exitCode, JSON.stringify(r.stdout), JSON.stringify(r.stderr));\n',
+    "import assert from \"node:assert/strict\";\nimport { readFileSync } from \"node:fs\";\nimport * as node from \"@sentropic/bash\";\nimport * as browser from \"@sentropic/bash/browser\";\nawait browser.Bash.precompile(readFileSync(new URL(\"./node_modules/@sentropic/bash/dist/js/kernel/kernel.core.wasm\", import.meta.url)));\nfor (const entry of [node, browser]) {\n  assert.equal(\"pipelineProbe\" in entry, false);\n  const bash = new entry.Bash();\n  for (const { exitCode, stdout, stderr } of [await bash.exec(\"echo hi\"), bash.execSync(\"echo hi\")]) {\n    assert.deepEqual({ exitCode, stdout, stderr }, { exitCode: 0, stdout: \"hi\\n\", stderr: \"\" });\n  }\n}",
   );
   const r = spawnSync("node", ["main.mjs"], { cwd: consumer, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(r.stdout.trim().split("\n"), ["2", '0 "" ""']);
   assert.ok(readFileSync(join(consumer, "node_modules", "@sentropic", "bash", "package.json")));
 });

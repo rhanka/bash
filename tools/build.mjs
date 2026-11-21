@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Builds the components: core module, component, validation, JavaScript bindings.
 // Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { join, relative, resolve } from "node:path";
 import { repoRoot, components, coreImports, foreignImports, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
@@ -72,6 +73,26 @@ function buildComponent(c, def, core) {
   }
 }
 
+/** Reads the literal CommandSpec records consumed by kernel/build.rs. */
+export function scanCommandFiles(dir) {
+  const names = new Set();
+  const standard = [];
+  for (const file of readdirSync(dir).filter((name) => name.endsWith(".rs") && name !== "mod.rs").sort()) {
+    const source = readFileSync(join(dir, file), "utf8");
+    const spec = source.split("pub const SPEC")[1]?.split("= &[")[1]?.split("];")[0];
+    const commands = spec?.split("CommandSpec {").slice(1);
+    if (!commands?.length) throw new Error("Missing command specs in " + file);
+    for (const entry of commands) {
+      const name = entry.match(/\bname:\s*"([^"]+)"/)?.[1];
+      const kind = entry.match(/\bkind:\s*CommandKind::(Standard|Network)\b/)?.[1];
+      if (!name || !kind || names.has(name)) throw new Error("Invalid or duplicate command spec in " + file);
+      names.add(name);
+      if (kind === "Standard") standard.push(name);
+    }
+  }
+  return standard.sort();
+}
+
 async function main() {
   const f = tryRun("node", [join(repoRoot, "tools", "fetch-tools.mjs"), "--offline"], { cwd: repoRoot });
   if (f.status !== 0) {
@@ -88,7 +109,11 @@ async function main() {
     const core = buildCore(c, def);
     const comp = buildComponent(c, def, core);
     const jsDir = join(outDirOf(def), "js", c);
-    await transpileComponent(comp, jsDir);
+    await transpileComponent(comp, jsDir, { minify: c === "kernel" });
+    if (c === "kernel") {
+      const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
+      writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");
+    }
     report(core);
     report(comp);
     for (const p of walk(jsDir)) report(p);
@@ -112,7 +137,7 @@ function verifyBindings() {
   console.log("bindings: OK");
 }
 
-main().catch((e) => {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main().catch((e) => {
   console.error(`build failed: ${e.message}`);
   if (e.stderr) console.error(e.stderr);
   process.exit(1);

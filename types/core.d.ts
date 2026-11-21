@@ -231,6 +231,7 @@ export declare class Bash {
   execSync(commandLine: string, options?: Omit<ExecOptions, "signal">): BashExecResult;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
+  getCommandNames(): string[];
   getCwd(): string;
   getEnv(): Record<string, string>;
   registerCommand(command: Command): void;
