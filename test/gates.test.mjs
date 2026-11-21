@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, symlinkSync, writeFileSync, cpSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot, scratch } from "./helpers.mjs";
-import { toolsDir, toolBin, run, readJson, toolProblem, markerText, sha256File, lockProblem, pinsProblem } from "../tools/lib.mjs";
+import { importLines, coreImports, toolsDir, toolBin, run, readJson, toolProblem, markerText, sha256File, lockProblem, pinsProblem } from "../tools/lib.mjs";
 import * as gates from "../tools/gates.mjs";
 
 const fx = (name) => join(repoRoot, "test", "fixtures", name);
@@ -287,4 +287,18 @@ test("lockProblem rejects a missing integrity, an http URL and a manifest mismat
   assert.match(lockProblem(lock({ ...pkg, integrity: undefined }), manifest), /no sha512 integrity/);
   assert.match(lockProblem(lock({ ...pkg, resolved: "http://x/a.tgz" }), manifest), /not resolved over https/);
   assert.match(lockProblem(lock(pkg, { a: "2.0.0" }), manifest), /devDependencies differ/);
+});
+
+test("K1 coreImports finds a real core import", () => {
+  const out = scratch("k1");
+  const wasm = join(out, "kernel.core.wasm");
+  run(toolBin("wasm-tools", toolsDir()), ["parse", join(fx("k1-import"), "import.wat"), "-o", wasm]);
+  const imports = coreImports(wasm);
+  assert.equal(imports.length, 1);
+  assert.match(imports[0], /^\(import "env" "f"/);
+});
+
+test("K1 coreImports ignores an import-looking data segment", () => {
+  assert.deepEqual(importLines('  (data (;0;) (i32.const 0) "(import \\"x\\")")\n  (import "env" "f" (func))'), ['(import "env" "f" (func))']);
+  assert.deepEqual(importLines('  (data (;0;) (i32.const 0) "(import ")'), []);
 });
