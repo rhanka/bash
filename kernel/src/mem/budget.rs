@@ -15,7 +15,7 @@ struct Node {
     parent: Option<Budget>,
 }
 
-/// A node that lives in a static: it has no parent and one permanent reference, so it is never freed.
+/// A node that lives in a static: it has no parent and its reference count is always zero.
 pub(crate) struct StaticNode(Node);
 
 // SAFETY: the node has no parent handle (the only non-`Sync` part of `Node`) and every field is an atomic
@@ -24,11 +24,11 @@ unsafe impl Sync for StaticNode {}
 
 impl StaticNode {
     pub(crate) const fn new(limit: LimitId, cap: u64) -> StaticNode {
-        StaticNode(Node { limit, cap: AtomicU64::new(cap), used: AtomicU64::new(0), refs: AtomicUsize::new(1), parent: None })
+        StaticNode(Node { limit, cap: AtomicU64::new(cap), used: AtomicU64::new(0), refs: AtomicUsize::new(0), parent: None })
     }
 }
 
-/// A byte budget. Cloning yields another handle to the same budget (never fails, allocates nothing).
+/// A byte budget. Cloning yields another handle to the same budget without allocating.
 /// The memory of the node itself comes from the allocator and is charged to no budget; it lives as long
 /// as a handle, a child or a container refers to it. Not `Send` and not `Sync`.
 pub struct Budget {
@@ -49,15 +49,13 @@ impl Budget {
     }
 
     fn node(&self) -> &Node {
-        // SAFETY: the node is live while this handle exists (the handle owns one reference count).
+        // SAFETY: the node is either static or kept live by this handle's reference count.
         unsafe { self.node.as_ref() }
     }
 
-    /// A handle to a static node (the headroom account): counts one more reference.
+    /// A handle to a static node (the headroom account).
     pub(crate) fn of_static(node: &'static StaticNode) -> Budget {
-        let n = &node.0;
-        n.refs.fetch_add(1, Relaxed);
-        Budget { node: NonNull::from(n) }
+        Budget { node: NonNull::from(&node.0) }
     }
 
     /// A root budget with the given cap, in bytes. Fails only with `Ceiling` (the node is allocated).
@@ -126,11 +124,14 @@ impl Budget {
 }
 
 impl Clone for Budget {
-    /// A handle copy: never fails, allocates nothing.
+    /// A handle copy. Panics if the dynamic reference count reaches its limit.
     fn clone(&self) -> Budget {
         let n = self.node();
-        if n.refs.fetch_add(1, Relaxed) == usize::MAX {
-            panic!("budget handle count overflow");
+        let refs = n.refs.load(Relaxed);
+        if refs != 0 {
+            // Dynamic nodes are thread-local because their handles are neither Send nor Sync.
+            assert!(refs < isize::MAX as usize, "budget handle count overflow");
+            n.refs.store(refs + 1, Relaxed);
         }
         Budget { node: self.node }
     }
@@ -139,7 +140,7 @@ impl Clone for Budget {
 impl Drop for Budget {
     fn drop(&mut self) {
         let n = self.node();
-        if n.refs.fetch_sub(1, Relaxed) == 1 {
+        if n.refs.load(Relaxed) != 0 && n.refs.fetch_sub(1, Relaxed) == 1 {
             // SAFETY: this was the last handle, so nothing else refers to the node; it was allocated in
             // `make` with `Layout::new::<Node>()` and is initialised. Dropping it drops the parent handle.
             unsafe {
@@ -179,5 +180,30 @@ mod tests {
         let b = Budget::root(LimitId(10), u64::MAX).unwrap();
         b.charge(u64::MAX).unwrap();
         assert_eq!(b.charge(1), Err(MemError::Limit(LimitId(10))));
+    }
+
+    #[test]
+    fn static_handles_never_change_the_immortal_count() {
+        static NODE: StaticNode = StaticNode::new(LimitId(12), 100);
+        let b = Budget::of_static(&NODE);
+        assert_eq!(b.limit(), LimitId(12));
+        assert_eq!(NODE.0.refs.load(Relaxed), 0);
+        let c = b.clone();
+        assert_eq!(NODE.0.refs.load(Relaxed), 0);
+        drop((b, c));
+        assert_eq!(NODE.0.refs.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn clone_at_the_refcount_limit_leaves_the_count_intact_on_unwind() {
+        let b = Budget::root(LimitId(13), 100).unwrap();
+        for count in [isize::MAX as usize, usize::MAX] {
+            b.node().refs.store(count, Relaxed);
+            let refused = std::panic::catch_unwind(|| drop(b.clone())).is_err();
+            let after = b.node().refs.swap(1, Relaxed);
+            assert!(refused);
+            assert_eq!(after, count);
+        }
+        assert_eq!(b.clone().limit(), LimitId(13));
     }
 }
