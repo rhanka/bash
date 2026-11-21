@@ -128,8 +128,7 @@ test("gate 18: every operation of the filesystem slice", () => {
   for (const tag of ["read-link", "real-path", "read-dir-plus"]) assert.equal(err(v.op({ tag, val: p("/a") })), "unsupported");
   assert.equal(err(v.op({ tag: "copy", val: { source: p("/a"), target: p("/b"), recursive: false } })), "unsupported");
   assert.equal(err(v.op({ tag: "chmod", val: { path: p("/a"), mode: 0 } })), "unsupported");
-  const shell = engine.Shell.create(v, config());
-  void shell;
+  engine.Shell.create(engine.Vfs.create(16_384n), config());
   const other = engine.Vfs.create(2000n);
   assert.equal(thrown(() => v.mountVfs(p("/m"), other)).code, "unsupported");
   assert.equal(thrown(() => v.mountHost(p("/m"), 1)).code, "unsupported");
@@ -245,12 +244,12 @@ test("a limit result includes its name and diagnostic after ordinary heap growth
   const { epoch } = fiber.run(5n).val;
   const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
   // Pre-fill the heap in the kernel so the transfer account only sees the paths and body chunks.
-  assert.equal(fill("/fill", ceiling - 350_000n).tag, "ok");
+  assert.equal(fill("/fill", ceiling - 460_000n).tag, "ok");
   const before = engine.usage().used;
-  fiber.pushCallData(epoch, "body", new Uint8Array(140_000));
-  assert.equal(engine.usage().used - before, 140_000n);
+  fiber.pushCallData(epoch, "body", new Uint8Array(2 * 65_536 + 32_768));
+  assert.equal(engine.usage().used - before, 163_840n + 3n * 4n);
   assert.equal(fill("/fill2", 130_000n).tag, "ok");
-  // The one-byte input fits, but the body cannot grow.
+  // The one-byte input fits, but the 32 KiB tail cannot grow to its next size class.
   fiber.pushCallData(epoch, "body", enc("x"));
   const result = fiber.resume(epoch, { tag: "command-exit", val: 0 });
   assert.equal(result.tag, "done");
@@ -276,7 +275,7 @@ test("cancel preserves large stderr and its diagnostic near the Wasm ceiling", (
   // The ordinary arena can no longer grow stderr, which is also too large for amortized
   // growth into the reserve page.
   const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
-  assert.equal(fill("/fill", ceiling - 350_000n).tag, "ok");
+  assert.equal(fill("/fill", ceiling - 380_000n).tag, "ok");
   assert.equal(fiber.cancel("aborted").status, "aborted");
   const chunks = [];
   for (;;) {
@@ -293,7 +292,7 @@ test("cancel preserves large stderr and its diagnostic near the Wasm ceiling", (
 
 test("host-supplied limit names are bounded at a UTF-8 character boundary", () => {
   const { engine } = withEngine();
-  const vfs = engine.Vfs.create(4096n);
+  const vfs = engine.Vfs.create(16_384n);
   const c = config(["foo"]);
   c.grants.realSleep = true;
   const shell = engine.Shell.create(vfs, c);
@@ -324,7 +323,7 @@ test("shell cwd copies are bounded only when the full ordinary copy is refused",
   const shell = engine.Shell.create(vfs, c);
   assert.deepEqual(shell.cwd(), c.cwd);
   const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
-  assert.equal(fill("/fill", ceiling - 280_000n).tag, "ok");
+  assert.equal(fill("/fill", ceiling - 445_000n).tag, "ok");
   assert.equal(fill("/fill2", 95_000n).tag, "ok");
   assert.deepEqual(shell.cwd(), c.cwd.subarray(0, 4096));
 });
@@ -364,7 +363,7 @@ test("gate 16: the release kernel runs none of the test-only commands", async ()
 });
 
 test("gate 16: the release kernel holds none of the test-only command names", () => {
-  const names = ["__out", "__err", "__stdin", "__alloc", "__spin", "__exit", "__setenv", "__write", "__cat", "__hostfs", "__lazy", "__fetch", "__sleep", "__clock", "__entropy", "__trap"];
+  const names = ["__out", "__err", "__stdin", "__alloc", "__spin", "__exit", "__setenv", "__write", "__cat", "__hostfs", "__lazy", "__fetch", "__sleep", "__clock", "__entropy", "__trap", "__fsalloc", "__work"];
   const release = [readFileSync(join(repoRoot, "dist", "kernel.core.wasm")), readFileSync(join(repoRoot, "dist", "kernel.component.wasm"))];
   const test = readFileSync(join(repoRoot, "dist", "test", "kernel-test.core.wasm"));
   for (const n of names) {
@@ -375,7 +374,7 @@ test("gate 16: the release kernel holds none of the test-only command names", ()
 
 test("shell.create refuses unknown limits and byte caps that exceed the ceiling", () => {
   const { engine } = withEngine();
-  const vfs = engine.Vfs.create(1000n);
+  const vfs = engine.Vfs.create(16_384n);
   const c = config();
   c.limits = { profile: "contain", overrides: [{ name: "nope", value: 1n }] };
   assert.equal(thrown(() => engine.Shell.create(vfs, c)).code, "invalid-config");

@@ -3,11 +3,13 @@
 // share one body: the generator yields a promise to await, or a tick to give the event loop a turn.
 import { concat, decodeUtf8, latin1FromBytes, unsafeBytesFromLatin1, utf8, utf8Length } from "./bytes.js";
 import { AsyncCapabilityError, KernelPoisonedError } from "./errors.js";
+import { fsState } from "./fs.js";
+import { resolvePath } from "./paths.js";
 import { stringLimit } from "./limits.js";
 import { FS_METHODS, Scope, settleWithin } from "./membrane.js";
 
 const CHUNK = 1 << 20;
-const FUEL = 100_000n;
+const FUEL = 2_048n;
 const YIELD_MS = 10;
 const SCRIPT_MAX_BYTES = 3 << 20;
 const FATAL_STDERR = "bash: internal error: sandbox instance failed\n";
@@ -33,9 +35,9 @@ function fatalResult(B) {
   return r;
 }
 
-function limitResult(B, name) {
+function limitResult(B, name, overlay) {
   const env = nullObject(Object.entries(B.initialEnv));
-  env["?"] = "126";
+  for (const [key, value] of overlay) env[key] = value;
   return { stdout: "", stderr: `bash: ${name} exceeded\n`, exitCode: 126, env };
 }
 
@@ -89,16 +91,18 @@ export function anySignal(a, b) {
  * The exec generator.
  * @param {object} B internal state of the Bash
  * @param {string} script
- * @param {object} o normalized options: { env: [name, value][], replaceEnv, cwd, rawScript, stdin: Uint8Array, args: string[], signal, bypass, parent }
+ * @param {object} o normalized options: { env: [name, value][], envGiven, replaceEnv, cwd, rawScript, stdin: Uint8Array, args: string[], signal, bypass, parent }
  */
 export function* execLoop(B, script, o) {
   const inst = B.holder.instance;
   inst.check();
   const L = B.limits;
   // Pre-checks (7.3 step 1): nothing is lowered, no kernel call is made.
-  const strings = [...o.env.flat(), ...o.args, o.cwd ?? "", o.bypass ?? ""];
+  let cwd = o.cwd;
+  if (cwd && !cwd.startsWith("/")) cwd = `${B.initialCwd === "/" ? "" : B.initialCwd}/${cwd}`;
+  const strings = [...o.env.flat(), ...o.args, cwd ?? "", o.bypass ?? ""];
   const limit = stringLimit(strings, L.maxStringLength, B.headroom, o.env.length * 20 + o.args.length * 8);
-  if (limit) return limitResult(B, limit);
+  if (limit) return limitResult(B, limit, o.env);
 
   const utf16 = script.length;
   let scriptBytes;
@@ -121,19 +125,40 @@ export function* execLoop(B, script, o) {
   };
   const engine = inst.engine;
   try {
+    let reason = cancelReason(x);
+    if (!reason && cwd && o.envGiven && !o.env.some(([name]) => name === "PWD")) {
+      const candidate = resolvePath("/", cwd);
+      if (B.userFs) {
+        const resolved = yield* serveExtension(x, async (scope) => {
+          const fs = scope.wrap(B.userFs, FS_METHODS);
+          if (fs.realpath) return fs.realpath(cwd);
+          if (fs.stat && candidate !== cwd && await fs.stat(candidate)) return candidate;
+        }, undefined);
+        reason = resolved.cancel;
+        const path = resolved.outcome;
+        if (typeof path === "string" && path.startsWith("/") &&
+            !stringLimit([path], L.maxStringLength, B.headroom)) cwd = path;
+      } else if (o.env.length === 0 && candidate !== cwd &&
+          !stringLimit([candidate], L.maxStringLength, B.headroom)) {
+        const { vfs } = fsState(B.rootFs);
+        const result = inst.call(() => vfs.op({ tag: "exists", val: utf8(candidate) }));
+        if (result.tag === "ok" && result.val.val) cwd = candidate;
+      }
+    }
     x.fiber = inst.call(() =>
       engine.Fiber.spawn(B.shell, o.parent?.fiber, {
         script: scriptBytes,
         scriptOverflow: overflow,
         args: o.args.map(utf8),
-        env: o.env.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: true })),
+        env: o.env.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: /^[A-Za-z_][A-Za-z_0-9]*$/.test(n) })),
         replaceEnv: !!o.replaceEnv,
-        cwd: o.cwd === undefined ? undefined : utf8(o.cwd),
+        cwd: cwd === undefined ? undefined : utf8(cwd),
         rawScript: !!o.rawScript,
         bypassCustom: o.bypass,
       }),
     );
-    if (o.signal?.aborted) return finish(x, cancel(x, "aborted"));
+    reason ??= o.signal?.aborted ? "aborted" : undefined;
+    if (reason) return finish(x, cancel(x, reason));
     // stdin in chunks of at most 1 MiB, the last with `last = true`.
     const stdin = o.stdin;
     let pos = 0;
@@ -169,7 +194,7 @@ export function* execLoop(B, script, o) {
     }
   } catch (e) {
     if (e instanceof KernelPoisonedError) return fatalResult(B);
-    if (!x.fiber && e?.code === "ceiling") return limitResult(B, e.detail || "memory-ceiling");
+    if (!x.fiber && e?.code === "ceiling") return limitResult(B, e.detail || "memory-ceiling", o.env);
     throw e;
   } finally {
     for (const s of x.scopes) s.revoke();
@@ -210,10 +235,11 @@ function drain(x) {
 function finish(x, er) {
   drain(x);
   const env = envToObject(er.env);
-  env["?"] ??= String(er.exitCode);
   let stderr = decodeUtf8(concat(x.err));
   if (x.err.length === 0) {
-    if (er.status === "limit-exceeded" && er.limitName) stderr = `bash: ${er.limitName} exceeded\n`;
+    if (er.status === "limit-exceeded" && er.limitName) {
+      stderr = `bash: ${er.limitName} exceeded\n`;
+    }
     if (er.status === "aborted" || er.status === "deadline") stderr = "bash: execution aborted\n";
   }
   const r = {

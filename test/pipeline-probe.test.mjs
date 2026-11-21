@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pipelineProbe } from "@sentropic/bash";
+import { readFileSync } from "node:fs";
+import { instantiate } from "../dist/test/js/probe/probe.js";
+
+const module = new WebAssembly.Module(readFileSync(new URL("../dist/test/js/probe/probe.core.wasm", import.meta.url)));
+const pipelineProbe = () => instantiate(() => module, {});
 
 test("the probe loads on demand and instantiates with an empty import object", async () => {
   const probe = await pipelineProbe();
