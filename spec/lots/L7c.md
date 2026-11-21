@@ -35,10 +35,10 @@ object see each other's file changes and expose that same object as `bash.fs`. O
 in-memory filesystem from the supplied files and resolved storage limit. If both `fs` and `files` are present,
 the supplied FS wins. The file map is an initializer for a newly created volume only. Its presence still affects
 the default cwd/layout choice. Each shell initializes its own environment, limits and command state. The
-reference exposes no Wasm store, trap domain or isolation selector. Reviewer provenance only
-(JB:src/Bash.ts:373). EVOL D27/Annex I documents the added mode switch, default separate execution stores and
-opt-in shared failure/ceiling scope. Filesystem visibility and identity remain parity requirements in both
-modes. This addition creates zero parity exclusions.
+reference exposes no Wasm store, trap domain or isolation selector. EVOL D27/Annex I documents the
+added mode switch, default separate execution stores and opt-in shared failure/ceiling scope.
+Filesystem visibility and identity remain parity requirements in both modes. This addition creates zero
+parity exclusions.
 
 ## 3. Allowed paths
 
@@ -108,14 +108,22 @@ network, host disk or another mount map.
    (limits, env, registry) in its own store.
 3. **Seed the public volume.** For a freshly created volume apply its initial files first. For a supplied volume
    keep its existing contents as the starting tree, even when `files` is also supplied. Apply the L2 section
-   5.2/L7b section 7.2 sequence synchronously on ready stores: system directories, default home/tmp when
+   5.2/L7b section 7.2 order synchronously on ready stores. Create system directories, default home/tmp when
    eligible, device and proc entries (including this shell's process info), cwd, then physical stubs in both
-   `/bin` and `/usr/bin` for active registry and custom names. Preserve L2 modes, bytes, overwrite order,
-   directory collision errors, quota accounting and best-effort stub writes. Late `registerCommand` must update
-   both public stubs and only the registering shell's registry. Share the layout writer/ordering with ordinary
-   construction wherever possible. Existing volume files outside this initialization survive, including two
-   attachments in sequence. On failure release unpublished resources/mounts and retain pre-existing owners. A
-   retry follows ordinary construction semantics.
+   `/bin` and `/usr/bin` for active registry and custom names. For branded volumes in either mode, issue
+   layout operations through the owning Vfs's internal `vfs.op`. Bypass public FS methods, including overrides.
+   Use `mkdir` with mode `0o755` for new directories. Use `write-file` with `mtimeMs: 0n` and mode `0o644`
+   for device files, proc files and command stubs (L2 section 5.2). New directories have guest mtime zero.
+   Initial user files retain explicit modes and mtimes and use virtual time when the caller omits mtime.
+   Preserve layout bytes, overwrite order, directory collision errors, quota accounting and best-effort stub
+   writes. Late `registerCommand` uses the same writer for both stubs and updates only the registering shell's
+   registry. Share the layout writer/ordering with ordinary construction wherever possible. Existing volume
+   files outside this initialization survive two attachments in sequence. On failure release unpublished
+   resources/mounts and retain pre-existing owners. A
+   retry follows ordinary construction semantics. Align `InMemoryFs` in `host/core/fs.js` with its sync
+   declarations in `types/core.d.ts`. `writeFileSync(path, content, options?)` accepts an encoding string
+   or a third-argument object with encoding, mode and mtime. Preserve initial-file metadata passed by
+   `addFiles`. `mkdirSync(path, {recursive, mode})` forwards both options, each optional.
 4. **Browser order.** Before compilation, stage against the volume's single ordered queue and preserve call
    order across attachments, initial files, layout and subsequent writes. Ensure both holders are ready before a
    separate shell enters its driver. After `await Bash.precompile()`, ready built-in mounts must support
@@ -126,14 +134,20 @@ network, host disk or another mount map.
    Its private map restricts the authority to the explicitly supplied volume. For `fs-batch {mountId,ops}` on a live, branded
    in-memory entry, run a synchronous helper returning `{tag:"fs", val: results}`. Process each op in order
    through the *volume owner's* `Instance.call(() => vfs.op(op))`. Paths/offsets/data/mode/time and tagged
-   success/error records pass through in the existing WIT forms. Emit exactly one result per op, including a
-   failure in the middle. Continue subsequent operations in order, with completed mutations visible. Preserve `unsupported` for operations L7a has yet to implement. Call
+   success/error records pass through in the existing WIT forms. For a batch within the bounds below, emit
+   exactly one result per op, including a failure in the middle. Continue subsequent operations in order, with
+   completed mutations visible. Preserve `unsupported` for operations L7a has yet to implement. Call
    `fiber.resume(epoch,outcome)` on the **execution** store and process its returned step immediately. Zero
    promises, public FS callbacks, yields for FS I/O or recursive execs in this branch. Keep scheduler fuel ticks
    and abort checks. Reject an unknown mount id with `denied` before touching any owner.
-6. **Bounds and poison.** Apply both sides' existing transfer, traversal and headroom checks, including 1 MiB
-   file chunks and response size at most half the requesting shell's headroom. Bound the response before
-   constructing/lowering an oversized list. Preserve exact bytes and typed refusals. Private internal dispatch
+6. **Bounds and poison.** For this synchronous mount, bound the serialized batch request and the aggregate
+   non-chunked response each by `min(1 MiB, floor(requesting shell headroom / 2))`. Count the encoded records
+   and their variable-length payloads. Check the entire request before the first volume op. As results arrive,
+   check the cumulative size before constructing or lowering an oversized response. If either size exceeds
+   the bound, resume the execution fiber once at the same epoch with `{tag: "limit-exceeded", val: "headroom"}`.
+   `Fiber::resume` ends that exec with exit 126. Never truncate `read-dir`, `read-dir-plus`, `walk` or `all-paths`
+   to fit a byte budget. On response overflow stop the batch and keep any completed mutations visible without
+   replay. Both sides' traversal limits and the existing 1 MiB file chunk limit still apply. Private internal dispatch
    must not invoke methods overridden on the public FS object. A trap in a volume operation poisons its own
    store. A trap in an execution store revokes that store's scopes, fails its fibers and prevents a pending
    resume without disposing another holder's resources. On a dead shell, shell methods (including convenience
@@ -158,8 +172,12 @@ store's calls/epochs and without exposing memory through the public facade.
    instance.
 2. **Visibility and layout.** Test initial files, a supplied volume plus a conflicting `files` map (only the
    supplied volume's sentinel is present, default cwd is `/`), proc bytes, stub bytes/modes, filtered registry
-   and late registration against a local control. A guest write by A is immediately visible through `fs` and a
-   sync guest read by B, and vice versa, including binary data and a removal. Compare exit/status and actual
+   and late registration against a local control. In both modes attach and register with throwing overrides
+   on the public `mkdirSync` and `writeFileSync`. Assert zero override calls, mtime zero for layout nodes and
+   the specified modes in both stub directories and under `/dev` and `/proc`. Vary the host clock between runs.
+   Separately check that third-argument write metadata and an explicit mkdir mode reach the public FS stat.
+   A guest write by A is immediately visible through `fs` and a sync guest read by B, and vice versa,
+   including binary data and a removal. Compare exit/status and actual
    shared contents for `__write`/`__cat`, `/bin/echo hi` and a missing path. Verify independent custom dispatch
    (B returns 127 for A's private name). Include `fs: a.fs` and browser staged writes/reads before and after
    precompile.
@@ -174,7 +192,13 @@ store's calls/epochs and without exposing memory through the public facade.
    ceilings in separate mode and a common monotonic ceiling in shared mode. Fill the common volume to its
    configured quota. Both see the same retained bytes and next-write refusal. Interleave at least 20 writes to
    distinct paths between the two shells and verify all 20 contents. Ordered writes within one batch produce the
-   last writer's bytes.
+   last writer's bytes. With a `micro` requester on a `normal` volume, exercise the request and response byte
+   bounds at equality and one byte over. Use a small headroom fixture to cover the half-headroom bound and
+   sufficient headroom to cover the 1 MiB bound. At equality an otherwise valid batch completes in full. For
+   oversized listings exercise `read-dir`, `read-dir-plus`, `walk` and `all-paths` with traversal limits above
+   the fixture size. Supply fixture results for op tags still unsupported by the volume. Each overflow yields one
+   `limit-exceeded("headroom")` resume, exit 126 and zero partial listings. An oversized request reaches
+   zero volume ops. A write preceding an overflowing response is applied once.
 5. **Trap domains.** In each mode leave an exec pending at a custom call. Synchronize on its arrival, then run
    `__trap` in the same store. Both affected execs return exit 1, non-enumerable `fatal: true` and the L1b fatal
    diagnostic. Subsequent execution on that store rejects `KernelPoisonedError` and no stale resume reaches the
@@ -182,7 +206,8 @@ store's calls/epochs and without exposing memory through the public facade.
    In shared mode the sibling and common volume reject. A third, independent shell succeeds. Exercise both trap
    directions for `fs: a.fs` and a mixed pair, asserting zero guest calls to the failed owner.
 6. **Integration.** G1–G8/K1 green, 30/30 L2 oracle cases, 4/4 profile suites, no new exclusions. Packed Node
-   and browser consumers from both packages retain their declarations and `execSync` with an in-memory root.
+   and browser consumers from both packages type-check both `BashOptions.isolation` literals from the root
+   declarations staged by L2c and run `execSync` with an in-memory root.
    Record both Annex H browser-cap results on the updated default pack.
 
 ## 7. Points the builder must confirm and report
