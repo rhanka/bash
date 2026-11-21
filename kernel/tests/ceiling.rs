@@ -5,7 +5,7 @@ use sentropic_bash_kernel::mem::*;
 
 #[test]
 fn ceiling() {
-    let base = start();
+    start();
     let b = root(51, u64::MAX);
 
     // Configuration errors.
@@ -68,8 +68,8 @@ fn ceiling() {
     // machine): pin it so the hook scenarios do not depend on the host.
     assert_eq!(set_headroom(1 << 20), Ok(()));
     transfer();
-    drop(b);
-    assert_eq!(usage().used, base, "no leak");
+    assert_eq!(b.used(), 0);
+    assert_eq!(headroom().used(), 0);
 }
 
 /// The inner allocator refusing (here: the system allocator cannot serve 2^62 bytes) must not inflate
@@ -85,6 +85,8 @@ fn inner_refusal_keeps_high_water() {
     assert_eq!(after.used, before.used);
     assert_eq!(after.high_water, before.high_water, "a refused allocation is not a peak");
     testing::reset(BIG);
+    drop(v);
+    assert_eq!(b.used(), 0);
 }
 
 fn transfer() {
