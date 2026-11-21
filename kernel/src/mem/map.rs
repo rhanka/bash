@@ -459,6 +459,7 @@ impl<K: Ord, V> KMap<K, V> {
             // SAFETY: `n` is a fresh empty leaf with room for one entry.
             unsafe { insert_nonfull(n, 0, (key, value), None) };
             self.root = Some(n);
+            self.height = 0;
             self.nodes = 1;
             self.len = 1;
             return Ok(None);
@@ -623,13 +624,14 @@ impl<K: Ord, V> KMap<K, V> {
 
     /// Removes every pair and releases every node.
     pub fn clear(&mut self) {
-        if let Some(root) = self.root.take() {
-            // SAFETY: `root` was the live root at `self.height`; it is no longer reachable from the map.
-            unsafe { free_subtree(&self.budget, root, self.height) };
-        }
-        self.height = 0;
+        let root = self.root.take();
+        let height = core::mem::replace(&mut self.height, 0);
         self.len = 0;
         self.nodes = 0;
+        if let Some(root) = root {
+            // SAFETY: `root` was the live root at `height` and is no longer reachable from the map.
+            unsafe { free_subtree(&self.budget, root, height) };
+        }
     }
 
     fn raw_iter(&self) -> RawIter<K, V> {
