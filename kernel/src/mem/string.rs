@@ -19,9 +19,9 @@ impl KString {
 
     /// A copy of `text`, with exactly its length reserved. Fails with `Overflow`, `Limit(id)` or `Ceiling`.
     pub fn try_from_str_in(text: &str, budget: &Budget) -> MemResult<KString> {
-        let mut s = KString::new_in(budget);
-        s.try_push_str(text)?;
-        Ok(s)
+        let mut bytes = KVec::with_capacity_in(text.len(), budget)?;
+        bytes.try_extend_from_slice(text.as_bytes())?;
+        Ok(KString { bytes, fmt_error: None })
     }
 
     /// Appends a character. Fails like `try_push_str`; the string is unchanged on failure.
