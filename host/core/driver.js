@@ -3,6 +3,8 @@
 // share one body: the generator yields a promise to await, or a tick to give the event loop a turn.
 import { concat, decodeUtf8, latin1FromBytes, unsafeBytesFromLatin1, utf8, utf8Length } from "./bytes.js";
 import { AsyncCapabilityError, KernelPoisonedError } from "./errors.js";
+import { fsState } from "./fs.js";
+import { resolvePath } from "./paths.js";
 import { stringLimit } from "./limits.js";
 import { FS_METHODS, Scope, settleWithin } from "./membrane.js";
 
@@ -33,9 +35,9 @@ function fatalResult(B) {
   return r;
 }
 
-function limitResult(B, name) {
+function limitResult(B, name, overlay) {
   const env = nullObject(Object.entries(B.initialEnv));
-  env["?"] = "126";
+  for (const [key, value] of overlay) env[key] = value;
   return { stdout: "", stderr: `bash: ${name} exceeded\n`, exitCode: 126, env };
 }
 
@@ -98,7 +100,7 @@ export function* execLoop(B, script, o) {
   // Pre-checks (7.3 step 1): nothing is lowered, no kernel call is made.
   const strings = [...o.env.flat(), ...o.args, o.cwd ?? "", o.bypass ?? ""];
   const limit = stringLimit(strings, L.maxStringLength, B.headroom, o.env.length * 20 + o.args.length * 8);
-  if (limit) return limitResult(B, limit);
+  if (limit) return limitResult(B, limit, o.env);
 
   const utf16 = script.length;
   let scriptBytes;
@@ -121,14 +123,24 @@ export function* execLoop(B, script, o) {
   };
   const engine = inst.engine;
   try {
+    let cwd = o.cwd;
+    // An empty WIT env list also represents an omitted JS env option.
+    if (cwd && o.emptyEnvGiven && !B.userFs) {
+      const candidate = resolvePath(B.initialCwd, cwd);
+      if (candidate !== cwd && !stringLimit([candidate], L.maxStringLength, B.headroom)) {
+        const { vfs } = fsState(B.rootFs);
+        const result = inst.call(() => vfs.op({ tag: "exists", val: utf8(candidate) }));
+        if (result.tag === "ok" && result.val.val) cwd = candidate;
+      }
+    }
     x.fiber = inst.call(() =>
       engine.Fiber.spawn(B.shell, o.parent?.fiber, {
         script: scriptBytes,
         scriptOverflow: overflow,
         args: o.args.map(utf8),
-        env: o.env.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: true })),
+        env: o.env.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: /^[A-Za-z_][A-Za-z_0-9]*$/.test(n) })),
         replaceEnv: !!o.replaceEnv,
-        cwd: o.cwd === undefined ? undefined : utf8(o.cwd),
+        cwd: cwd === undefined ? undefined : utf8(cwd),
         rawScript: !!o.rawScript,
         bypassCustom: o.bypass,
       }),
@@ -169,7 +181,7 @@ export function* execLoop(B, script, o) {
     }
   } catch (e) {
     if (e instanceof KernelPoisonedError) return fatalResult(B);
-    if (!x.fiber && e?.code === "ceiling") return limitResult(B, e.detail || "memory-ceiling");
+    if (!x.fiber && e?.code === "ceiling") return limitResult(B, e.detail || "memory-ceiling", o.env);
     throw e;
   } finally {
     for (const s of x.scopes) s.revoke();
@@ -210,7 +222,6 @@ function drain(x) {
 function finish(x, er) {
   drain(x);
   const env = envToObject(er.env);
-  env["?"] ??= String(er.exitCode);
   let stderr = decodeUtf8(concat(x.err));
   if (x.err.length === 0) {
     if (er.status === "limit-exceeded" && er.limitName) stderr = `bash: ${er.limitName} exceeded\n`;

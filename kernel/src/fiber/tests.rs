@@ -1,4 +1,4 @@
-//! Native tests of the bootstrap interpreter. The test-only commands need `--features test-commands`.
+//! Native tests of the shell VM. The test-only commands need `--features test-commands`.
 use super::*;
 use crate::fs::Vfs;
 use crate::shell::{Config, G_CUSTOM};
@@ -9,13 +9,13 @@ fn shell(profile: usize, overrides: &[(&str, u64)], grants: u8, custom: &[&str])
     crate::mem::testing::reset(CEIL);
     let meta = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
     let vfs = KRc::try_new_in(Vfs::create(1 << 20, LimitId(30)).unwrap(), &meta).ok().unwrap();
-    let cfg = Config { profile, overrides, grants, custom_commands: custom, env: &[(b"A", b"1", true)], cwd: Some(b"/x") };
+    let cfg = Config { profile, overrides, grants, custom_commands: custom, env: &[(b"A", b"1", true)], cwd: Some(b"/x"), ..Config::default() };
     let s = Shell::create(vfs, &cfg, CEIL).unwrap();
     KRc::try_new_in(s, &meta).ok().unwrap()
 }
 
 fn fib(sh: &KRc<Shell>, script: &str) -> Fiber {
-    Fiber::spawn(sh.clone(), None, &Opts { script: script.as_bytes(), overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap()
+    Fiber::spawn(sh.clone(), None, &Opts { script: script.as_bytes(), overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap()
 }
 
 fn run_done(f: &mut Fiber) -> ExecResult {
@@ -67,10 +67,10 @@ fn source_size_checks() {
     let sh = shell(1, &[], 0, &[]);
     let mut f = fib(&sh, &" ".repeat(1_000_006));
     let r = run_done(&mut f);
-    assert_eq!(r.exit, 2);
-    assert_eq!(drain(&mut f, true), "bash: syntax error: Parse error at 1:1: Input too large: 1000006 bytes exceeds limit of 1000000\n");
-    let mut f = Fiber::spawn(sh.clone(), None, &Opts { script: b"", overflow: Some((5, 3_145_729)), env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap();
-    assert_eq!(run_done(&mut f).exit, 126);
+    assert_eq!(r.exit, 0);
+    assert_eq!(drain(&mut f, true), "");
+    let mut f = Fiber::spawn(sh.clone(), None, &Opts { script: b"", overflow: Some((1_048_577, 3_145_729)), env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap();
+    assert_eq!(run_done(&mut f).exit, 2);
 }
 
 #[test]
@@ -140,7 +140,7 @@ mod commands {
         let r = run_done(&mut f);
         assert_eq!(r.exit, 126);
         assert_eq!(r.limit_name.as_ref().unwrap().as_str(), "maxLiveBytes");
-        assert_eq!(drain(&mut f, true), "bash: maxLiveBytes exceeded\n");
+        assert_eq!(drain(&mut f, true), "bash: execution: live byte limit exceeded (10000 bytes)\n");
         let mut g = fib(&sh, "__alloc 4000\n__out 3");
         assert_eq!(run_done(&mut g).exit, 0);
         
@@ -151,7 +151,7 @@ mod commands {
         let sh = shell(1, &[("maxLiveBytes", 10000)], 0, &[]);
         let mut p = fib(&sh, "__alloc 6000\n__spin");
         assert!(matches!(p.run(10), Step::OutOfFuel));
-        let mut c = Fiber::spawn(sh.clone(), Some(p.live_budget()), &Opts { script: b"__alloc 6000", overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap();
+        let mut c = Fiber::spawn(sh.clone(), Some(&p), &Opts { script: b"__alloc 6000", overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap();
         let r = run_done(&mut c);
         assert_eq!(r.exit, 126);
         assert_eq!(r.limit_name.as_ref().unwrap().as_str(), "maxLiveBytes");

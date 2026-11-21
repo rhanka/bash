@@ -4,6 +4,7 @@
       "crate": "sentropic-bash-probe",
       "witDir": "probe/wit",
       "world": "probe",
+      "test": true,
       "wasmOpt": false
     },
     "kernel": {

@@ -78,15 +78,25 @@ impl Env {
 
     /// Sets a variable: replaces the value of an existing one in place, or appends.
     pub fn set(&mut self, name: &[u8], value: &[u8], exported: bool) -> MemResult<()> {
-        let b = self.v.budget().clone();
-        let value = bytes_in(value, &b)?;
+        let value = bytes_in(value, self.v.budget())?;
+        self.set_owned(name, value, exported)
+    }
+
+    pub(crate) fn set_owned(&mut self, name: &[u8], value: KBytes, exported: bool) -> MemResult<()> {
         if let Some(e) = self.v.iter_mut().find(|e| e.name.as_slice() == name) {
             e.value = value;
             e.exported = exported;
             return Ok(());
         }
-        let name = bytes_in(name, &b)?;
+        let name = bytes_in(name, self.v.budget())?;
         self.v.try_push(EnvEntry { name, value, exported })
+    }
+
+    pub fn copy_from(&mut self, source: &Self) -> MemResult<()> {
+        for entry in source.v.iter() {
+            self.set(&entry.name, &entry.value, entry.exported)?;
+        }
+        Ok(())
     }
 
     pub fn remove(&mut self, name: &[u8]) {

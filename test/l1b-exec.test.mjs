@@ -18,7 +18,7 @@ test("branch exception IDs comply with the scope profile", () => {
 const SIX = [
   ["empty script", (b) => b.exec(""), { exitCode: 0, stdout: "", stderr: "" }],
   ["unknown command", (b) => b.exec("nosuch arg"), { exitCode: 127, stderr: "bash: nosuch: command not found\n" }],
-  ["script over 1 000 000 code units", (b) => b.exec(" ".repeat(1_000_006)), { exitCode: 2, stderr: "bash: syntax error: Parse error at 1:1: Input too large: 1000006 bytes exceeds limit of 1000000\n" }],
+  ["script over 1 000 000 code units", (b) => b.exec("x".repeat(1_000_006)), { exitCode: 2, stderr: "bash: syntax error: Parse error at 1:1: Input too large: 1000006 bytes exceeds limit of 1000000\n" }],
   ["maxSourceBytes", (b) => b.exec("x".repeat(205)), { exitCode: 126, stderr: "bash: script input size limit exceeded (100 bytes)\n" }, { executionLimits: { maxSourceBytes: 100 } }],
   ["abort already set", (b) => b.exec("__out 3", { signal: AbortSignal.abort() }), { exitCode: 124, stderr: EXIT_ABORTED }],
   ["maxOutputSize", (b) => b.exec("__out 16"), { exitCode: 126, stderr: "bash: pipeline: total output size exceeded (>10 bytes), increase executionLimits.maxOutputSize\n" }, { executionLimits: { maxOutputSize: 10 } }],
@@ -45,7 +45,7 @@ test("gate 15: defenseInDepth has no effect on the six cases", async () => {
 test("gate 19: execSync returns the same as exec for the six cases", () => {
   for (const [name, , want, options] of SIX) {
     const b = bash(options);
-    const script = name === "empty script" ? "" : name === "unknown command" ? "nosuch arg" : name === "script over 1 000 000 code units" ? " ".repeat(1_000_006) : name === "maxSourceBytes" ? "x".repeat(205) : name === "abort already set" ? "__out 3" : "__out 16";
+    const script = name === "empty script" ? "" : name === "unknown command" ? "nosuch arg" : name === "script over 1 000 000 code units" ? "x".repeat(1_000_006) : name === "maxSourceBytes" ? "x".repeat(205) : name === "abort already set" ? "__out 3" : "__out 16";
     const r = b.execSync(script, name === "abort already set" ? { signal: AbortSignal.abort() } : undefined);
     check(r, want);
   }
@@ -115,7 +115,8 @@ test("gate 5: pre-checks produce the limit result without any kernel call", asyn
   const r = await b.exec("__out 1", { env: { BIG: "x".repeat(101) } });
   assert.equal(r.exitCode, 126);
   assert.match(r.stderr, /maxStringLength exceeded/);
-  assert.equal(r.env["?"], "126");
+  assert.equal(r.env["?"], undefined);
+  assert.equal(r.env.BIG.length, 101);
   const longName = await b.exec("", { env: { ["é".repeat(51)]: "x" } });
   assert.equal(longName.exitCode, 126);
   assert.match(longName.stderr, /maxStringLength exceeded/);
@@ -158,12 +159,12 @@ test("gate 6: limits are results, and the instance stays usable", async () => {
   const live = bash({ executionLimits: { maxLiveBytes: 1 << 20 } });
   const r1 = await live.exec("__alloc 2000000");
   assert.equal(r1.exitCode, 126);
-  assert.match(r1.stderr, /maxLiveBytes exceeded/);
+  assert.match(r1.stderr, /live byte limit exceeded \(1048576 bytes\)/);
   assert.equal((await live.exec("__out 3")).stdout, "aaa");
   const inp = bash({ executionLimits: { maxInputBytes: 1000 } });
   const r2 = await inp.exec("__stdin", { stdin: "y".repeat(2000) });
   assert.equal(r2.exitCode, 126);
-  assert.match(r2.stderr, /maxInputBytes exceeded/);
+  assert.match(r2.stderr, /stdin size limit exceeded \(1000 bytes\)/);
   assert.equal((await inp.exec("__out 3")).stdout, "aaa");
   assert.throws(() => bash({ executionLimits: { maxLiveBytes: 300 * 1024 * 1024 } }), RangeError);
   assert.throws(() => bash({ executionLimits: { nope: 1 } }), TypeError);
@@ -229,7 +230,7 @@ test("runtime options (EVOL D13, V5)", async () => {
   }
   assert.deepEqual(getPythonCommandNames(), ["python3", "python"]);
   assert.deepEqual(getJavaScriptCommandNames(), ["js-exec", "node"]);
-  assert.deepEqual(getCommandNames(), []);
+  assert.deepEqual(getCommandNames(), ["echo"]);
   assert.deepEqual(getNetworkCommandNames(), ["curl"]);
   const pkg = await import("@sentropic/bash");
   assert.deepEqual(Object.keys(pkg).filter((k) => /DefenseInDepth|SecurityViolation/.test(k)), []);

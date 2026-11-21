@@ -195,7 +195,7 @@ function distHashes(dist) {
   const map = new Map();
   for (const p of walk(dist, (f) => !relative(dist, f).startsWith("target/"))) {
     const rel = relative(dist, p);
-    if (rel.endsWith(".core.wasm") || rel.endsWith(".component.wasm") || rel.startsWith("js/")) map.set(rel, sha256File(p));
+    if (rel.endsWith(".core.wasm") || rel.endsWith(".component.wasm") || (rel.startsWith("js/") || rel.startsWith("test/js/"))) map.set(rel, sha256File(p));
   }
   return map;
 }
