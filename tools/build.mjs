@@ -3,7 +3,7 @@
 // Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { repoRoot, components, coreImports, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
+import { repoRoot, components, coreImports, foreignImports, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
@@ -16,8 +16,7 @@ const only = opt("--component", "all");
 const out = resolve(repoRoot, opt("--out", "dist"));
 const checkBindings = argv.includes("--check-bindings");
 const all = components();
-const wantKernel = only === "all" || only === "kernel";
-const names = only === "all" ? Object.keys(all) : only === "kernel" ? [] : [only];
+const names = only === "all" ? Object.keys(all) : [only];
 for (const n of names) if (!all[n]) throw new Error(`unknown component ${n}`);
 
 const wasmTools = toolBin("wasm-tools");
@@ -27,6 +26,9 @@ function report(path) {
   console.log(`artefact ${relative(repoRoot, path)} ${size} ${sha256File(path)}`);
 }
 
+// Test-only components are written under dist/test so that the packed tarball cannot include them.
+const outDirOf = (def) => (def.test ? join(out, "test") : out);
+
 function buildCore(c, def) {
   const rustflags = [
     "-C link-self-contained=no",
@@ -35,35 +37,31 @@ function buildCore(c, def) {
     `--remap-path-prefix=${repoRoot}=.`,
   ].join(" ");
   const target = join(out, "target");
-  run("cargo", ["build", "--release", "--locked", "--offline", "--target", "wasm32-wasip2", "-p", def.crate], {
+  const features = def.features?.length ? ["--features", def.features.join(",")] : [];
+  run("cargo", ["build", "--release", "--locked", "--offline", "--target", "wasm32-wasip2", "-p", def.crate, ...features], {
     cwd: repoRoot,
     env: { ...process.env, LC_ALL: "C", TZ: "UTC", RUSTFLAGS: rustflags, CARGO_TARGET_DIR: target, CARGO_ENCODED_RUSTFLAGS: undefined },
   });
   const built = join(target, "wasm32-wasip2", "release", def.crate.replace(/-/g, "_") + ".wasm");
-  const core = join(out, `${c}.core.wasm`);
+  const core = join(outDirOf(def), `${c}.core.wasm`);
   run("cp", [built, core]);
   const magic = readFileSync(core).subarray(0, 8).toString("hex");
   if (magic !== "0061736d01000000") throw new Error(`${core} is not a core module (magic ${magic})`);
+  // A core module of a component with resources imports only the canonical builtins of its own
+  // interface (`[export]...` with `[resource-new]`, `[resource-drop]`); componentization resolves them.
+  const imports = foreignImports(coreImports(core));
+  if (imports.length > 0) throw new Error(`${c} core module has ${imports.length} import(s): ${imports[0]}`);
   return core;
-}
-
-// The kernel is built as a core module only (it is componentized from L1b on). It must have no import.
-function buildKernelCore() {
-  const core = buildCore("kernel", { crate: "sentropic-bash-kernel" });
-  const imports = coreImports(core);
-  if (imports.length > 0) throw new Error(`kernel core module has ${imports.length} import(s): ${imports[0]}`);
-  report(core);
-  console.log(`kernel core module: ${statSync(core).size} bytes, 0 imports`);
 }
 
 function buildComponent(c, def, core) {
   if (def.wasmOpt) throw new Error("wasm-opt is not pinned yet (decided at L2)");
-  const tmp = mkdtempSync(join(out, "embed-"));
+  const tmp = mkdtempSync(join(outDirOf(def), "embed-"));
   try {
     const embedded = join(tmp, "embedded.wasm");
     const witDir = join(repoRoot, def.witDir);
     run(wasmTools, ["component", "embed", witDir, "--world", def.world, core, "-o", embedded]);
-    const comp = join(out, `${c}.component.wasm`);
+    const comp = join(outDirOf(def), `${c}.component.wasm`);
     run(wasmTools, ["component", "new", embedded, "-o", comp]);
     run(wasmTools, ["validate", comp]);
     const magic = readFileSync(comp).subarray(0, 8).toString("hex");
@@ -84,12 +82,12 @@ async function main() {
   mkdirSync(out, { recursive: true });
   // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
   if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
-  if (wantKernel) buildKernelCore();
+  mkdirSync(join(out, "test"), { recursive: true });
   for (const c of names) {
     const def = all[c];
     const core = buildCore(c, def);
     const comp = buildComponent(c, def, core);
-    const jsDir = join(out, "js", c);
+    const jsDir = join(outDirOf(def), "js", c);
     await transpileComponent(comp, jsDir);
     report(core);
     report(comp);

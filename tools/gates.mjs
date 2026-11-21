@@ -1,15 +1,17 @@
 // The eight gates of tools/check.mjs. Each gate takes a context { root, out, toolsDir, quick } and returns
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { components, lockProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 
 const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.toolsDir, ctx.root);
 
-/** One entry per component declared in tools/components.json: { name, def, path } (path may not exist). */
+/** One entry per component declared in tools/components.json: { name, def, path } (path may not exist).
+ * Test-only components (kernel-test) sit under dist/test/ so that the tarball never holds them. */
+const outDirOf = (ctx, def) => (def.test ? join(ctx.out, "test") : ctx.out);
 function declared(ctx) {
-  return Object.entries(components(ctx.root)).map(([name, def]) => ({ name, def, path: join(ctx.out, `${name}.component.wasm`) }));
+  return Object.entries(components(ctx.root)).map(([name, def]) => ({ name, def, path: join(outDirOf(ctx, def), `${name}.component.wasm`) }));
 }
 
 // ---------------------------------------------------------------------------------------------- G1
@@ -122,11 +124,13 @@ function oddEntries(ctx, dirs) {
 export function g2NoBareImport(ctx) {
   const hostDir = join(ctx.root, "host");
   const jsDir = join(ctx.out, "js");
+  const testJsDir = join(ctx.out, "test", "js");
+  const jsDirs = [jsDir, testJsDir];
   const typesDir = join(ctx.root, "types");
   const nodeDir = join(hostDir, "node") + sep;
-  const link = oddEntries(ctx, [hostDir, jsDir, typesDir]);
+  const link = oddEntries(ctx, [hostDir, ...jsDirs, typesDir]);
   if (link) return link;
-  // Scripts: every file of host/ and dist/js/. A relative specifier must reach a regular script file in them.
+  // Scripts: every file of host/, dist/js/ and dist/test/js/. A relative specifier must reach a regular script file in them.
   function checkScript(f, inNodeDir) {
     const rel = relative(ctx.root, f);
     const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
@@ -136,7 +140,7 @@ export function g2NoBareImport(ctx) {
     for (const s of specifiers) {
       if (isRelative(s)) {
         const target = resolve(dirname(f), s);
-        if (!inside(hostDir, target) && !inside(jsDir, target)) return `${rel}: relative import "${s}" leaves host/ and dist/js/`;
+        if (!inside(hostDir, target) && !jsDirs.some((d) => inside(d, target))) return `${rel}: relative import "${s}" leaves host/ and dist/js/`;
         if (!isRegularFile(target) || !SCRIPT(target)) return `${rel}: relative import "${s}" is not a regular script file`;
         continue;
       }
@@ -145,7 +149,7 @@ export function g2NoBareImport(ctx) {
     }
     return null;
   }
-  for (const f of [...walk(jsDir, SCRIPT), ...walk(hostDir, SCRIPT)]) {
+  for (const f of [...jsDirs.flatMap((d) => walk(d, SCRIPT)), ...walk(hostDir, SCRIPT)]) {
     const r = checkScript(f, f.startsWith(nodeDir));
     if (r) return r;
   }
@@ -298,8 +302,8 @@ function readdirOrEmpty(dir) {
 export function g5OneCoreModule(ctx) {
   const list = declared(ctx);
   if (list.length === 0) return "no component is declared in tools/components.json";
-  for (const { name } of list) {
-    const dir = join(ctx.out, "js", name);
+  for (const { name, def } of list) {
+    const dir = join(outDirOf(ctx, def), "js", name);
     if (!existsSync(dir)) return `${name}: no generated JavaScript in ${relative(ctx.root, dir)}`;
     const wasm = walk(dir, (p) => p.endsWith(".wasm"));
     if (wasm.length !== 1) return `${name}: expected exactly one .wasm, found ${wasm.length}`;

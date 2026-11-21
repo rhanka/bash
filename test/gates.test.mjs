@@ -190,7 +190,10 @@ const g6root = (rs, lock) => {
   const root = scratch("g6");
   cpSync(fx("g6-alloc"), root, { recursive: true });
   mkdirSync(join(root, "tools"));
-  cpSync(join(repoRoot, "tools", "components.json"), join(root, "tools", "components.json"));
+  // The real component list without its declared bindings directories: the fixture has no wit/ to regenerate.
+  const comps = readJson(join(repoRoot, "tools", "components.json"));
+  for (const d of Object.values(comps.components)) delete d.bindings;
+  writeFileSync(join(root, "tools", "components.json"), JSON.stringify(comps));
   mkdirSync(join(root, "probe", "src"), { recursive: true });
   writeFileSync(join(root, "kernel", "src", "lib.rs"), rs);
   if (lock) writeFileSync(join(root, "Cargo.lock"), lock);

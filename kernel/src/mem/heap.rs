@@ -523,9 +523,12 @@ pub(crate) use wasm::WasmHeap;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use super::{Heap, Pages, PAGE};
+    use super::{rd64, wr64, Heap, Pages, HDR, PAGE};
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::UnsafeCell;
+
+    // One of the header bits already masked by FLAGS on every size read.
+    const TRANSFER: u64 = 4;
 
     struct Memory;
 
@@ -565,6 +568,16 @@ mod wasm {
         pub(crate) fn footprint_high_water(&self) -> u64 {
             self.heap().footprint_high_water()
         }
+
+        /// Sets whether this live block carries a canonical ABI transfer charge.
+        ///
+        /// # Safety
+        /// `ptr` must designate a live, nonempty block of this allocator.
+        pub(crate) unsafe fn mark_transfer(ptr: *mut u8, charged: bool) {
+            let header = ptr as usize - HDR;
+            let flag = if charged { TRANSFER } else { 0 };
+            wr64(header, (rd64(header) & !TRANSFER) | flag);
+        }
     }
 
     // SAFETY: `Heap` hands out disjoint, 16-aligned blocks inside memory it obtained from `memory.grow`, never
@@ -575,13 +588,24 @@ mod wasm {
             self.heap().alloc(&mut Memory, layout.size(), layout.align(), super::super::ceiling::current_ceiling(), open) as *mut u8
         }
 
-        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if rd64(ptr as usize - HDR) & TRANSFER != 0 {
+                super::super::headroom().release(layout.size() as u64);
+            }
             self.heap().dealloc(ptr as usize);
         }
 
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let transfer = rd64(ptr as usize - HDR) & TRANSFER != 0;
             let open = super::super::reserve::is_open();
-            self.heap().realloc(&mut Memory, ptr as usize, layout.size(), layout.align(), new_size, super::super::ceiling::current_ceiling(), open) as *mut u8
+            let resized = self.heap().realloc(&mut Memory, ptr as usize, layout.size(), layout.align(), new_size, super::super::ceiling::current_ceiling(), open) as *mut u8;
+            if transfer && !resized.is_null() {
+                // An ordinary Rust resize takes ownership from the transfer account.
+                // SAFETY: the allocator just resized this live block and returned its address.
+                unsafe { Self::mark_transfer(resized, false) };
+                super::super::headroom().release(layout.size() as u64);
+            }
+            resized
         }
     }
 }
