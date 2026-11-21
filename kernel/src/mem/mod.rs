@@ -13,6 +13,16 @@
 // The alloc crate is declared here, inside kernel/src/mem/, and reached by the submodules as `super::alloc`.
 extern crate alloc;
 
+/// The heap types the generated canonical-ABI traits are written in (`Vec`, `String`, the allocator
+/// entry points). Only `kernel/src/glue/` reaches them, through this one door; everything else uses the
+/// fallible containers of this module.
+pub mod abi {
+    pub use super::alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+    pub use super::alloc::string::String;
+    pub use super::alloc::vec;
+    pub use super::alloc::vec::Vec;
+}
+
 mod boxed;
 mod budget;
 mod ceiling;

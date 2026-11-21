@@ -9,8 +9,8 @@ use crate::limits::{self, Resolved};
 use crate::mem::{self, Budget, KRc, LimitId, MemError};
 use crate::shell::{Config, CreateError, Shell};
 use crate::util::Env;
-use alloc::string::String;
-use alloc::vec::Vec;
+use crate::mem::abi::String;
+use crate::mem::abi::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -299,7 +299,7 @@ fn result_out(r: &fiber::ExecResult) -> T::ExecResult {
 
 fn req_out(r: &HostReq) -> T::HostReq {
     match r {
-        HostReq::FsStat { mount_id, path } => T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops: alloc::vec![T::FsOp::Stat(path.to_vec())] }),
+        HostReq::FsStat { mount_id, path } => T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops: crate::mem::abi::vec![T::FsOp::Stat(path.to_vec())] }),
         HostReq::LazyFile(p) => T::HostReq::LazyFile(p.to_vec()),
         HostReq::Custom { name, args, cwd, env, input_len } => T::HostReq::CustomCommand(T::CommandCall {
             name: String::from_utf8_lossy(name).into_owned(),

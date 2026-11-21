@@ -1,8 +1,10 @@
-//! The binding module: the generated canonical-ABI glue (`kernel.rs`, committed, regenerated only when the
-//! WIT changes, see `tools/build.mjs --check-bindings`), its small runtime (`rt`) and the adapter that
-//! implements the generated traits on top of the kernel proper (`adapt`). Compiled for wasm only: this is
-//! the one place besides `mem` where `unsafe` and the `alloc` heap types are allowed.
+//! The glue module: the generated canonical-ABI bindings (`kernel/src/bindings/kernel.rs`, committed and
+//! regenerated only when the WIT changes, see `tools/build.mjs --check-bindings`; that directory holds the
+//! generated file and nothing else), the small runtime they need (`rt`) and the adapter that implements the
+//! generated traits on top of the kernel proper (`adapt`). Compiled for wasm only. Besides `mem`, this is
+//! where `unsafe` is allowed; its heap types come from `mem::abi`.
 #[allow(unexpected_cfgs, unused, unsafe_op_in_unsafe_fn, clippy::all, static_mut_refs)]
+#[path = "../bindings/kernel.rs"]
 pub mod kernel;
 mod adapt;
 pub mod rt;
