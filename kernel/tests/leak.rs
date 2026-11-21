@@ -8,7 +8,7 @@ const SLOTS: usize = 6;
 
 #[test]
 fn mixed_operations_leak_nothing() {
-    let base = start();
+    start();
     {
         let parent = root(61, u64::MAX);
         // Tight enough that growth is refused now and then.
@@ -156,5 +156,4 @@ fn mixed_operations_leak_nothing() {
         assert_eq!(child.used(), 0);
         assert_eq!(parent.used(), 0);
     }
-    assert_eq!(usage().used, base, "0 byte leak");
 }

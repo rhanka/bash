@@ -47,6 +47,7 @@ pub fn configure(ceiling_bytes: u64) -> Result<(), ConfigError> {
     }
     CEILING.store(ceiling_bytes, Relaxed);
     CONFIGURED.store(true, Relaxed);
+    super::headroom::ceiling_changed(ceiling_bytes);
     Ok(())
 }
 
@@ -60,6 +61,7 @@ pub fn raise_ceiling(ceiling_bytes: u64) -> Result<(), ConfigError> {
         return Err(ConfigError::BelowCurrent);
     }
     CEILING.store(ceiling_bytes, Relaxed);
+    super::headroom::ceiling_changed(ceiling_bytes);
     Ok(())
 }
 
@@ -78,6 +80,8 @@ pub(crate) fn current_ceiling() -> u64 {
 pub(crate) fn reset(ceiling_bytes: u64) {
     CEILING.store(ceiling_bytes, Relaxed);
     CONFIGURED.store(false, Relaxed);
+    super::headroom::forget_explicit();
+    super::headroom::ceiling_changed(ceiling_bytes);
     HIGH_WATER.store(USED.load(Relaxed), Relaxed);
 }
 
