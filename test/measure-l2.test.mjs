@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { measureWarm, packedJsFiles } from "../tools/measure-l2.mjs";
 import { scratch } from "./helpers.mjs";
 
-test("each warm workload starts its own process with only its own shell setup", () => {
+test("each warm process collects discarded warmup objects before sampling its workload", () => {
   const fixture = `
     export class Bash {
       constructor({ customCommands } = {}) { this.custom = !!customCommands; hits.constructors++; }
@@ -23,14 +23,20 @@ test("each warm workload starts its own process with only its own shell setup", 
     globalThis.hits = { constructors: 0, async: 0, sync: 0, custom: 0 };
     let tick = 0;
     performance.now = () => tick += 2;
+    const collect = globalThis.gc;
+    globalThis.gc = () => {
+      hits.collections = (hits.collections ?? 0) + 1;
+      hits.beforeSamples = [hits.constructors, hits.async, hits.sync, hits.custom, tick];
+      collect();
+    };
   `;
   const entry = JSON.stringify("data:text/javascript," + encodeURIComponent(fixture));
-  const warm = measureWarm(entry, (source) => {
+  const warm = measureWarm(entry, (source, flags = []) => {
     const path = scratch("warm-l2");
     const log = join(path, "counts.json");
     const hook = `process.on("exit", () => writeFileSync(${JSON.stringify(log)}, JSON.stringify(hits)));`;
     const code = 'import { writeFileSync } from "node:fs";' + setup + hook + source;
-    const result = execFileSync(process.execPath, ["--input-type=module", "--eval", code], {
+    const result = execFileSync(process.execPath, [...flags, "--input-type=module", "--eval", code], {
       encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     });
     hits.push(JSON.parse(readFileSync(log, "utf8")));
@@ -39,20 +45,25 @@ test("each warm workload starts its own process with only its own shell setup", 
   assert.deepEqual(Object.keys(warm), ["M2", "M3a", "M3aSync", "M_host"]);
   assert.ok(Object.values(warm).every((samples) => samples.length === 1000));
   assert.deepEqual(hits, [
-    { constructors: 1020, async: 0, sync: 0, custom: 0 },
-    { constructors: 1, async: 1020, sync: 0, custom: 0 },
-    { constructors: 1, async: 0, sync: 1020, custom: 0 },
-    { constructors: 1, async: 0, sync: 0, custom: 1021 },
+    { constructors: 1020, async: 0, sync: 0, custom: 0, collections: 1, beforeSamples: [20, 0, 0, 0, 0] },
+    { constructors: 1, async: 1020, sync: 0, custom: 0, collections: 1, beforeSamples: [1, 20, 0, 0, 0] },
+    { constructors: 1, async: 0, sync: 1020, custom: 0, collections: 1, beforeSamples: [1, 0, 20, 0, 0] },
+    { constructors: 1, async: 0, sync: 0, custom: 1020, collections: 1, beforeSamples: [1, 0, 0, 20, 0] },
   ]);
 });
 
 test("package sizes take their JavaScript files from the variant tree", () => {
   const tree = scratch("pack-l2");
   mkdirSync(join(tree, "dist/js/kernel"), { recursive: true });
-  writeFileSync(join(tree, "package.json"), JSON.stringify({ name: "l2-variant", version: "0.0.0", files: ["dist/js/"] }));
+  mkdirSync(join(tree, "dist/test"), { recursive: true });
+  writeFileSync(join(tree, "package.json"), JSON.stringify({
+    name: "l2-variant", version: "0.0.0", files: ["dist/js/", "entry.js"],
+  }));
   writeFileSync(join(tree, "dist/js/kernel/variant-only.js"), "export {}");
+  writeFileSync(join(tree, "entry.js"), "export {}");
+  writeFileSync(join(tree, "dist/test/test-kernel.js"), "export {}");
   assert.deepEqual(packedJsFiles(tree, { ...process.env, npm_config_cache: join(tree, "cache"), TMPDIR: tree }),
-    ["dist/js/kernel/variant-only.js"]);
+    ["dist/js/kernel/variant-only.js", "entry.js"]);
 });
 
 test("the wasm-opt request records that Binaryen optimization was not measured", () => {
