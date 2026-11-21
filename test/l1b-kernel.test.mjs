@@ -132,8 +132,10 @@ test("gate 18: every operation of the filesystem slice", () => {
   void shell;
   const other = engine.Vfs.create(2000n);
   assert.equal(thrown(() => v.mountVfs(p("/m"), other)).code, "unsupported");
-  assert.equal(thrown(() => v.mountHost(p("/m"), 1)).code, "unsupported");
-  assert.equal(thrown(() => v.unmount(p("/m"))).code, "unsupported");
+  v.mountHost(p("/m"), 1);
+  assert.equal(err(v.op({ tag: "stat", val: p("/m") })), "unsupported");
+  v.unmount(p("/m"));
+  assert.equal(thrown(() => v.unmount(p("/m"))).code, "not-found");
   assert.deepEqual(v.takeDirty(), []);
 });
 
@@ -179,7 +181,7 @@ test("post-return releases the transfer charge for an input echoed in an error",
   const before = engine.usage().used;
   for (let i = 0; i < 3; i++) {
     const error = thrown(() => vfs.mountHost(path, 1));
-    assert.equal(error.code, "unsupported");
+    assert.equal(error.code, "invalid");
     assert.deepEqual(error.path, path);
   }
   assert.equal(engine.usage().used, before);
@@ -364,7 +366,7 @@ test("gate 16: the release kernel runs none of the test-only commands", async ()
 });
 
 test("gate 16: the release kernel holds none of the test-only command names", () => {
-  const names = ["__out", "__err", "__stdin", "__alloc", "__spin", "__exit", "__setenv", "__write", "__cat", "__hostfs", "__lazy", "__fetch", "__sleep", "__clock", "__entropy", "__trap"];
+  const names = ["__out", "__err", "__stdin", "__alloc", "__spin", "__exit", "__setenv", "__write", "__cat", "__hostfs", "__lazy", "__fetch", "__sleep", "__clock", "__entropy", "__trap", "__walk", "__fsbatch"];
   const release = [readFileSync(join(repoRoot, "dist", "kernel.core.wasm")), readFileSync(join(repoRoot, "dist", "kernel.component.wasm"))];
   const test = readFileSync(join(repoRoot, "dist", "test", "kernel-test.core.wasm"));
   for (const n of names) {

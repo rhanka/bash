@@ -201,11 +201,18 @@ mod commands {
 
     #[test]
     fn granted_host_calls_are_issued() {
+        struct StatReply;
+        impl<'a> BatchList<'a, BatchResult<'a>> for StatReply {
+            fn len(&self) -> usize { 1 }
+            fn at(&'a self, index: usize) -> Option<BatchResult<'a>> {
+                (index == 0).then_some(Ok(crate::fs::BatchOk::None))
+            }
+        }
         let sh = shell(1, &[], crate::shell::G_HOST_FS | crate::shell::G_REAL_CLOCK, &[]);
         let mut f = fib(&sh, "__hostfs 4 /p\n__clock");
         let Step::Host { epoch, req } = f.run(100) else { panic!() };
-        assert!(matches!(req, HostReq::FsStat { mount_id: 4, .. }));
-        let Step::Host { epoch: e2, .. } = f.resume(epoch, Outcome::Fs(None)).unwrap() else { panic!() };
+        assert!(matches!(req, HostReq::FsBatch { mount_id: 4, ops } if matches!(&ops[..], [BatchOp::Stat(p)] if p.as_slice() == b"/p")));
+        let Step::Host { epoch: e2, .. } = f.resume(epoch, Outcome::Fs(&StatReply)).unwrap() else { panic!() };
         assert_eq!(e2, 2);
         let Step::Done(_) = f.resume(e2, Outcome::Clock(42)).unwrap() else { panic!() };
         assert_eq!(drain(&mut f, false), "ok\n42\n");
