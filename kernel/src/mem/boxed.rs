@@ -125,13 +125,39 @@ impl<T: super::TryClone> super::TryClone for KBox<T> {
 
 /// Converts a `KBox<Concrete>` into a `KBox<dyn Trait>` (or `KBox<[T]>` from an array).
 /// Usage: `kbox_unsize!(boxed, dyn Command)`. Expands to `into_raw`, a raw-pointer unsizing cast,
-/// and `from_raw`; it allocates nothing and cannot fail.
+/// and `from_raw`; it allocates nothing and cannot fail. The target must be an unsizing coercion of the
+/// source type: the pointer goes through a typed `let`, so a mere reinterpreting cast does not compile.
+///
+/// ```
+/// use sentropic_bash_kernel::mem::{Budget, KBox, LimitId};
+/// let budget = Budget::root(LimitId(1), 1 << 20).unwrap();
+/// let b = KBox::try_new_in(5u8, &budget).unwrap();
+/// let d: KBox<dyn core::fmt::Debug> = sentropic_bash_kernel::kbox_unsize!(b, dyn core::fmt::Debug);
+/// assert_eq!(format!("{:?}", &*d), "5");
+/// ```
+///
+/// A reinterpreting cast is rejected at compile time:
+///
+/// ```compile_fail
+/// use sentropic_bash_kernel::mem::{Budget, KBox, LimitId};
+/// let budget = Budget::root(LimitId(1), 1 << 20).unwrap();
+/// let b = KBox::try_new_in(5u8, &budget).unwrap();
+/// let _wrong: KBox<u64> = sentropic_bash_kernel::kbox_unsize!(b, u64);
+/// ```
+///
+/// ```compile_fail
+/// use sentropic_bash_kernel::mem::{Budget, KBox, LimitId};
+/// let budget = Budget::root(LimitId(1), 1 << 20).unwrap();
+/// let b = KBox::try_new_in([1u8; 4], &budget).unwrap();
+/// let _wrong: KBox<[u64]> = sentropic_bash_kernel::kbox_unsize!(b, [u64]);
+/// ```
 #[macro_export]
 macro_rules! kbox_unsize {
     ($boxed:expr, $($target:tt)+) => {{
         let (raw, budget) = $crate::mem::KBox::into_raw($boxed);
-        // SAFETY: `raw` and `budget` come straight from `into_raw`, and the unsizing cast keeps the
+        let coerced: *mut $($target)+ = raw;
+        // SAFETY: `raw` and `budget` come straight from `into_raw`, and the unsizing coercion keeps the
         // address and the allocation layout (the size is read back with `Layout::for_value`).
-        unsafe { $crate::mem::KBox::from_raw(raw as *mut $($target)+, budget) }
+        unsafe { $crate::mem::KBox::from_raw(coerced, budget) }
     }};
 }
