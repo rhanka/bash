@@ -10,27 +10,22 @@ import { repoRoot, toolBin, toolsDir } from "./lib.mjs";
 import { stripComments } from "./gates.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
+const HOST_SETUP =
+  'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });';
+
 export function measureWarm(entry, node) {
   const workloads = {
     M2: ["", "new Bash()"],
     M3a: ["const bash = new Bash();", 'await bash.exec("echo hi")'],
     M3aSync: ["const bash = new Bash();", 'bash.execSync("echo hi")'],
-    M_host: [
-      'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });',
-      'await host.exec("noop")',
-    ],
+    M_host: [HOST_SETUP, 'await host.exec("noop")'],
   };
   return Object.fromEntries(Object.entries(workloads).map(([name, [setup, op]]) => {
-    const assertNoop = name === "M_host"
-      ? [
-        'const result = await host.exec("noop");',
-        'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
-      ] : [];
     const source = [
       'const { Bash, defineCommand } = await import(' + entry + ');',
       setup,
-      ...assertNoop,
       'for (let i = 0; i < 20; i++) { ' + op + '; }',
+      'globalThis.gc();',
       'const samples = [];',
       'const start = performance.now();',
       'while (samples.length < 1000 || performance.now() - start < 2000) {',
@@ -40,7 +35,7 @@ export function measureWarm(entry, node) {
       '}',
       'console.log(JSON.stringify(samples));',
     ].join("\n");
-    return [name, JSON.parse(node(source))];
+    return [name, JSON.parse(node(source, ["--expose-gc"]))];
   }));
 }
 
@@ -112,7 +107,7 @@ export function packedJsFiles(tree, env) {
     cwd: tree, env, encoding: "utf8",
   });
   return JSON.parse(pack)[0].files.map(({ path }) => path)
-    .filter((path) => /^(host\/|dist\/js\/).*\.js$/.test(path));
+    .filter((path) => path.endsWith(".js"));
 }
 
 function sizes(tree, env) {
@@ -127,6 +122,8 @@ function sizes(tree, env) {
   const sum = (values) => values.reduce((total, item) => ({
     raw: total.raw + item.raw, gzip: total.gzip + item.gzip,
   }), { raw: 0, gzip: 0 });
+  const groupSizes = Object.fromEntries(Object.entries(groups).map(([name, files]) =>
+    [name, { files, ...sum(Object.values(files)) }]));
   return {
     wasm: {
       loader: size(tree, "dist/js/kernel/kernel.core.wasm"),
@@ -134,8 +131,8 @@ function sizes(tree, env) {
       component: size(tree, "dist/kernel.component.wasm"),
     },
     js: {
-      groups: Object.fromEntries(Object.entries(groups).map(([name, files]) => [name, { files, ...sum(Object.values(files)) }])),
-      ...sum(files.map((path) => size(tree, path))),
+      groups: groupSizes,
+      ...sum(Object.values(groupSizes)),
     },
   };
 }
@@ -171,7 +168,7 @@ async function main(args) {
   Object.assign(process.env, env);
 
   const run = (bin, args) => execFileSync(bin, args, { cwd: repoRoot, env, encoding: "utf8", maxBuffer: 64 << 20 }).trim();
-  const node = (source) => run(process.execPath, ["--input-type=module", "--eval", source]);
+  const node = (source, flags = []) => run(process.execPath, [...flags, "--input-type=module", "--eval", source]);
   const version = (bin) => run(bin, ["--version"]);
   const binaryenManifest = join(toolsDir(), "npm", "node_modules", "binaryen", "package.json");
   const toolVersion = existsSync(binaryenManifest) && JSON.parse(readFileSync(binaryenManifest, "utf8")).version;
@@ -197,9 +194,12 @@ async function main(args) {
   }
   const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
   const assertion = [
-    'const { Bash } = await import(' + entry + ');',
+    'const { Bash, defineCommand } = await import(' + entry + ');',
     'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
     'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
+    HOST_SETUP,
+    'const result = await host.exec("noop");',
+    'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
   ].join("\n");
   node(assertion);
 
