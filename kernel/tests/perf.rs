@@ -11,9 +11,15 @@ const N: usize = 20_000;
 #[cfg(not(debug_assertions))]
 const N: usize = 1_000_000;
 
-fn limit(label: &str, started: Instant, seconds: f64) {
+fn limit(label: &str, started: Instant, local_seconds: f64) {
     let took = started.elapsed().as_secs_f64();
-    println!("perf {label}: {took:.3} s (limit {seconds})");
+    // Match the JavaScript gates' 3x allowance for shared CI runner contention.
+    let seconds = if std::env::var("CI").as_deref() == Ok("true") {
+        local_seconds * 3.0
+    } else {
+        local_seconds
+    };
+    println!("perf {label}: {took:.3} s (limit {seconds} s)");
     #[cfg(not(debug_assertions))]
     assert!(took < seconds, "{label} took {took} s, limit {seconds} s");
 }
