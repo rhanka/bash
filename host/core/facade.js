@@ -69,6 +69,45 @@ export const getNetworkCommandNames = () => ["curl"];
 export const getPythonCommandNames = () => ["python3", "python"];
 export const getJavaScriptCommandNames = () => ["js-exec", "node"];
 
+function seedHostLayout(fs, defaultLayout, cwd, processInfo, commands) {
+  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function") return;
+  const mkdir = (path) => ignoreUnimplemented(() => fs.mkdirSync(path, { recursive: true }));
+  const write = (path, contents) => ignoreUnimplemented(() => fs.writeFileSync(path, contents));
+  mkdir("/bin");
+  mkdir("/usr/bin");
+  if (defaultLayout) {
+    mkdir("/home/user");
+    mkdir("/tmp");
+  }
+  mkdir("/dev");
+  mkdir("/dev/fd");
+  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
+  mkdir("/proc/self/fd");
+  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
+  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
+  write("/proc/self/exe", "/bin/bash");
+  write("/proc/self/cmdline", "bash\0");
+  write("/proc/self/comm", "bash\n");
+  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
+  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  if (cwd !== "/" && (!defaultLayout || cwd !== "/home/user")) mkdir(cwd);
+  for (const name of commands) seedHostCommand(fs, name);
+}
+
+function ignoreUnimplemented(operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (!String(error?.message).startsWith("ENOSYS")) throw error;
+  }
+}
+
+function seedHostCommand(fs, name) {
+  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__")) return;
+  const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+  for (const dir of ["/bin", "/usr/bin"]) ignoreUnimplemented(() => fs.writeFileSync(`${dir}/${name}`, content));
+}
+
 /**
  * Builds the facade classes for one loader.
  * @param {{ syncModule(): any, asyncModule(): Promise<any>, precompile(source?: unknown): Promise<void> }} loader
@@ -116,9 +155,10 @@ export function createFacade(loader) {
       const effective = hooks?.ceilingBytes ?? Math.max(sharedHolder?.ceiling ?? 0, PROFILES[profile].ceiling);
       const limits = resolveLimits(profile, overrides, effective);
       const hasFiles = options.files !== undefined;
-      const cwd = options.cwd ?? (hasFiles ? "/" : "/home/user");
+      const defaultLayout = !options.cwd && !hasFiles;
+      const cwd = options.cwd || (defaultLayout ? "/home/user" : "/");
       const initialCwd = resolvePath("/", cwd);
-      const home = options.cwd === undefined && !hasFiles ? "/home/user" : "/";
+      const home = defaultLayout ? "/home/user" : "/";
       const envEntries = initialEnvEntries(initialCwd, home, userEnv);
       const commands = customs.map((c) => c.name);
       const headroom = PROFILES[profile].headroom;
@@ -133,6 +173,7 @@ export function createFacade(loader) {
         holder: fsState(rootFs).holder,
         rootFs,
         userFs,
+        mounts: new Map(userFs === null ? [] : [[1, userFs]]),
         limits,
         headroom,
         profile,
@@ -162,6 +203,7 @@ export function createFacade(loader) {
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
       if (hasFiles) addFiles(rootFs, options.files, B.initialCwd);
+      seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, commands);
       for (const c of customs) this.#register(B, c, false);
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
@@ -176,7 +218,9 @@ export function createFacade(loader) {
         coverage: !!options.coverage,
       };
       B.holder.stage((inst) => {
-        B.shell = inst.call(() => inst.engine.Shell.create(fsState(rootFs).vfs, shellConfig));
+        const { vfs } = fsState(rootFs);
+        if (userFs !== null) inst.call(() => vfs.mountHost(utf8("/"), 1));
+        B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
       });
     }
 
@@ -185,6 +229,7 @@ export function createFacade(loader) {
       if (stage) {
         const limit = stringLimit([c.name], B.limits.maxStringLength, B.headroom);
         if (limit) throw new RangeError(`command name: ${limit} exceeded`);
+        seedHostCommand(B.userFs, c.name);
         B.holder.stage((inst) => {
           inst.call(() => B.shell.registerCommand(c.name));
         });

@@ -20,9 +20,107 @@ pub enum Code {
     NotEmpty,
     Permission,
     Invalid,
+    LinkLoop,
+    TooLarge,
     NoSpace,
+    Busy,
+    CrossDevice,
+    ReadOnly,
     Unsupported,
+    Io,
 }
+
+impl Code {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::Exists => "exists",
+            Self::NotDirectory => "not-directory",
+            Self::IsDirectory => "is-directory",
+            Self::NotEmpty => "not-empty",
+            Self::Permission => "permission",
+            Self::Invalid => "invalid",
+            Self::LinkLoop => "link-loop",
+            Self::TooLarge => "too-large",
+            Self::NoSpace => "no-space",
+            Self::Busy => "busy",
+            Self::CrossDevice => "cross-device",
+            Self::ReadOnly => "read-only",
+            Self::Unsupported => "unsupported",
+            Self::Io => "io",
+        }
+    }
+}
+
+/// Owned operations in a request to a single host mount.
+pub enum BatchOp {
+    Stat(KBytes),
+    Lstat(KBytes),
+    Exists(KBytes),
+    ReadLink(KBytes),
+    RealPath(KBytes),
+    ReadDir(KBytes),
+    ReadDirPlus(KBytes),
+    Walk { root: KBytes, max_depth: u32, max_entries: u32 },
+    AllPaths,
+    ReadFile { path: KBytes, offset: u64, len: u32 },
+    WriteFile { path: KBytes, data: KBytes, offset: Option<u64>, truncate: bool, mode: Option<u32>, mtime_ms: Option<i64> },
+    WriteLazy { path: KBytes, mode: u32, mtime_ms: Option<i64> },
+    CreateExclusive { path: KBytes, mode: u32, directory: bool },
+    Mkdir { path: KBytes, recursive: bool, mode: Option<u32> },
+    Remove { path: KBytes, recursive: bool, force: bool },
+    Copy { source: KBytes, target: KBytes, recursive: bool },
+    Rename { source: KBytes, target: KBytes },
+    Symlink { source: KBytes, target: KBytes },
+    HardLink { source: KBytes, target: KBytes },
+    Chmod { path: KBytes, mode: u32 },
+    Utimes { path: KBytes, atime_ms: i64, mtime_ms: i64 },
+}
+
+pub enum HostKind { File, Directory, Symlink }
+
+pub struct HostStat {
+    pub kind: HostKind,
+    pub size: u64,
+    pub mode: u32,
+    pub mtime_ms: i64,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// Read one record at a time from a lifted list without allocating a second copy.
+pub trait BatchList<'a, T> {
+    fn len(&self) -> usize;
+    fn at(&'a self, index: usize) -> Option<T>;
+}
+
+pub enum BatchOk<'a> {
+    None,
+    Flag(bool),
+    Info(HostStat),
+    Path(&'a [u8]),
+    Data(&'a [u8]),
+    Paths(&'a dyn BatchList<'a, &'a [u8]>),
+    Entries(&'a dyn BatchList<'a, (&'a [u8], HostKind)>),
+    EntriesPlus(&'a dyn BatchList<'a, (&'a [u8], HostStat)>),
+}
+
+impl BatchOk<'_> {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Flag(_) => "flag",
+            Self::Info(_) => "info",
+            Self::Path(_) => "path",
+            Self::Data(_) => "data",
+            Self::Paths(_) => "paths",
+            Self::Entries(_) => "entries",
+            Self::EntriesPlus(_) => "entries-plus",
+        }
+    }
+}
+
+pub type BatchResult<'a> = Result<BatchOk<'a>, (Code, &'a [u8])>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stat {
@@ -75,6 +173,7 @@ pub struct Vfs {
     budget: Budget,
     scratch: Budget,
     inner: RefCell<Inner>,
+    mounts: RefCell<KVec<(KBytes, u32)>>,
 }
 
 fn map_mem(e: MemError) -> Code {
@@ -90,7 +189,8 @@ impl Vfs {
         let mut map = KMap::new_in(&budget);
         let root = bytes_in(b"/", &budget)?;
         map.try_insert(root, Node { kind: Kind::Dir, data: KBytes::new_in(&budget), mode: 0o755, mtime_ms: 0, ino: 1 })?;
-        Ok(Vfs { budget, scratch, inner: RefCell::new(Inner { map, next_ino: 2 }) })
+        let mounts = RefCell::new(KVec::new_in(&budget));
+        Ok(Vfs { budget, scratch, inner: RefCell::new(Inner { map, next_ino: 2 }), mounts })
     }
 
     pub fn used_bytes(&self) -> u64 {
@@ -98,7 +198,7 @@ impl Vfs {
     }
 
     /// Normalizes a path: absolute, `.` and `..` collapsed, never above `/`.
-    fn norm(&self, path: &[u8]) -> Result<KBytes, Code> {
+    pub(crate) fn norm(&self, path: &[u8]) -> Result<KBytes, Code> {
         let mut out = KBytes::new_in(&self.scratch);
         for comp in path.split(|&c| c == b'/') {
             if comp.is_empty() || comp == b"." {
@@ -117,6 +217,52 @@ impl Vfs {
             out.try_push(b'/').map_err(map_mem)?;
         }
         Ok(out)
+    }
+
+    fn mount_path(&self, path: &[u8]) -> Result<KBytes, Code> {
+        if !path.starts_with(b"/") || path.contains(&0) {
+            return Err(Code::Invalid);
+        }
+        self.norm(path)
+    }
+
+    pub fn mount_host(&self, path: &[u8], mount_id: u32) -> Result<(), Code> {
+        let path = self.mount_path(path)?;
+        let mut mounts = self.mounts.borrow_mut();
+        if mounts.iter().any(|(p, _)| p.as_slice() == path.as_slice()) {
+            return Err(Code::Exists);
+        }
+        let stored = bytes_in(&path, &self.budget).map_err(map_mem)?;
+        mounts.try_push((stored, mount_id)).map_err(map_mem)
+    }
+
+    pub fn unmount(&self, path: &[u8]) -> Result<(), Code> {
+        let path = self.mount_path(path)?;
+        let mut mounts = self.mounts.borrow_mut();
+        let index = mounts.iter().position(|(p, _)| p.as_slice() == path.as_slice()).ok_or(Code::NotFound)?;
+        mounts.swap_remove(index);
+        Ok(())
+    }
+
+    pub fn resolve_host_mount<'a>(&self, normalized_path: &'a [u8]) -> Option<(u32, &'a [u8])> {
+        self.mounts.borrow().iter().filter_map(|(mount, id)| {
+            let rest = normalized_path.strip_prefix(mount.as_slice())?;
+            if mount.as_slice() == b"/" {
+                Some((mount.len(), *id, normalized_path))
+            } else if rest.is_empty() || rest.starts_with(b"/") {
+                Some((mount.len(), *id, if rest.is_empty() { b"/" } else { rest }))
+            } else {
+                None
+            }
+        }).max_by_key(|(len, _, _)| *len).map(|(_, id, rest)| (id, rest))
+    }
+
+    fn local_path(&self, path: &[u8]) -> Result<KBytes, Code> {
+        let p = self.norm(path)?;
+        if self.resolve_host_mount(&p).is_some() {
+            return Err(Code::Unsupported);
+        }
+        Ok(p)
     }
 
     /// Parent of a normalized path (`/` for top-level entries). `None` for `/` itself.
@@ -140,17 +286,20 @@ impl Vfs {
     pub fn op(&self, op: Op<'_>) -> Result<Ok_, Code> {
         match op {
             Op::Stat(p) | Op::Lstat(p) => {
-                let p = self.norm(p)?;
+                let p = self.local_path(p)?;
                 let inner = self.inner.borrow();
                 let n = inner.map.get(p.as_slice()).ok_or(Code::NotFound)?;
                 Ok(Ok_::Info(stat_of(n)))
             }
             Op::Exists(p) => {
-                let p = self.norm(p)?;
+                let p = self.local_path(p)?;
                 Ok(Ok_::Flag(self.inner.borrow().map.contains_key(p.as_slice())))
             }
             Op::ReadDir(p) => self.read_dir(p),
             Op::AllPaths => {
+                if self.resolve_host_mount(b"/").is_some() {
+                    return Err(Code::Unsupported);
+                }
                 let inner = self.inner.borrow();
                 let mut out = KVec::new_in(&self.scratch);
                 for k in inner.map.keys() {
@@ -159,7 +308,7 @@ impl Vfs {
                 Ok(Ok_::Paths(out))
             }
             Op::ReadFile { path, offset, len } => {
-                let p = self.norm(path)?;
+                let p = self.local_path(path)?;
                 let inner = self.inner.borrow();
                 let n = inner.map.get(p.as_slice()).ok_or(Code::NotFound)?;
                 if n.kind == Kind::Dir {
@@ -178,7 +327,7 @@ impl Vfs {
     }
 
     fn read_dir(&self, p: &[u8]) -> Result<Ok_, Code> {
-        let p = self.norm(p)?;
+        let p = self.local_path(p)?;
         let inner = self.inner.borrow();
         let n = inner.map.get(p.as_slice()).ok_or(Code::NotFound)?;
         if n.kind != Kind::Dir {
@@ -199,7 +348,7 @@ impl Vfs {
     }
 
     fn write_file(&self, path: &[u8], data: &[u8], offset: Option<u64>, truncate: bool, mode: Option<u32>, mtime_ms: Option<i64>) -> Result<Ok_, Code> {
-        let p = self.norm(path)?;
+        let p = self.local_path(path)?;
         let mut inner = self.inner.borrow_mut();
         if p.as_slice() == b"/" {
             return Err(Code::IsDirectory);
@@ -252,7 +401,7 @@ impl Vfs {
     }
 
     fn mkdir(&self, path: &[u8], recursive: bool, mode: u32) -> Result<Ok_, Code> {
-        let p = self.norm(path)?;
+        let p = self.local_path(path)?;
         let mut inner = self.inner.borrow_mut();
         if let Some(n) = inner.map.get(p.as_slice()) {
             return if recursive && n.kind == Kind::Dir { Ok(Ok_::None) } else { Err(Code::Exists) };
@@ -293,7 +442,7 @@ impl Vfs {
     }
 
     fn remove(&self, path: &[u8], recursive: bool, force: bool) -> Result<Ok_, Code> {
-        let p = self.norm(path)?;
+        let p = self.local_path(path)?;
         let mut inner = self.inner.borrow_mut();
         let Some(n) = inner.map.get(p.as_slice()) else {
             return if force { Ok(Ok_::None) } else { Err(Code::NotFound) };

@@ -2,8 +2,9 @@
 //! A fiber is a resumable state machine: `run` executes commands until the fuel is out, a host call is
 //! needed or the script ends; `resume` answers a host call.
 use crate::limits::{self, I_INPUT_BYTES, I_LIVE_BYTES, I_OUTPUT_SIZE, I_SOURCE_BYTES};
+use crate::fs::{BatchList, BatchOp, BatchResult, Code};
 use crate::mem::{reserve_scope, Budget, KBytes, KRc, KString, KVec, LimitId, MemError, MemResult, TryClone};
-use crate::shell::{Shell, G_CUSTOM};
+use crate::shell::{Shell, G_CUSTOM, G_HOST_FS};
 use crate::util::{bytes_in, fmt_in, str_in, Env};
 use core::fmt::Write;
 
@@ -31,7 +32,7 @@ impl TryClone for ExecResult {
 
 /// A host request, owned (it leaves the kernel through the adapter).
 pub enum HostReq {
-    FsStat { mount_id: u32, path: KBytes },
+    FsBatch { mount_id: u32, ops: KVec<BatchOp> },
     LazyFile(KBytes),
     Custom { name: KBytes, args: KVec<KBytes>, cwd: KBytes, env: Env, input_len: u64 },
     Fetch { url: KBytes },
@@ -48,8 +49,7 @@ pub enum Step {
 
 /// The driver's answer to a host call, borrowed from the adapter's decoded value.
 pub enum Outcome<'a> {
-    /// First result of an `fs-batch`: `None` for success, else the error code name.
-    Fs(Option<&'static str>),
+    Fs(&'a dyn BatchList<'a, BatchResult<'a>>),
     Data(&'a [u8]),
     CommandExit(i32),
     /// Status of a fetch response.
@@ -181,6 +181,8 @@ pub struct Fiber {
     st: St,
     epoch: u64,
     pub(crate) body: KBytes,
+    #[cfg(feature = "test-commands")]
+    fs_test_path: KBytes,
     call_env: Option<Env>,
     fuel: u64,
     result: Option<ExecResult>,
@@ -199,6 +201,13 @@ pub struct Opts<'a> {
 }
 
 impl Fiber {
+    pub fn host_fs_batch(&self, mount_id: u32, ops: KVec<BatchOp>) -> Result<HostReq, Code> {
+        if !self.shell.granted(G_HOST_FS) {
+            return Err(Code::Permission);
+        }
+        Ok(HostReq::FsBatch { mount_id, ops })
+    }
+
     /// Creates a fiber on `shell`. `parent_live` is the live budget of the parent fiber, if any.
     pub fn spawn(shell: KRc<Shell>, parent_live: Option<&Budget>, o: &Opts<'_>) -> MemResult<Fiber> {
         let live_cap = shell.lim.vals[I_LIVE_BYTES];
@@ -251,6 +260,8 @@ impl Fiber {
             stderr_tail: Out::new(&scratch),
             stdin: KBytes::new_in(&live),
             body: KBytes::new_in(&live),
+            #[cfg(feature = "test-commands")]
+            fs_test_path: KBytes::new_in(&scratch),
             kept: KVec::new_in(&live),
             shell,
             live,
@@ -480,7 +491,8 @@ impl Fiber {
             return Ok(self.done_step());
         }
         match self.complete(p, o) {
-            Ok(()) => {}
+            Ok(Some((pending, req))) => return Ok(self.suspend(pending, req)),
+            Ok(None) => {}
             Err(CompleteError::BadOutcome) => {
                 self.st = St::Pending(p);
                 return Err(CallError::BadState);
@@ -559,15 +571,17 @@ impl Fiber {
                     return self.done_step();
                 }
                 Flow::Fail(f) => return self.end_fail(f),
-                Flow::Host(p, req) => {
-                    self.epoch += 1;
-                    self.st = St::Pending(p);
-                    self.body.clear();
-                    self.call_env = None;
-                    return Step::Host { epoch: self.epoch, req };
-                }
+                Flow::Host(p, req) => return self.suspend(p, req),
             }
         }
+    }
+
+    fn suspend(&mut self, pending: Pending, req: HostReq) -> Step {
+        self.epoch += 1;
+        self.st = St::Pending(pending);
+        self.body.clear();
+        self.call_env = None;
+        Step::Host { epoch: self.epoch, req }
     }
 
     /// Next non-empty trimmed line as a range of the script.
@@ -645,7 +659,7 @@ impl Fiber {
 
     // ---------------------------------------------------------------- answers
 
-    fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<(), CompleteError> {
+    fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<Option<(Pending, HostReq)>, CompleteError> {
         match p {
             Pending::Custom => match o {
                 Outcome::CommandExit(n) => self.last_exit = n,
@@ -659,9 +673,9 @@ impl Fiber {
                 }
                 _ => return Err(CompleteError::BadOutcome),
             },
-            Pending::Test(code, aux) => self.complete_test(code, aux, o)?,
+            Pending::Test(code, aux) => return self.complete_test(code, aux, o),
         }
-        Ok(())
+        Ok(None)
     }
 
     // ---------------------------------------------------------------- ending
@@ -795,7 +809,7 @@ impl Fiber {
     fn exec_test(&mut self, _name: &[u8], _args: &[&[u8]]) -> Option<Flow> {
         None
     }
-    fn complete_test(&mut self, _code: u8, _aux: u64, _o: Outcome<'_>) -> Result<(), CompleteError> {
+    fn complete_test(&mut self, _code: u8, _aux: u64, _o: Outcome<'_>) -> Result<Option<(Pending, HostReq)>, CompleteError> {
         Err(CompleteError::BadOutcome)
     }
 }

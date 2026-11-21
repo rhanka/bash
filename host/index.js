@@ -8,6 +8,8 @@ const { Bash, InMemoryFs } = createFacade(nodeLoader);
 
 export { Bash, InMemoryFs, defineCommand, getCommandNames, getNetworkCommandNames, getPythonCommandNames, getJavaScriptCommandNames };
 export { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError };
+export { OverlayFs } from "./node/overlay-fs.js";
+export { ReadWriteFs } from "./node/read-write-fs.js";
 export const { EMPTY_BYTES, bytesOutput, decodeBytesToUtf8, encodeUtf8ToBytes, latin1FromBytes, stdoutAsBytes, stdoutKind, textOutput, unsafeBytesFromLatin1 } = bytes;
 
 /** Loads and instantiates the pipeline probe on demand. */
