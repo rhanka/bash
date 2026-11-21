@@ -1,4 +1,4 @@
-# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.5)
+# SPEC EVOL — @sentropic/bash sandbox (rung 2: evolution spec, v1.6)
 
 Status: normative. Derived from `spec/SPEC_STUDY_BASH_SANDBOX.md` v3.2 (called "the study" below), which
 holds the evidence, measurements and alternatives; this document holds the decisions. Where both speak,
@@ -10,10 +10,12 @@ Conventions:
   reference-reading lanes open it (D20).
 - "Posed by" is `Owner` or `Fable 5.2 + Carbon (consensus)`. Track ids are decision aggregate ids in
   `.track/events.jsonl`; "—" means the decision is recorded in the study and `BRANCH.md` only.
-- Lot ids are those of study section 7.
+- Lot ids are those of study section 7 and the Gate L2 follow-up lots in Annex J.
 - v1.1 reconciles the adversarial review of v1 (Annex J). v1.2 applies the owner answers of 15/11 on
   runtimes, tracing and defense-in-depth (section 3). v1.3 closes the review (R1-R5, Annex J); the lot plan
   is `plan/PLAN_BASH_SANDBOX_V1.md`. v1.4 applies the owner answers of 15/11 on names and host disk access (D26).
+- v1.6 applies the 21/11 decisions on JS bindings, packaging and shared filesystem isolation.
+  Annex H records the two decisions pending measurement.
 - A build lane reads this document without the reference: every behaviour it needs is stated here or in a
   lot spec, never by a bare `JB:` pointer. `JB:` paths are kept only as provenance for reviewers.
 
@@ -36,7 +38,7 @@ Conventions:
 | D13 | Command scope, tiers and single kernel binary | Owner / Consensus |
 | D14 | JS facade API surface and tiers | Consensus |
 | D15 | Runtimes: Node, browser, wasmCloud | Owner / Consensus |
-| D16 | Rust bindings from the pinned `wit-bindgen-cli` | Owner |
+| D16 | Rust export glue, first-party JS canonical ABI and jco conformance oracle | Owner |
 | D17 | Release pipeline, tools and gates | Owner / Consensus |
 | D18 | Published artefacts | Owner |
 | D19 | Oracle and parity protocol | Consensus |
@@ -47,6 +49,7 @@ Conventions:
 | D24 | Go/no-go points | Consensus |
 | D25 | Evolution path: runtime companions `@sentropic/python` and `@sentropic/js` | Owner / Consensus |
 | D26 | Names, and host disk access denied by default on every target | Owner |
+| D27 | Execution isolation for a shared in-memory filesystem | Owner |
 
 ## 2. Decisions
 
@@ -106,14 +109,15 @@ Conventions:
 - **Binds.** L1b, L2, L5, L9a-2.
 
 ### D5 — VFS ownership and `bash.fs` bridging
-- **Decision.** An exec runs in the instance that owns its root VFS. `new Bash()` creates an instance with
-  one `vfs`. A standalone `InMemoryFs` owns a `vfs` in its own instance; a `Bash` built on it attaches a
-  `shell` there, so several `Bash` objects can share one `InMemoryFs`. Grants, command registry and budgets
-  are per `shell` and per fiber, never per instance. `bash.fs` and `InMemoryFs` implement `IFileSystem`
+- **Decision.** A default `new Bash()` owns its shell and volume in one private instance. A standalone
+  `InMemoryFs` owns its volume. A shell using a supplied volume selects its execution instance under D27.
+  Grants, command registry and execution budgets belong to each shell/fiber. The volume has its own quota
+  and the allocator enforces a ceiling per instance. `bash.fs` and `InMemoryFs` implement `IFileSystem`
   over the synchronous `vfs.op`, returning resolved promises. Any other `fs` is host-backed and reached by
   `fs-batch` host calls. `MountableFs` maps to `mount-vfs` / `mount-host`. Lazy files are stubs
   materialized by a `lazy-file` host call. The default layout of the reference (`/home/user`, `/bin`,
-  `/usr/bin`, `/dev`, `/proc`, default env) is created by the kernel. `mount-vfs` works inside one
+  `/usr/bin`, `/dev`, `/proc`, default env) is created in the visible volume, with synchronous facade
+  seeding for a D27 mounted root. `mount-vfs` works inside one
   instance; a filesystem owned by another instance is mounted through `mount-host` and bridged by the
   facade; cyclic mounts are rejected; a host-backed root is `mount-host` on `/`. `bash.getEnv()` and
   `bash.getCwd()` are synchronous and read the `shell` resource.
@@ -121,7 +125,7 @@ Conventions:
 - **Posed by.** Fable 5.2 + Carbon (consensus). **Track.** —.
 - **Acceptance.** API tests for shared `InMemoryFs`, `bash.fs` mutation between execs, mounts, lazy
   files, default layout snapshot against the oracle.
-- **Binds.** L1b, L2, L7a.
+- **Binds.** L1b, L2, L7b, L7c, L7a.
 
 ### D6 — Memory: own allocator, budgeted fallible growth, chunked transfers
 - **Decision.**
@@ -262,37 +266,53 @@ Conventions:
 
 ### D15 — Runtimes: Node, browser, wasmCloud
 - **Decision.**
-  - **Node >= 22.** Core module read from disk and compiled synchronously once per process; generated
-    `instantiate` called with an empty import object.
+  - **Node >= 22.** The default package uses the first-party synchronous canonical-ABI binding. Read and
+    compile the packaged core on first construction and cache the compiled module. Resolve Node built-ins
+    only in `host/node/`. Each independent execution store owns fresh memory and resources.
   - **Browser.** Streaming compile; a staging queue records operations issued before the instance exists
     and replays them at the first awaited call; synchronous reads before that need
-    `await Bash.precompile()`. Every kernel command is exposed, a superset of the reference's browser
-    bundle.
+    `await Bash.precompile()`. The browser entry uses the same first-party binding and exposes every
+    kernel command, a superset of the reference's browser bundle.
+  - **Default construction on both entries.** The packaged core may restore an eligible shell
+    from its deterministic passive image via a private core export `__restore_default() -> i64`. Wasm
+    registers the Vfs and Shell through existing resource-new imports and returns their handles.
+    No snapshot pointers reside in JS. A pure predicate on validated options admits `{}` and a host-only
+    logger. Non-default config, supplied filesystems/modules or internal overrides use ordinary setup.
+    Browser staging preserves call order.
+  - **Optional binding.** `@sentropic/bash-jco` selects guarded jco on Node and browser (D18).
   - **wasmCloud.** Stateful sessions by static `wac` composition of an orchestrator with the kernel;
     stateless calls through `exec-oneshot`. Optional Rust session drivers with fixed capability sets
     (`session-pure`: no WASI import; `session-fs`; `session-net`) are shipped unplugged.
 - **Rationale.** Owner constraints A1; study 2.5.
 - **Posed by.** Owner (runtimes, topology, browser command set); Fable 5.2 + Carbon (mechanisms).
-  **Track.** `01M7FTJ9HB55X3WBF2KP008SQW` (topology), `01M7FY8HXSPE3M3K68R90EQYHM` (browser commands).
+  **Track.** `01M7FTJ9HB55X3WBF2KP008SQW` (topology), `01M7FY8HXSPE3M3K68R90EQYHM` (browser commands),
+  `01M7ZPBKPTT4KJEBYK1E19937M` (JS binding).
 - **Acceptance.** Node API suite; browser suite in headless Chrome for Testing driven over the DevTools
   protocol; `wasmtime` smoke test of kernel + `session-pure` composed with `wac`, under a 256 MiB limiter
   and an epoch deadline; `exec-oneshot` round trip.
-- **Binds.** L1b, L1c, L19.
+- **Binds.** L1b, L2b, L2c, L7c, L1c, L19.
 
-### D16 — Rust bindings from the pinned `wit-bindgen-cli`
+### D16 — Rust export glue, first-party JS canonical ABI and jco conformance oracle
 - **Decision.** Export glue is generated by `wit-bindgen-cli` (run with `--std-feature`,
   `--runtime-path`, `--bitflags-path` pointing at own modules, `--disable-custom-section-link-helpers`),
   committed, and regenerated only when the WIT changes. The `wit-bindgen` crate MUST NOT be a dependency.
   Fallback if the output cannot be made `no_std` without a runtime crate: hand-written glue.
-- **Rationale.** The crate links runtime code; the generator adds no crate.
-- **Posed by.** Owner. **Track.** `01M7FTJ9ACHNZ45G8YNMN43C01`.
-- **Acceptance.** Gate G6; a regeneration check proves the committed file matches the WIT.
-- **Binds.** L0, L1b.
+  The default Node/browser host implements the 29 L2 engine functions using plain JS WIT descriptors.
+  Validate lowering, lifting, store-branded ownership and borrows. Run declared post-returns after
+  copying results. A trap stops that store (D8). Check descriptors and core signatures against the WIT.
+  Pinned jco-transpile is the independent build-time oracle in `make check`.
+- **Rationale.** The Rust generator adds no crate. The first-party binding reduces the JS initialization
+  cost measured at Gate L2 while retaining a differential check for each export.
+- **Posed by.** Owner. **Track.** `01M7FTJ9ACHNZ45G8YNMN43C01` (Rust), `01M7ZPBKPTT4KJEBYK1E19937M` (JS).
+- **Acceptance.** G6 and Rust regeneration pass. L2b compares 29/29 functions on identical component
+  builds, with zero projection mismatches. Independent malformed-value and trap tests pass.
+- **Binds.** L0, L1b, L2b, L2c.
 
 ### D17 — Release pipeline, tools and gates
 - **Decision.** Annex C. Rust and all build tools are needed only to build this repository; consumers need
-  none. `wasm-opt` runs only on the core module before componentization and only if L2 proves a gain of at
-  least 10%. Tools are pinned by exact version and SHA-256 under git-ignored `tmp/tools/`; npm tools come
+  none. L2c measures `wasm-opt -Oz` before componentization only with an owner-approved Binaryen pin.
+  Enable it only for a validated gain of at least 10% on raw loader-core bytes under the L2c timing gates.
+  Tools are pinned by exact version and SHA-256 under git-ignored `tmp/tools/`. npm tools come
   from a committed `tools/` manifest and lockfile, installed with `--ignore-scripts`.
 - **Rationale.** Owner constraints A1; supply-chain exposure limited to the build lane.
 - **Posed by.** Owner (constraints); Fable 5.2 + Carbon (gates and pins). **Track.**
@@ -301,19 +321,22 @@ Conventions:
 - **Binds.** L0.
 
 ### D18 — Published artefacts
-- **Decision.** One npm package `@sentropic/bash` with empty `dependencies` and no install script,
-  containing: `kernel.component.wasm`, `wit/`, the generated `js/` (core module, glue, types), the facade,
-  the unplugged session drivers and the `stpsh` binary (D26). The same component bytes are pushed to an OCI
-  registry as `sentropic-bash` (for example `ghcr.io/rhanka/sentropic-bash`). `*.wasm` is
+- **Decision.** The primary npm package `@sentropic/bash` contains the component, WIT, loader core,
+  first-party binding, shared minified facade and declarations, with unplugged session drivers and the
+  `stpsh` binary at their planned release stage (D26). A separate, independently installable
+  `@sentropic/bash-jco` ships the corresponding library entries with the guarded Option D jco glue.
+  Both have empty dependencies and no install script. The default tarball excludes the optional glue.
+  Both npm packages and the OCI release carry the same zero-import component bytes and WIT contract.
+  The OCI artifact is `sentropic-bash` (for example `ghcr.io/rhanka/sentropic-bash`). `*.wasm` is
   never committed; consumers use published packages. Pre-release `0.x` under the `next` tag once tier A/B
   parity passes.
 - **Posed by.** Owner. **Track.** `01M7FTJ933E69W3QN9THHCWDDY`, `01M7DXY6KTXZZCRJ70ZG0GNT75`,
-  `01M7G4KVMH4GVS2JBBYNJ67841` (names).
+  `01M7G4KVMH4GVS2JBBYNJ67841` (names), `01M7ZPBKPTT4KJEBYK1E19937M` (JS packages).
 - **Rationale.** TS consumers get everything from npm; wasmCloud deployments pull from OCI.
-- **Acceptance.** On every PR, offline: `npm pack` content test, then install of the tarball in an empty
-  project with no native tool, running `exec('echo hi')`. At release: the npm component digest equals the
-  OCI digest.
-- **Binds.** L0, L17a, release.
+- **Acceptance.** Pack/install each tarball alone offline and execute through both entries.
+  Compare component, loader-core and WIT hashes, including the local OCI payload input. At release
+  verify the fetched OCI component layer's SHA-256 and WIT against the npm payloads.
+- **Binds.** L0, L2b, L2c, L17a, release.
 
 ### D19 — Oracle and parity protocol
 - **Decision.** Annex E. The oracle is the published `just-bash@3.6.0`, run as a black box.
@@ -369,7 +392,9 @@ Conventions:
     are not stubbed.
   - **L2.** Measured: core module size with the Cargo profile, `wasm-opt` gain, component size, glue size
     and init time, Node cold start, per-call boundary cost. Outcome: budgets of Annex H confirmed or
-    returned to the owner with numbers; `wasm-opt` kept or dropped; `slim` build decided.
+    returned to the owner with numbers. The guarded L2 build missed kernel thresholds. L2c reruns on the
+    packed default after L2b. Apply the three verdicts in Annex H, record optimizer status and return
+    any projected need for a slim build to the owner. L7c is independent of this verdict.
   - **L1c.** Composed-component measurements under `wasmtime`; then the WIT freeze (D3).
 - **Posed by.** Fable 5.2 + Carbon (consensus). **Track.** —.
 - **Rationale.** The two largest unverified assumptions are tested by the three smallest sequential lots.
@@ -458,6 +483,27 @@ Conventions:
 - **Binds.** L17a (CLI), L1b and L7b (Node), L19 (browser), L1c (session drivers), L0 and the release
   (artefact names).
 
+### D27 — Execution isolation for a shared in-memory filesystem
+- **Decision.** Node and browser accept `BashOptions.isolation?: "separate" | "shared"`. With a supplied
+  kernel-backed `InMemoryFs` the default is `"separate"`. Each shell gets a private execution store,
+  ceiling and trap domain. It mounts the volume at `/` via `mount-host`. The driver serves `fs-batch`
+  synchronously against the owning Vfs, preserving `execSync`. Explicit `"shared"` attaches the shell
+  to the volume's instance. Shells there share its ceiling and poison state. In both modes
+  `bash.fs === fs`, file effects are shared, and S14 protects shell-specific grants, registries, env and
+  budgets. Without a supplied FS each constructor gets one private co-located store.
+- **Ownership.** A standalone volume remains available after a separate execution store traps. Passing
+  `a.fs` to another shell keeps the original volume owner. D8 applies if that owner traps. A shared-mode
+  trap makes that volume unavailable even to separately executing clients. An explicit `"shared"` request requires a
+  kernel-backed volume when an FS is supplied. L7b host adapters retain their separate execution store and
+  asynchronous membrane.
+- **Rationale.** Users can share live files while bounding execution independently, or explicitly share
+  the instance overhead. The reference retains the caller's FS object and exposes no store selector.
+- **Posed by.** Owner, 21/11. **Track.** `01M7ZPBMNRHYJZZVQSA01N4H1S`.
+- **Acceptance.** Two shells on one standalone volume retain identity, direct write visibility and sync
+  guest I/O in both modes. Test three stores in separate mode and one in shared mode. A trap in one
+  separate execution store leaves the other usable. In shared mode both reject subsequent calls.
+- **Binds.** L7c after L7b, then L7a.
+
 ---
 
 ## Annex A — WIT contract (`0.1.0-draft`)
@@ -503,11 +549,13 @@ interface types {
     bypass-custom: option<string>,         // run the built-in of that name, not the custom command
   }
   enum exec-status { completed, limit-exceeded, aborted, deadline }
+  enum stdout-kind { text, bytes }
   record exec-result {
     exit-code: s32,
     status: exec-status,
     limit-name: option<string>,
     env: list<env-var>,
+    stdout-kind: stdout-kind,
   }
 
   enum node-kind { file, directory, symlink }
@@ -572,7 +620,7 @@ interface types {
   record pending-call { epoch: u64, req: host-req }
   variant step { done(exec-result), out-of-fuel, host-call(pending-call) }
   enum cancel-reason { aborted, deadline, limit }
-  enum out-channel { stdout, stderr, body }
+  enum out-channel { stdout, stderr, body, stdout-bytes }
 
   enum kernel-error-code { not-configured, already-configured, ceiling, invalid-config,
                            stale-epoch, bad-state, too-large, denied }
@@ -642,6 +690,7 @@ interface engine {
 }
 
 world kernel {
+  export types;
   export engine;
 }
 ```
@@ -743,12 +792,14 @@ Order (commands: study 2.6):
 1. `cargo build --release --target wasm32-wasip2`, profile `opt-level = "z"`, `lto = "fat"`,
    `codegen-units = 1`, `panic = "abort"`, `strip = true`; flags `link-self-contained=no`, `--no-entry`,
    `--skip-wit-component`, path remapping. Output: core module.
-2. Optional `wasm-opt -Oz` on the core module (only if kept at L2).
+2. Prepare the build-matched passive image and private restore export (L2c). If the owner pins Binaryen,
+   evaluate `wasm-opt -Oz` before componentization and bind the image to the final layout.
 3. `wasm-tools component embed` + `component new` from `wit/`, no adapter. Output: component. The session
    drivers (D15) are built and validated the same way; their import lists are checked against their worlds.
-4. JS glue and types from the component with `jco-transpile` (sync instantiation, no WASI shim, wasm kept
-   as a file, no top-level await).
-5. Package assembly, then OCI push of the component.
+4. Derive the loader core from the component. Build the first-party binding and pinned guarded jco
+   oracle/optional binding (sync instantiation, no WASI shim, one loader core, no top-level await).
+   Differential-check both over the same component and minify each shipped facade graph.
+5. Assemble the two npm tarballs (D18), then publish the same component payload to OCI at release.
 
 | Gate | Check | Fails when |
 |---|---|---|
@@ -788,7 +839,7 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 | Not in v1 | `parse`, AST types, `BashTransformPipeline`, plugins, `serialize`, `registerTransformPlugin`, `transform` | Absent; the two methods throw "not supported" |
 | Deferred to companions (D25) | `defenseInDepth` option; `DefenseInDepthBox` and security-violation exports | In v1 the option is accepted and has no effect and the exports are absent; they are exported by the companion packages |
 | Companions (D25) | `python`, `javascript` options; `getPythonCommandNames`, `getJavaScriptCommandNames` | Options accepted; without the companion the commands are absent (exit 127); helpers return the names |
-| Additions | — | `execSync`, `Bash.precompile()`, `bash.compact()`, journal option |
+| Additions | — | `execSync`, `Bash.precompile()`, `bash.compact()`, journal option, `BashOptions.isolation` (D27) |
 
 `logger` is an object with `info(message, data)` and `debug(message, data)`. For each `exec` it receives
 `info("exec", {command})`, then `debug("stdout", {output})` and `info("stderr", {output})` when those are
@@ -989,7 +1040,7 @@ reported as an `upstream-defect` candidate instead of being matched.
 | S11 | Clock, timezone, entropy, pid/uid, hostname and host env are virtual unless granted; the trace clock is never observable by a script | capability tests; a script run with `trace` on cannot distinguish two different trace-clock sequences |
 | S12 | A trap poisons the instance; no state is read from it afterwards | D8 tests |
 | S13 | The published package has no dependency and no install script | package-content test |
-| S14 | Shells sharing one instance or one `InMemoryFs` share files only: a shell cannot reach another shell's grants, custom commands, registry, env or budgets | two-shell tests with different grants and limits |
+| S14 | Shells sharing files keep distinct grants, custom commands, registry, env and shell budgets. In D27 shared mode the instance ceiling and trap domain are common | two-shell tests in both modes with different grants and limits |
 | S15 | Data parsers never reach outside their input: the XML reader has no DOCTYPE, external entity or entity expansion; YAML aliases are capped; `tar` extraction never writes through a symlinked parent, never creates special files, and stays under its target directory, including on host mounts | adversarial suites, fuzz targets (D21) |
 
 ## Annex H — Benchmark protocol and budgets
@@ -1001,7 +1052,7 @@ only if our output equals the oracle snapshot. The regression gate fails a metri
 exceeds both `max(10%, floor)` (0.02 ms sub-millisecond, 0.5 ms otherwise, 1 MB memory) and the baseline's
 p95 spread. MoonBash is compared through `docs/FEATURE_MATRIX.md` only.
 
-| Metric | just-bash 3.6.0 (measured) | Target (confirmed at L2) |
+| Metric | just-bash 3.6.0 (measured) | Owner target or measurement status |
 |---|---:|---:|
 | M1 Node cold start (import + ctor + first exec) | 118.8 ms | <= 25 ms (stretch 15 ms) |
 | M1b browser cold start | not measured | reported, no target before L19 |
@@ -1010,11 +1061,29 @@ p95 spread. MoonBash is compared through `docs/FEATURE_MATRIX.md` only.
 | M4 `grep -c`, `sed`, `awk`, `sort` on 10k lines | 11.0 / 73.7 / 61.0 / 9.2 ms | <= 2 / 8 / 8 / 4 ms |
 | M5 RSS delta after first exec | 35.5 MB | <= 10 MB |
 | M6 kernel core module | 2.02 MB of JS (557 KB gzip) | <= 1.5 MB raw, <= 700 KB gzip (all tiers) |
-| M6 JS host | — | **<= 60 KB raw (owner target A2, unchanged)**. Provisional split to evaluate at L2: core entry <= 45 KB raw, lazy Node adapters <= 40 KB raw, <= 30 KB gzip in total; minified generated glue as the fallback if the glue alone exceeds 45 KB |
+| M6 JS host, minified default tarball | — | <= 60,000 B total raw, <= 40,000 B Node-only raw, <= 30,000 B total gzip. Report browser raw against **both 45,000 B and 58,000 B** pending owner selection |
 | M7 limit latency; M8 host-backed FS; M9 agent session; M10 heavy pipeline | not measured | not slower than just-bash until measured |
 
-The owner's target for the JS host stays 60 KB until measured. If L2 shows it cannot be met, the split
-above is put to the owner at L2 with the numbers; it is not adopted before.
+The owner adopted the split and minification on 21/11. Count every packed JS file once. The browser
+graph includes the binding, registry, shared facade and all reachable chunks. Remaining files are
+Node-only. Sum gzip level-9 sizes per file. Report actual raw and gzip groups for the separate jco
+tarball alongside the default package. Apply the Annex H JS budget to the default tarball alone.
+
+At L2c use three recorded seeds, 30 shuffled cold rounds per seed, and at least 1,000 samples over at
+least 2 s per warm workload after 20 discarded iterations. Report medians of the three run medians,
+per-run p95/minimum, and a directly timed fresh shell through its first verified echo. Compare equal
+command counts. At 85 registrations the design trial measured 0.112 ms construction and 0.166 ms paired
+against 0.573 ms and 1.283 ms in the reference. Its browser JS used 44,831 B before production
+hardening. Use the real, packed release candidate to decide.
+
+Gate L2 requires green conformance, 30/30 L2 parity cases and 4/4 profile suites. A correctness failure
+blocks lot exit. Kernel limits are M1 <= 25.0 ms, M2 <= 0.20 ms, M3a <= 0.070 ms, M5 <= 10,000,000 B,
+and M6 loader core <= 1,500,000 B raw **and** <= 700,000 B gzip. Any kernel miss is **No-go** and pauses
+W4 and later builds. On a kernel pass, meeting every fixed JS bound and the selected browser cap (both
+caps if pending) gives **Go**. A JS-only miss or a pass at 58,000 B alone while selection is pending gives
+**Go on kernel, owner review of the JS budget**. Both Go verdicts unblock W4. Run the unoptimized arm
+unless an owner-approved Binaryen pin enables the L2c matched comparison. The optimizer and both browser
+caps have separate result rows.
 
 ## Annex I — Divergence list
 
@@ -1026,11 +1095,16 @@ above is put to the owner at L2 with the numbers; it is not adopted before.
 | V4 | The browser entry runs `tar` and `yq`, which the reference's browser bundle excludes, and `gzip`/`gunzip`/`zcat`, which the reference registers but which fail at run time in a browser | Owner, P1 |
 | V5 | Deferred to companions: in the v1 kernel `defenseInDepth` is accepted and has no effect, and `DefenseInDepthBox`, `SecurityViolationLogger`, `SecurityViolationError`, `createConsoleViolationCallback` and their types are not exported; they are exported by the companion packages (D25) | Owner, 15/11 |
 | V8 | Command line: one binary `stpsh` instead of `just-bash` and `just-bash-shell`; by default it mounts no host directory (the reference mounts the current directory), `--root` and `--just-bash` restore the reference's behaviour (D26) | Owner, 15/11 |
-| V6 | Additions that do not alter existing behaviour and add no oracle exclusion: `execSync`, `precompile`, `compact`, journal, profiles `contain`/`micro`, byte helpers and `MethodNotAllowedError` exported from `./browser` as well, the component and its WIT | Consensus |
+| V9 | A supplied in-memory FS keeps its identity and file visibility. The reference has no store selector. Separate execution stores are the default for a shared FS, explicit `isolation: "shared"` shares its instance, ceiling and trap domain. No oracle exclusion | Owner, D27 (21/11) |
+| V6 | Additions that do not alter existing behaviour and add no oracle exclusion: `execSync`, `precompile`, `compact`, journal, profiles `contain`/`micro`, byte helpers and `MethodNotAllowedError` exported from `./browser` as well, the component and its WIT, and optional equivalent library entries via `@sentropic/bash-jco` (D18) | Consensus / Owner |
 
 ## 3. Questions for the owner
 
-None open. Both questions of v1.1 were answered by the owner on 15/11.
+Two questions from 21/11 remain open. L2c reports the data for either outcome.
+- **Browser raw JS.** Measure the minified default pack against both 45,000 and 58,000 B with the fixed
+  Node, total raw and gzip bounds. The owner sets the browser cap.
+- **Binaryen pin.** Without approval, retain `wasmOpt: false` and record the unoptimized result. With an
+  approved exact pin, measure `-Oz` before componentization and apply the L2c 10% retention gate.
 
 **Q1 — Options of excluded runtimes; `trace` and `coverage`. ANSWERED (Owner, 15/11).**
 (i) `python: true` / `javascript: true` construct normally; until the companions exist the commands are
@@ -1079,6 +1153,10 @@ with the companion packages when those expose a host-JS surface, where the prote
 | R5 lot deltas | accepted | consensus | Annex K replaced by the plan |
 | Plan review B2.2 (oracle and `curl`) | accepted | consensus | Annex E.1: loopback fixture server for `curl` cases |
 | Plan review, pass 2, R1 (`stpsh` rules) | accepted | consensus | D26: script argument, `--allow-write` as in-memory copy-on-write, `--just-bash` per mode and what it excludes, full option list |
+| Gate L2 binding/packaging (21/11) | accepted | Owner | D15/D16/D18, Annex C and V6: first-party default, guarded jco differential oracle and optional separate npm package, same zero-import component/WIT |
+| Gate L2 iteration 2 (21/11) | accepted design, measured exit pending | Astra + Carbon | L2b (3 Strong) and L2c (3 Strong): plain descriptors, internal passive restore, pure default predicate, G2/G5-clean shared facade and packed rerun. Annex A reflects the L2 WIT's type export and byte-output fields |
+| Gate L2 budgets (21/11) | minified split accepted, browser cap and optimizer pin open | Owner | D17/D24, Annex H: report 45,000/58,000 B arms and the approved/unapproved Binaryen paths |
+| Shared filesystem (21/11) | accepted | Owner | D5/D27, Annex D.1 and V9: both modes, synchronous in-memory mount transport in L7c (2.5 Strong) after L7b and before L7a |
 
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
 
@@ -1089,5 +1167,6 @@ taken from the review: the v1 parity base of the study is 169 points (180 includ
 and the post-parity L18); flag tables are costed at the tier of their command lot; the generic flag
 coverage hook is built once in L2; observability (logger, trace and coverage delivery) is a separate lot
 off the critical path; L11, L10b, L19 and L15b-1 carry their share; L16b is the network adapter inside
-`@sentropic/bash`. Resulting v1 parity size: 183.5 points.
+`@sentropic/bash`. That plan totals 183.5 points before the 8.5 Strong points in Annex J. L2b and L2c
+account for 6 points to the Gate L2 rerun. L7c accounts for the other 2.5 points after L7b.
 
