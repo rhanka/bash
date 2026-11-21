@@ -1,6 +1,6 @@
 // The recorder: runs cases on an adapter and writes canonical snapshots.
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { canonicalize, hashValue } from "./canonical.mjs";
 import { runCase } from "./run.mjs";
 import { loadCases, validateSnapshot, ValidationError } from "./validate.mjs";
@@ -51,13 +51,23 @@ export async function recordAll({ adapter, casesDir, snapshotsDir, check = false
   res.invalid = invalid;
   for (const inv of invalid) res.lines.push(`invalid ${inv.message}`);
   if (invalid.length) res.failed = true;
-  const known = new Set(cases.map((c) => c.name));
+  const known = new Set(cases.map((c) => c.snapRel));
   if (!check) mkdirSync(snapshotsDir, { recursive: true });
   for (const c of cases) {
     if (filter && !c.id.includes(filter)) continue;
-    const out = join(snapshotsDir, `${c.name}.snap.json`);
+    const out = join(snapshotsDir, `${c.snapRel}.snap.json`);
     const existing = existsSync(out) ? readFileSync(out, "utf8") : null;
+    // A case the adapter does not support is not covered, whatever the state of its snapshot (as on replay).
+    const notCovered = async () => (await runCase(adapter, c.obj)).outcome === "unsupported";
+    const unsupported = async () => {
+      res.unsupported.push(c.id);
+      res.lines.push(`not-covered ${c.id}`);
+    };
     if (check && existing === null) {
+      if (await notCovered()) {
+        await unsupported();
+        continue;
+      }
       res.missing.push(c.id);
       res.lines.push(`missing ${c.id}`);
       res.failed = true;
@@ -68,12 +78,20 @@ export async function recordAll({ adapter, casesDir, snapshotsDir, check = false
       try {
         prev = validateSnapshot(JSON.parse(existing), out);
       } catch (e) {
+        if (await notCovered()) {
+          await unsupported();
+          continue;
+        }
         res.changed.push(c.id);
         res.lines.push(`changed ${c.id}`);
         res.failed = true;
         continue;
       }
       if (prev.caseHash !== c.hash) {
+        if (await notCovered()) {
+          await unsupported();
+          continue;
+        }
         res.stale.push(c.id);
         res.lines.push(`stale ${c.id}`);
         res.failed = true;
@@ -82,8 +100,9 @@ export async function recordAll({ adapter, casesDir, snapshotsDir, check = false
     }
     const r = await recordCase(adapter, c.obj);
     if (r.status === "unsupported") {
-      res.unsupported.push(c.id);
-      res.lines.push(`not-covered ${c.id}`);
+      // No snapshot for an unsupported case: a leftover one from a former adapter would be stale.
+      if (!check && existing !== null) rmSync(out);
+      await unsupported();
       continue;
     }
     if (r.status === "unstable") {
@@ -110,19 +129,26 @@ export async function recordAll({ adapter, casesDir, snapshotsDir, check = false
     }
     if (check && !same) res.failed = true;
     res.lines.push(`${label} ${c.id}`);
-    if (!check) writeFileSync(out, text);
+    if (!check) {
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, text);
+    }
   }
   if (existsSync(snapshotsDir)) {
-    for (const f of readdirSync(snapshotsDir).sort()) {
-      if (!f.endsWith(".snap.json")) continue;
-      const name = f.replace(/\.snap\.json$/, "");
-      if (!known.has(name)) {
-        const id = `${basename(casesDir)}/${name}`;
-        res.orphans.push(id);
-        res.lines.push(`orphan ${id}`);
-        if (check) res.failed = true;
+    const walkSnaps = (dir, prefix) => {
+      for (const d of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+        if (d.isDirectory() && prefix === "") walkSnaps(join(dir, d.name), `${d.name}/`);
+        else if (d.name.endsWith(".snap.json")) {
+          const rel = prefix + d.name.replace(/\.snap\.json$/, "");
+          if (known.has(rel)) continue;
+          const id = prefix === "" ? `${basename(casesDir)}/${rel}` : rel;
+          res.orphans.push(id);
+          res.lines.push(`orphan ${id}`);
+          if (check) res.failed = true;
+        }
       }
-    }
+    };
+    walkSnaps(snapshotsDir, "");
   }
   return res;
 }

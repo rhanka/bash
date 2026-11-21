@@ -20,7 +20,12 @@ function resolveExclusions(ex) {
   for (const k of Object.keys(raw)) {
     if (k !== "divergences" && k !== "cases") throw new Error(`exclusions: unknown key "${k}"`);
   }
-  return { divergences: raw.divergences ?? {}, cases: raw.cases ?? {} };
+  return { divergences: ownMap(raw.divergences), cases: ownMap(raw.cases) };
+}
+
+/** Own entries only, so `constructor`, `toString` and `__proto__` are ordinary names. */
+function ownMap(o) {
+  return new Map(Object.entries(o ?? {}));
 }
 
 /**
@@ -28,12 +33,13 @@ function resolveExclusions(ex) {
  * @returns {Promise<{id: string, lot: string, tags: string[], status: 'passed'|'failed'|'excluded'|'not-covered',
  *                    reason?: string, message?: string}>}
  */
-export async function evaluateCase({ adapter, entry, snapshotsDir, exclusions }) {
+export async function evaluateCase({ adapter, entry, snapshotsDir, exclusions: rawExclusions }) {
+  const exclusions = rawExclusions.cases instanceof Map ? rawExclusions : resolveExclusions(rawExclusions);
   const { id, obj } = entry;
-  const base = { id, lot: id.split("/")[0], tags: obj.tags ?? [] };
-  const exclReason = exclusions.cases[id] ?? (obj.divergence ? exclusions.divergences[obj.divergence] : undefined);
+  const base = { id, lot: entry.lot ?? id.split("/")[0], tags: obj.tags ?? [] };
+  const exclReason = exclusions.cases.get(id) ?? (obj.divergence ? exclusions.divergences.get(obj.divergence) : undefined);
   if (exclReason !== undefined) return { ...base, status: "excluded", reason: exclReason };
-  const snapFile = join(snapshotsDir, `${entry.name}.snap.json`);
+  const snapFile = join(snapshotsDir, `${entry.snapRel ?? entry.name}.snap.json`);
   // A case the adapter does not support is reported as not covered, whatever the state of its snapshot.
   const notCovered = async () => (await runCase(adapter, obj)).outcome === "unsupported";
   if (!existsSync(snapFile)) {
@@ -59,16 +65,23 @@ export async function evaluateCase({ adapter, entry, snapshotsDir, exclusions })
   const expected = {};
   const actual = {};
   for (const k of ["steps", "fs", "trace", "coverage"]) {
-    if (k in snap) expected[k] = snap[k];
-    if (k in r.result) actual[k] = r.result[k];
+    if (Object.hasOwn(snap, k)) expected[k] = snap[k];
+    if (Object.hasOwn(r.result, k)) actual[k] = r.result[k];
   }
   const diffs = compare(expected, actual);
   if (diffs.length) return { ...base, status: "failed", message: `${id}: ${formatDiffs(diffs)}`, paths: diffs.map((d) => d.path) };
   return { ...base, status: "passed" };
 }
 
+// Counters keep their keys (lots, tags, exclusion reasons) in Maps while counting, so user-chosen names such
+// as "constructor" or "__proto__" never touch Object.prototype; they become plain own properties at the end.
 function emptyCounts() {
-  return { cases: 0, passed: 0, failed: 0, excluded: {}, notCovered: 0 };
+  return { cases: 0, passed: 0, failed: 0, excluded: new Map(), notCovered: 0 };
+}
+
+function bucket(map, key) {
+  if (!map.has(key)) map.set(key, emptyCounts());
+  return map.get(key);
 }
 
 function add(counts, o) {
@@ -76,20 +89,35 @@ function add(counts, o) {
   if (o.status === "passed") counts.passed++;
   else if (o.status === "failed") counts.failed++;
   else if (o.status === "not-covered") counts.notCovered++;
-  else counts.excluded[o.reason] = (counts.excluded[o.reason] ?? 0) + 1;
+  else counts.excluded.set(o.reason, (counts.excluded.get(o.reason) ?? 0) + 1);
 }
 
-/** Builds the parity report (no timestamp) from case outcomes. */
-export function buildReport(outcomes) {
-  const report = { ...emptyCounts(), failedCases: [], byLot: {}, byTag: {} };
-  for (const o of outcomes) {
+const plainEntries = (map, f = (v) => v) => Object.fromEntries([...map].map(([k, v]) => [k, f(v)]));
+const finishCounts = (c) => ({ ...c, excluded: plainEntries(c.excluded) });
+
+/**
+ * Builds the parity report (no timestamp) from case outcomes. Invalid case files count as failed cases,
+ * named by their id-shaped `<lot>/<name>`.
+ * @param {object[]} outcomes
+ * @param {{id: string, lot: string}[]} [invalid]
+ */
+export function buildReport(outcomes, invalid = []) {
+  const all = [
+    ...outcomes,
+    ...invalid.map((i) => ({ id: i.id, lot: i.lot, tags: [], status: "failed" })),
+  ];
+  const report = emptyCounts();
+  const byLot = new Map();
+  const byTag = new Map();
+  const failedCases = [];
+  for (const o of all) {
     add(report, o);
-    add((report.byLot[o.lot] ??= emptyCounts()), o);
-    for (const t of new Set(o.tags)) add((report.byTag[t] ??= emptyCounts()), o);
-    if (o.status === "failed") report.failedCases.push(o.id);
+    add(bucket(byLot, o.lot), o);
+    for (const t of new Set(o.tags)) add(bucket(byTag, t), o);
+    if (o.status === "failed") failedCases.push(o.id);
   }
-  report.failedCases.sort();
-  return report;
+  failedCases.sort();
+  return { ...finishCounts(report), failedCases, byLot: plainEntries(byLot, finishCounts), byTag: plainEntries(byTag, finishCounts) };
 }
 
 export function writeReport(report, reportPath) {
@@ -109,7 +137,7 @@ export async function runParity({ adapter, casesDir, snapshotsDir, exclusions })
   const { cases, invalid } = loadCases(casesDir);
   const outcomes = [];
   for (const entry of cases) outcomes.push(await evaluateCase({ adapter: ad, entry, snapshotsDir, exclusions: ex }));
-  return { outcomes, invalid, report: buildReport(outcomes) };
+  return { outcomes, invalid, report: buildReport(outcomes, invalid) };
 }
 
 /**
@@ -137,12 +165,7 @@ export function defineParityTests({ adapter, casesDir, snapshotsDir, exclusions,
     });
   }
   test("parity report", () => {
-    const report = buildReport(outcomes);
-    for (const inv of invalid) {
-      report.cases++;
-      report.failed++;
-      report.failedCases.push(inv.file);
-    }
+    const report = buildReport(outcomes, invalid);
     writeReport(report, reportPath);
     console.log(summarize(report));
   });

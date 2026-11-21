@@ -55,7 +55,7 @@ export function createMockAdapter(options = {}) {
         mkdirs(posix.dirname(abs));
         fs.set(abs, { kind: "file", mode: spec.mode ?? 0o644, content: toBytes(spec.content) });
       }
-      const env = { ...(init.env ?? {}) };
+      const env = Object.assign(Object.create(null), init.env ?? {});
       let cwd = init.cwd ?? "/";
       let trace = [];
       let coverage = [];
@@ -128,7 +128,7 @@ export function createMockAdapter(options = {}) {
               if (init.capture.coverage) coverage.push(rest);
             } else if (cmd === "trace") {
               const [category, name, ...kv] = rest.split(" ");
-              const details = {};
+              const details = Object.create(null);
               for (const pair of kv) {
                 const j = pair.indexOf("=");
                 const key = pair.slice(0, j);

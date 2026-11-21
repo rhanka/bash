@@ -25,7 +25,9 @@
     {
       "category": "find",
       "details": {
+        "otherTimeMs": null,
         "readdirCalls": 2,
+        "readdirTimeMs": null,
         "statCalls": 5
       },
       "name": "summary"

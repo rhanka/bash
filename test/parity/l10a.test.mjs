@@ -10,5 +10,5 @@ defineParityTests({
   casesDir: join(root, "test/cases/l10a"),
   snapshotsDir: join(root, "test/snapshots/l10a"),
   exclusions: join(root, "test/parity/exclusions.json"),
-  reportPath: join(root, "tmp/parity-report.json"),
+  reportPath: join(root, "tmp/parity-report-l10a.json"),
 });

@@ -1,7 +1,7 @@
 // Self-tests of the parity harness (lot L10a, spec section 8), run on the mock adapter.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -9,7 +9,13 @@ import { repoRoot, scratch } from "../helpers.mjs";
 import { canonicalize } from "../../harness/parity/canonical.mjs";
 import { recordAll } from "../../harness/parity/record.mjs";
 import { evaluateCase, runParity } from "../../harness/parity/replay.mjs";
-import { loadCases } from "../../harness/parity/validate.mjs";
+import { loadCases, validateCase, validateSnapshot } from "../../harness/parity/validate.mjs";
+import { sanitizePaths } from "../../harness/parity/run.mjs";
+import { buildReport } from "../../harness/parity/replay.mjs";
+import { compare } from "../../harness/parity/compare.mjs";
+import { recordCase } from "../../harness/parity/record.mjs";
+import { hashValue } from "../../harness/parity/canonical.mjs";
+import { scanImports, stripComments } from "../../tools/gates.mjs";
 import mock, { createMockAdapter } from "../../harness/parity/mock-adapter.mjs";
 
 const SAMPLE_CASES = join(repoRoot, "test/cases/l10a");
@@ -146,7 +152,10 @@ test("difference report: code unit index and a window with escapes", async () =>
 // 4. Tolerance
 test("tolerance: durations and *TimeMs values never reach a snapshot nor fail a replay", async () => {
   const text = readFileSync(join(SAMPLE_SNAPS, "trace-time-keys.snap.json"), "utf8");
-  assert.ok(!text.includes("durationMs") && !text.includes("TimeMs"));
+  assert.ok(!text.includes("durationMs"));
+  // the *TimeMs keys stay, their values are masked
+  assert.match(text, /"readdirTimeMs": null/);
+  assert.match(text, /"otherTimeMs": null/);
   for (const clock of [() => 0, () => 123456.789]) {
     const { outcomes } = await runParity({
       adapter: createMockAdapter({ clock }), casesDir: SAMPLE_CASES, snapshotsDir: SAMPLE_SNAPS, exclusions: NO_EXCLUSIONS,
@@ -301,7 +310,9 @@ test("validation: both tools reject invalid case files naming the file and the k
   assert.equal(r.status, 1);
   const { invalid, report } = await runParity({ adapter: mock, casesDir: cases, snapshotsDir: join(base, "snaps"), exclusions: NO_EXCLUSIONS });
   assert.equal(invalid.length, 4);
-  assert.equal(report.cases, 0);
+  assert.equal(report.cases, 4);
+  assert.equal(report.failed, 4);
+  assert.deepEqual(report.failedCases, ["lv/Bad_Name", "lv/no-steps", "lv/unknown-key", "lv/wrong-id"]);
   for (const [file, key] of expected) {
     assert.ok(r.stdout.split("\n").some((l) => l.includes(file) && l.includes(key)), `${file} ${key}: ${r.stdout}`);
     assert.ok(invalid.some((i) => i.message.includes(file) && i.message.includes(key)), file);
@@ -326,27 +337,77 @@ defineParityTests({ adapter: ${JSON.stringify(ADAPTER)}, casesDir: ${JSON.string
   assert.match(r.stdout, /stale snapshot for lw\/plain-text/);
   assert.match(r.stdout, /broken\.case\.json/);
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
-  assert.deepEqual(report.failedCases.sort(), [join(s.cases, "broken.case.json"), "lw/plain-text"].sort());
+  assert.deepEqual(report.failedCases.sort(), ["lw/broken", "lw/plain-text"].sort());
   assert.equal(report.passed, 16);
 });
 
 // 12. Isolation
-test("isolation: relative or node: imports only, no network module, no fetch(", () => {
-  const files = readdirSync(join(repoRoot, "harness/parity")).map((f) => join("harness/parity", f)).concat("tools/parity-record.mjs");
-  const banned = new Set(["node:http", "node:https", "node:net", "node:dns", "node:tls", "node:dgram"]);
-  const re = /(?:\bimport\s*(?:[^'"()]*?\bfrom\s*)?|\bexport\s[^'"]*?\bfrom\s*|\bimport\s*\(\s*)(["'`])([^"'`]+)\1/g;
-  let seen = 0;
-  for (const f of files) {
-    const text = readFileSync(join(repoRoot, f), "utf8");
-    assert.ok(!text.includes("fetch("), `${f} contains fetch(`);
-    for (const m of text.matchAll(re)) {
-      seen++;
-      const spec = m[2];
-      assert.ok(spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("node:"), `${f}: ${spec}`);
-      assert.ok(!banned.has(spec), `${f}: ${spec}`);
-    }
+const BANNED_MODULE = /^node:(?:http2?|https|net|dns|tls|dgram)(?:\/|$)/;
+const BANNED_CONSTRUCT = [
+  [/\bfetch\s*\(/, "fetch("],
+  [/\bgetBuiltinModule\b/, "getBuiltinModule"],
+  [/\bcreateRequire\b/, "createRequire"],
+  [/\beval\b/, "eval"],
+  [/\bFunction\b/, "Function"],
+  [/\brequire\s*\(/, "require("],
+];
+// The two adapter loaders: a computed import of the adapter module path given on the command line.
+const ADAPTER_LOADER = /\bimport\(pathToFileURL\(resolve\((?:adapter|opts\.adapter)\)\)\.href\)/g;
+
+/** Why a source file breaks the isolation rule, as a list of messages. */
+function isolationViolations(text, { allowAdapterLoader = false } = {}) {
+  const raw = allowAdapterLoader ? text.replace(ADAPTER_LOADER, "null") : text;
+  const { specifiers, nonLiteralDynamic, src } = scanImports(raw);
+  const out = [];
+  if (nonLiteralDynamic) out.push("non-literal import()");
+  for (const spec of specifiers) {
+    if (!(spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("node:"))) out.push(`import of ${spec}`);
+    if (BANNED_MODULE.test(spec)) out.push(`import of ${spec}`);
   }
-  assert.ok(seen > 15);
+  for (const [re, what] of BANNED_CONSTRUCT) if (re.test(stripComments(src))) out.push(what);
+  return out;
+}
+
+function walkFiles(dir) {
+  const out = [];
+  for (const f of readdirSync(dir).sort()) {
+    const p = join(dir, f);
+    if (statSync(p).isDirectory()) out.push(...walkFiles(p));
+    else if (p.endsWith(".mjs")) out.push(p);
+  }
+  return out;
+}
+
+test("isolation: harness/parity and the CLI import only relative or allowed node: modules, no network", () => {
+  const files = [...walkFiles(join(repoRoot, "harness/parity")), join(repoRoot, "tools/parity-record.mjs")];
+  assert.ok(files.length >= 8);
+  let specifiers = 0;
+  for (const f of files) {
+    const text = readFileSync(f, "utf8");
+    assert.deepEqual(isolationViolations(text, { allowAdapterLoader: true }), [], f);
+    specifiers += scanImports(text).specifiers.length;
+  }
+  assert.ok(specifiers > 15);
+  // the loader whitelist is not a hole: the same loader written with another expression is refused
+  assert.deepEqual(isolationViolations("await import(pathToFileURL(resolve(other)).href);", { allowAdapterLoader: true }), ["non-literal import()"]);
+});
+
+test("isolation scan: the bypasses of the former regex are caught", () => {
+  const cases = [
+    ['const m = await import("node:" + "http");', "non-literal import()"],
+    ['export*from"node:http";', "import of node:http"],
+    ['import x from "node:http2";', "import of node:http2"],
+    ['import("node:dns/promises");', "import of node:dns/promises"],
+    ['import x from "lodash";', "import of lodash"],
+    ["fetch (url);", "fetch("],
+    ["process.getBuiltinModule('node:http');", "getBuiltinModule"],
+    ['import { createRequire } from "node:module";', "createRequire"],
+    ["eval('1');", "eval"],
+    ["new Function('return 1')();", "Function"],
+  ];
+  for (const [src, expected] of cases) assert.ok(isolationViolations(src).includes(expected), `${src} -> ${isolationViolations(src)}`);
+  // a comment is not code
+  assert.deepEqual(isolationViolations('// import "node:http"\n/* fetch( */ import { x } from "./x.mjs";'), []);
 });
 
 // 13. Cost
@@ -364,4 +425,164 @@ test("api skeleton: nine todo tests", () => {
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^# todo 9$/m);
   assert.match(r.stdout, /^# fail 0$/m);
+});
+
+// Review fixes (PR #5)
+
+/** A mock adapter whose sessions are rewritten by `wrap(session, init)`. */
+function wrapped(wrap) {
+  return {
+    name: "mock",
+    version: "1",
+    async create(init) {
+      return wrap(await mock.create(init), init);
+    },
+  };
+}
+
+test("check: an unsupported case is not-covered, never missing or stale (and a leftover snapshot is removed)", async () => {
+  const s = await specialLot();
+  const chk = cli(s.cases, s.snaps, "--check");
+  assert.equal(chk.status, 0, chk.stdout + chk.stderr);
+  assert.match(chk.stdout, /^not-covered lr\/unsupported$/m);
+  assert.doesNotMatch(chk.stdout, /missing|stale/);
+  // a stale snapshot of the unsupported case does not fail --check either
+  writeFileSync(join(s.snaps, "unsupported.snap.json"), canonicalize({ case: "lr/unsupported", caseHash: "0", engine: { name: "x", version: "1" }, status: "recorded", steps: [] }));
+  const stale = cli(s.cases, s.snaps, "--check");
+  assert.equal(stale.status, 0, stale.stdout);
+  assert.match(stale.stdout, /^not-covered lr\/unsupported$/m);
+  // recording removes it
+  assert.equal(cli(s.cases, s.snaps).status, 0);
+  assert.ok(!existsSync(join(s.snaps, "unsupported.snap.json")));
+});
+
+test("trace: a missing *TimeMs key fails the replay; a non-finite one is an engine defect", async () => {
+  const base = scratch("l10a");
+  const cases = join(base, "lt");
+  writeCase(cases, "tr", { capture: { trace: true }, steps: [{ script: "trace find summary readdirCalls=2 readdirTimeMs=0" }] });
+  const snaps = join(base, "snaps");
+  assert.equal((await recordAll({ adapter: mock, casesDir: cases, snapshotsDir: snaps })).failed, false);
+  const dropKey = wrapped((s) => ({ ...s, takeTrace: () => s.takeTrace().map((e) => { delete e.details.readdirTimeMs; return e; }) }));
+  const o = (await runParity({ adapter: dropKey, casesDir: cases, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS })).outcomes[0];
+  assert.equal(o.status, "failed");
+  assert.match(o.message, /readdirTimeMs: missing in actual/);
+  const nan = wrapped((s) => ({ ...s, takeTrace: () => s.takeTrace().map((e) => { e.details.readdirTimeMs = "slow"; return e; }) }));
+  const d = (await runParity({ adapter: nan, casesDir: cases, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS })).outcomes[0];
+  assert.equal(d.status, "failed");
+  assert.match(d.message, /readdirTimeMs.*finite number/);
+});
+
+test("undefined fields and bad step results: record and replay agree, malformed results are defects", async () => {
+  const base = scratch("l10a");
+  const cases = join(base, "lt");
+  writeCase(cases, "tr", { capture: { trace: true }, steps: [{ script: "trace find summary readdirCalls=2" }] });
+  const snaps = join(base, "snaps");
+  const withUndefined = wrapped((s) => ({ ...s, takeTrace: () => s.takeTrace().map((e) => { e.details.opt = undefined; e.details.nan = NaN; return e; }) }));
+  assert.equal((await recordAll({ adapter: withUndefined, casesDir: cases, snapshotsDir: snaps })).failed, false);
+  assert.equal(
+    (await recordAll({ adapter: withUndefined, casesDir: cases, snapshotsDir: snaps, check: true })).failed, false);
+  const o = (await runParity({ adapter: withUndefined, casesDir: cases, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS })).outcomes[0];
+  assert.equal(o.status, "passed", o.message);
+  const bad = wrapped((s) => ({ ...s, exec: async (st) => ({ ...(await s.exec(st)), stdout: 42 }) }));
+  const r = await recordCase(bad, JSON.parse(readFileSync(join(cases, "tr.case.json"), "utf8")));
+  assert.equal(r.status, "engine-defect");
+  assert.match(r.snapshot.defect.message, /stdout must be a string/);
+});
+
+test("prototype names: constructor, toString and __proto__ are ordinary names", async () => {
+  // report: tags, divergence reasons and lots named after Object.prototype members
+  const outcomes = ["constructor", "__proto__", "toString"].map((t, i) => ({
+    id: `${t}/c${i}`, lot: t, tags: [t], status: i === 0 ? "excluded" : "passed", reason: "__proto__",
+  }));
+  const report = buildReport(outcomes);
+  assert.equal(report.cases, 3);
+  assert.equal(report.byTag.constructor.cases, 1);
+  assert.equal(Object.getOwnPropertyDescriptor(report.byTag, "__proto__").value.cases, 1);
+  assert.equal(Object.getOwnPropertyDescriptor(report.excluded, "__proto__").value, 1);
+  assert.equal(typeof Object.cases, "undefined");
+  // compare: a missing toString / valueOf key is missing, not present
+  assert.deepEqual(compare({ env: { valueOf: "x" } }, { env: {} }).map((d) => d.path), ["env.valueOf"]);
+  assert.deepEqual(compare({ env: {} }, { env: { toString: "x" } }).map((d) => d.path), ["env.toString"]);
+  // exclusions: a case whose divergence is "toString" or "constructor" is not silently skipped
+  const base = scratch("l10a");
+  const cases = join(base, "lp");
+  writeCase(cases, "a", { tags: ["constructor"], divergence: "toString", steps: [{ script: "echo hi" }] });
+  writeCase(cases, "constructor", { steps: [{ script: "echo hi" }] });
+  const snaps = join(base, "snaps");
+  await recordAll({ adapter: mock, casesDir: cases, snapshotsDir: snaps });
+  const res = await runParity({ adapter: mock, casesDir: cases, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS });
+  assert.deepEqual(res.outcomes.map((o) => o.status), ["passed", "passed"]);
+  assert.equal(res.report.byTag.constructor.passed, 1);
+  // env: a __proto__ key survives the run and the snapshot
+  writeFileSync(join(cases, "env.case.json"), `{"id":"lp/env","title":"t","steps":[{"script":"echo hi","env":{"__proto__":"x"}}]}`);
+  const rec = await recordAll({ adapter: mock, casesDir: cases, snapshotsDir: snaps });
+  assert.equal(rec.failed, false);
+  const snap = JSON.parse(readFileSync(join(snaps, "env.snap.json"), "utf8"));
+  assert.equal(Object.getOwnPropertyDescriptor(snap.steps[0].env, "__proto__").value, "x");
+  const again = await runParity({ adapter: mock, casesDir: cases, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS });
+  assert.equal(again.outcomes.find((o) => o.id === "lp/env").status, "passed");
+});
+
+test("multi-lot layout: <lot>/<name> cases, per-lot snapshots, invalid files folded into the report", async () => {
+  const root = join(scratch("l10a"), "cases");
+  writeCase(join(root, "la"), "one", { steps: [{ script: "echo a" }] });
+  writeCase(join(root, "lb"), "two", { steps: [{ script: "echo b" }] });
+  writeFileSync(join(root, "lb", "broken.case.json"), JSON.stringify({ id: "lb/broken", title: "t" }));
+  const snaps = join(root, "..", "snaps");
+  const chk = cli(root, snaps);
+  assert.equal(chk.status, 1);
+  assert.ok(existsSync(join(snaps, "la", "one.snap.json")) && existsSync(join(snaps, "lb", "two.snap.json")));
+  assert.equal(cli(root, snaps, "--check").status, 1); // still the invalid file
+  rmSync(join(root, "lb", "broken.case.json"));
+  assert.equal(cli(root, snaps, "--check").status, 0);
+  rmSync(join(snaps, "lb", "two.snap.json"));
+  assert.match(cli(root, snaps, "--check").stdout, /missing lb\/two/);
+  writeFileSync(join(snaps, "la", "gone.snap.json"), "{}");
+  assert.match(cli(root, snaps, "--check").stdout, /orphan la\/gone/);
+  assert.equal(cli(root, snaps).status, 0);
+  writeFileSync(join(root, "lb", "broken.case.json"), JSON.stringify({ id: "lb/broken", title: "t" }));
+  const { report } = await runParity({ adapter: mock, casesDir: root, snapshotsDir: snaps, exclusions: NO_EXCLUSIONS });
+  assert.deepEqual([report.cases, report.passed, report.failed], [3, 2, 1]);
+  assert.deepEqual(report.failedCases, ["lb/broken"]);
+  assert.deepEqual([report.byLot.la.cases, report.byLot.lb.cases, report.byLot.lb.failed], [1, 2, 1]);
+  assert.ok(readFileSync(join(repoRoot, "test/parity/l10a.test.mjs"), "utf8").includes("tmp/parity-report-l10a.json"));
+});
+
+test("recordCase: an adapter that mutates its input cannot corrupt the case hash", async () => {
+  const caseObject = { id: "lm/m", title: "t", files: { "/a": "x" }, steps: [{ script: "echo hi" }] };
+  const before = hashValue(caseObject);
+  const mutating = wrapped((s, init) => ({
+    ...s,
+    exec: async (step) => {
+      const r = await s.exec(step);
+      step.script = "echo mutated";
+      init.files["/b"] = "y";
+      return r;
+    },
+  }));
+  const r = await recordCase(mutating, caseObject);
+  assert.equal(r.status, "recorded");
+  assert.equal(r.snapshot.caseHash, before);
+  assert.equal(hashValue(caseObject), before);
+});
+
+test("paths and validation details: forward-slash and parenthesized paths, base64 groups, engine and defect", () => {
+  assert.equal(sanitizePaths("open C:/Users/x/f.txt failed"), "open <path> failed");
+  assert.equal(sanitizePaths("open C:\\Users\\x\\f.txt failed"), "open <path> failed");
+  assert.equal(sanitizePaths("in /a/b(1)/c,d/e"), "in <path>");
+  const file = "x.case.json";
+  const step = (script) => ({ id: "lq/x", title: "t", steps: [{ script }] });
+  assert.ok(validateCase(step({ base64: "QQ==" }), file, "lq/x"));
+  assert.ok(validateCase(step({ base64: "" }), file, "lq/x"));
+  for (const bad of ["A", "QQ=", "QQ", "QUJD=", "QUJDRA"]) {
+    assert.throws(() => validateCase(step({ base64: bad }), file, "lq/x"), /script/, bad);
+  }
+  const snap = { case: "c", caseHash: "h", engine: { name: "e", version: "1" }, status: "recorded", steps: [] };
+  assert.ok(validateSnapshot(snap, "s"));
+  assert.throws(() => validateSnapshot({ ...snap, engine: { name: "e" } }, "s"), /engine/);
+  assert.throws(() => validateSnapshot({ ...snap, engine: "e" }, "s"), /engine/);
+  const defect = { ...snap, status: "engine-defect", defect: { step: 0, message: "m" } };
+  assert.ok(validateSnapshot(defect, "s"));
+  assert.throws(() => validateSnapshot({ ...defect, defect: { step: "0", message: "m" } }, "s"), /defect/);
+  assert.throws(() => validateSnapshot({ ...defect, defect: { step: 0 } }, "s"), /defect/);
 });

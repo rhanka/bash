@@ -6,16 +6,22 @@ import { withDefaults } from "./validate.mjs";
 /** Replaces absolute paths of the machine by `<path>`. */
 export function sanitizePaths(text) {
   return String(text)
-    .replace(/[A-Za-z]:\\[^\s'"`<>|]*/g, "<path>")
-    .replace(/(?<![\w<])(?:\/[^\s/'"`:;,()<>]+)+/g, "<path>");
+    .replace(/[A-Za-z]:[\\/][^\s'"`<>|]*/g, "<path>")
+    .replace(/(?<![\w<])(?:\/[^\s/'"`:;<>]+)+/g, "<path>");
 }
 
-/** Drops `durationMs` and every `*TimeMs` value; events always carry a `details` object. */
+/**
+ * Drops `durationMs`; keeps every `*TimeMs` key with its value masked to `null` (the adapter must supply a
+ * finite number, so a missing or malformed time key is a difference, not a silent pass).
+ */
 export function filterTraceEvent(ev) {
-  const details = {};
+  const details = Object.create(null);
   for (const [k, v] of Object.entries(ev.details ?? {})) {
-    if (k === "durationMs" || k.endsWith("TimeMs")) continue;
-    details[k] = v;
+    if (k === "durationMs") continue;
+    if (k.endsWith("TimeMs")) {
+      if (typeof v !== "number" || !Number.isFinite(v)) throw new Error(`trace detail "${k}" must be a finite number`);
+      details[k] = null;
+    } else details[k] = v;
   }
   return { category: ev.category, name: ev.name, details };
 }
@@ -28,7 +34,7 @@ function serializeEntry(e) {
 
 /** Entries whose serialized form differs between two states; `null` marks a removed path. */
 export function diffFs(before, after) {
-  const out = {};
+  const out = Object.create(null);
   const paths = new Set([...before.keys(), ...after.keys()]);
   for (const p of [...paths].sort()) {
     const a = before.has(p) ? serializeEntry(before.get(p)) : null;
@@ -38,12 +44,27 @@ export function diffFs(before, after) {
   return out;
 }
 
+function checkStepResult(r) {
+  const bad = (what) => {
+    throw new TypeError(`step result: ${what}`);
+  };
+  if (r === null || typeof r !== "object") bad("must be an object");
+  if (typeof r.stdout !== "string") bad("stdout must be a string");
+  if (typeof r.stderr !== "string") bad("stderr must be a string");
+  if (!Number.isInteger(r.exitCode)) bad("exitCode must be an integer");
+  if (r.stdoutKind !== undefined && r.stdoutKind !== "text" && r.stdoutKind !== "bytes") bad('stdoutKind must be "text" or "bytes"');
+  if (r.env === null || typeof r.env !== "object" || !Object.values(r.env).every((v) => typeof v === "string")) {
+    bad("env must map names to strings");
+  }
+}
+
 /**
  * @returns {Promise<{outcome: 'ok', result: object} | {outcome: 'defect', defect: {step: number, message: string}}
  *                  | {outcome: 'unsupported', message: string}>}
  */
 export async function runCase(adapter, caseObj) {
-  const c = withDefaults(caseObj);
+  // A fresh copy per run: an adapter that mutates its input cannot corrupt the case or the next run.
+  const c = withDefaults(structuredClone(caseObj));
   const init = { files: c.files, profile: c.profile, engine: c.engine, capture: c.capture };
   if (c.env !== undefined) init.env = c.env;
   if (c.cwd !== undefined) init.cwd = c.cwd;
@@ -62,6 +83,7 @@ export async function runCase(adapter, caseObj) {
     const coverage = [];
     for (; stepIndex < c.steps.length; stepIndex++) {
       const r = await session.exec(c.steps[stepIndex]);
+      checkStepResult(r);
       const res = { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, env: { ...r.env } };
       if (r.stdoutKind !== undefined) res.stdoutKind = r.stdoutKind;
       steps.push(res);
@@ -72,7 +94,8 @@ export async function runCase(adapter, caseObj) {
     if (c.capture.fs) result.fs = diffFs(before, await session.readFs());
     if (c.capture.trace) result.trace = trace;
     if (c.capture.coverage) result.coverage = coverage;
-    return { outcome: "ok", result };
+    // JSON-normalized, so what is recorded and what is compared on replay are the same value.
+    return { outcome: "ok", result: JSON.parse(JSON.stringify(result)) };
   } catch (e) {
     return { outcome: "defect", defect: { step: Math.min(stepIndex, c.steps.length - 1), message: sanitizePaths(e && e.message !== undefined ? e.message : e) } };
   } finally {
