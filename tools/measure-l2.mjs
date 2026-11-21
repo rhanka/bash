@@ -10,102 +10,39 @@ import { repoRoot, toolBin, toolsDir } from "./lib.mjs";
 import { stripComments } from "./gates.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
-const [flag, value, ...extra] = process.argv.slice(2);
-const variant = value ?? "committed";
-if (extra.length || (flag !== undefined && (flag !== "--variant" || !value)) ||
-    !["committed", "minified", "unminified", "wasm-opt"].includes(variant)) {
-  throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt]");
+export function measureWarm(entry, node) {
+  const workloads = {
+    M2: ["", "new Bash()"],
+    M3a: ["const bash = new Bash();", 'await bash.exec("echo hi")'],
+    M3aSync: ["const bash = new Bash();", 'bash.execSync("echo hi")'],
+    M_host: [
+      'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });',
+      'await host.exec("noop")',
+    ],
+  };
+  return Object.fromEntries(Object.entries(workloads).map(([name, [setup, op]]) => {
+    const assertNoop = name === "M_host"
+      ? [
+        'const result = await host.exec("noop");',
+        'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
+      ] : [];
+    const source = [
+      'const { Bash, defineCommand } = await import(' + entry + ');',
+      setup,
+      ...assertNoop,
+      'for (let i = 0; i < 20; i++) { ' + op + '; }',
+      'const samples = [];',
+      'const start = performance.now();',
+      'while (samples.length < 1000 || performance.now() - start < 2000) {',
+      '  const from = performance.now();',
+      '  ' + op + ';',
+      '  samples.push(performance.now() - from);',
+      '}',
+      'console.log(JSON.stringify(samples));',
+    ].join("\n");
+    return [name, JSON.parse(node(source))];
+  }));
 }
-if (variant === "wasm-opt") throw new Error("Binaryen is not pinned for the offline build");
-
-const root = join(repoRoot, "tmp", "bench-l2");
-const dest = join(root, variant);
-const scratch = join(root, "tmp");
-mkdirSync(scratch, { recursive: true });
-mkdirSync(dest, { recursive: true });
-const env = {
-  ...process.env, LC_ALL: "C", TZ: "UTC", TMPDIR: scratch,
-  npm_config_cache: join(repoRoot, "tmp", "npmcache"), npm_config_offline: "true",
-};
-// jco's child processes inherit the same environment as the benchmark children.
-Object.assign(process.env, env);
-
-const run = (bin, args) => execFileSync(bin, args, { cwd: repoRoot, env, encoding: "utf8", maxBuffer: 64 << 20 }).trim();
-const node = (source) => run(process.execPath, ["--input-type=module", "--eval", source]);
-const version = (bin) => run(bin, ["--version"]);
-const binaryenManifest = join(toolsDir(), "npm", "node_modules", "binaryen", "package.json");
-const toolVersion = existsSync(binaryenManifest) && JSON.parse(readFileSync(binaryenManifest, "utf8")).version;
-const environment = {
-  os: type(), kernel: release(), cpu: cpus()[0]?.model, node: process.version, rustc: version("rustc"),
-  wasmTools: version(toolBin("wasm-tools")),
-  binaryen: { installed: toolVersion || null, pinned: false },
-  commit: run("git", ["rev-parse", "HEAD"]), dirty: run("git", ["status", "--porcelain"]).length !== 0,
-};
-
-let tree = repoRoot;
-if (variant !== "committed") {
-  tree = join(dest, "tree");
-  rmSync(tree, { recursive: true, force: true });
-  mkdirSync(join(tree, "dist", "js"), { recursive: true });
-  cpSync(join(repoRoot, "host"), join(tree, "host"), { recursive: true });
-  cpSync(join(repoRoot, "package.json"), join(tree, "package.json"));
-  await transpileComponent(join(repoRoot, "dist", "kernel.component.wasm"), join(tree, "dist", "js", "kernel"), { minify: variant === "minified" });
-  cpSync(join(repoRoot, "dist", "js", "kernel", "commands.js"), join(tree, "dist", "js", "kernel", "commands.js"));
-}
-const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
-const assertion = [
-  'const { Bash } = await import(' + entry + ');',
-  'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
-  'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
-].join("\n");
-node(assertion);
-
-const coldCode = {
-  baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
-  "cold-import": [
-    'const start = performance.now();',
-    'await import(' + entry + ');',
-    'console.log(JSON.stringify({ tImport: performance.now() - start }));',
-  ].join("\n"),
-  "cold-full": [
-    'const start = performance.now();',
-    'const { Bash } = await import(' + entry + ');',
-    'const imported = performance.now();',
-    'const bash = new Bash();',
-    'const constructed = performance.now();',
-    'await bash.exec("echo hi");',
-    'const executed = performance.now();',
-    'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
-    '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
-  ].join("\n"),
-};
-
-const warmCode = [
-  'const { Bash, defineCommand } = await import(' + entry + ');',
-  'const bash = new Bash();',
-  'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });',
-  'const result = await host.exec("noop");',
-  'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
-  'const workloads = [',
-  '  ["M2", () => new Bash(), false],',
-  '  ["M3a", () => bash.exec("echo hi"), true],',
-  '  ["M3aSync", () => bash.execSync("echo hi"), false],',
-  '  ["M_host", () => host.exec("noop"), true],',
-  '];',
-  'const data = {};',
-  'for (const [name, fn, async] of workloads) {',
-  '  for (let i = 0; i < 20; i++) { if (async) await fn(); else fn(); }',
-  '  const samples = [];',
-  '  const start = performance.now();',
-  '  while (samples.length < 1000 || performance.now() - start < 2000) {',
-  '    const from = performance.now();',
-  '    if (async) await fn(); else fn();',
-  '    samples.push(performance.now() - from);',
-  '  }',
-  '  data[name] = samples;',
-  '}',
-  'console.log(JSON.stringify(data));',
-].join("\n");
 
 function shuffled(kinds, state) {
   for (let i = kinds.length - 1; i > 0; i--) {
@@ -127,7 +64,7 @@ function distribution(values) {
   };
 }
 
-function runSeries(seed) {
+function runSeries(seed, coldCode, entry, node) {
   const random = { seed };
   const cold = [];
   for (let i = 0; i < 30; i++) {
@@ -135,7 +72,7 @@ function runSeries(seed) {
     const samples = Object.fromEntries(order.map((kind) => [kind, JSON.parse(node(coldCode[kind]))]));
     cold.push({ order, samples });
   }
-  const warm = JSON.parse(node(warmCode));
+  const warm = measureWarm(entry, node);
   const full = (field) => distribution(cold.map(({ samples }) => samples["cold-full"][field]));
   const rss = {
     full: full("rss").median,
@@ -150,7 +87,7 @@ function runSeries(seed) {
   return { seed, cold, warm, rss, metrics };
 }
 
-function browserImports(entry) {
+function browserImports(tree, entry) {
   const reached = new Set();
   const visit = (file) => {
     const path = relative(tree, file);
@@ -165,46 +102,139 @@ function browserImports(entry) {
   return reached;
 }
 
-function size(path, from = tree) {
-  const bytes = readFileSync(join(from, path));
+function size(tree, path) {
+  const bytes = readFileSync(join(tree, path));
   return { raw: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length };
 }
 
-function sizes() {
-  const files = JSON.parse(run("npm", ["pack", "--offline", "--dry-run", "--json", "--ignore-scripts"]))[0].files
-    .map(({ path }) => path).filter((path) => /^(host\/|dist\/js\/).*\.js$/.test(path));
-  const browser = browserImports(join(tree, "host", "browser.js"));
+export function packedJsFiles(tree, env) {
+  const pack = execFileSync("npm", ["pack", "--offline", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: tree, env, encoding: "utf8",
+  });
+  return JSON.parse(pack)[0].files.map(({ path }) => path)
+    .filter((path) => /^(host\/|dist\/js\/).*\.js$/.test(path));
+}
+
+function sizes(tree, env) {
+  const files = packedJsFiles(tree, env);
+  const browser = browserImports(tree, join(tree, "host", "browser.js"));
   const groups = Object.fromEntries(["glue", "registry", "coreEntry", "nodeOnly"].map((name) => [name, {}]));
   for (const path of files) {
     const name = /^dist\/js\/kernel\/kernel(?:\.shims)?\.js$/.test(path) ? "glue" :
       path === "dist/js/kernel/commands.js" ? "registry" : browser.has(path) ? "coreEntry" : "nodeOnly";
-    groups[name][path] = size(path);
+    groups[name][path] = size(tree, path);
   }
   const sum = (values) => values.reduce((total, item) => ({
     raw: total.raw + item.raw, gzip: total.gzip + item.gzip,
   }), { raw: 0, gzip: 0 });
   return {
     wasm: {
-      loader: size("dist/js/kernel/kernel.core.wasm"),
-      core: size("dist/kernel.core.wasm", repoRoot),
-      component: size("dist/kernel.component.wasm", repoRoot),
+      loader: size(tree, "dist/js/kernel/kernel.core.wasm"),
+      core: size(tree, "dist/kernel.core.wasm"),
+      component: size(tree, "dist/kernel.component.wasm"),
     },
     js: {
       groups: Object.fromEntries(Object.entries(groups).map(([name, files]) => [name, { files, ...sum(Object.values(files)) }])),
-      ...sum(files.map((path) => size(path))),
+      ...sum(files.map((path) => size(tree, path))),
     },
   };
 }
 
-const runs = [];
-for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
-  console.error(variant + " repetition " + (runs.length + 1));
-  runs.push(runSeries(seed));
+async function main(args) {
+  const [flag, value, ...extra] = args;
+  const variant = value ?? "committed";
+  if (extra.length || (flag !== undefined && (flag !== "--variant" || !value)) ||
+      !["committed", "minified", "unminified", "wasm-opt"].includes(variant)) {
+    throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt]");
+  }
+
+  const root = join(repoRoot, "tmp", "bench-l2");
+  const dest = join(root, variant);
+  const scratch = join(root, "tmp");
+  mkdirSync(scratch, { recursive: true });
+  mkdirSync(dest, { recursive: true });
+  const env = {
+    ...process.env, LC_ALL: "C", TZ: "UTC", TMPDIR: scratch,
+    npm_config_cache: join(repoRoot, "tmp", "npmcache"), npm_config_offline: "true",
+  };
+  const wasmOpt = {
+    status: "not measured",
+    reason: "Binaryen is not pinned for offline core optimization",
+  };
+  if (variant === "wasm-opt") {
+    const result = { variant, ...wasmOpt };
+    writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  // jco's child processes inherit the same environment as the benchmark children.
+  Object.assign(process.env, env);
+
+  const run = (bin, args) => execFileSync(bin, args, { cwd: repoRoot, env, encoding: "utf8", maxBuffer: 64 << 20 }).trim();
+  const node = (source) => run(process.execPath, ["--input-type=module", "--eval", source]);
+  const version = (bin) => run(bin, ["--version"]);
+  const binaryenManifest = join(toolsDir(), "npm", "node_modules", "binaryen", "package.json");
+  const toolVersion = existsSync(binaryenManifest) && JSON.parse(readFileSync(binaryenManifest, "utf8")).version;
+  const environment = {
+    os: type(), kernel: release(), cpu: cpus()[0]?.model, node: process.version, rustc: version("rustc"),
+    wasmTools: version(toolBin("wasm-tools")),
+    binaryen: { installed: toolVersion || null, pinned: false },
+    commit: run("git", ["rev-parse", "HEAD"]),
+    dirty: run("git", ["--no-optional-locks", "status", "--porcelain"]).length !== 0,
+  };
+
+  let tree = repoRoot;
+  if (variant !== "committed") {
+    tree = join(dest, "tree");
+    rmSync(tree, { recursive: true, force: true });
+    mkdirSync(join(tree, "dist", "js"), { recursive: true });
+    for (const path of ["host", "types", "wit", "LICENSE", "DIVERGENCES.md", "package.json",
+      "dist/kernel.component.wasm", "dist/kernel.core.wasm"]) {
+      cpSync(join(repoRoot, path), join(tree, path), { recursive: true });
+    }
+    await transpileComponent(join(tree, "dist", "kernel.component.wasm"), join(tree, "dist", "js", "kernel"), { minify: variant === "minified" });
+    cpSync(join(repoRoot, "dist", "js", "kernel", "commands.js"), join(tree, "dist", "js", "kernel", "commands.js"));
+  }
+  const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
+  const assertion = [
+    'const { Bash } = await import(' + entry + ');',
+    'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
+    'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
+  ].join("\n");
+  node(assertion);
+
+  const coldCode = {
+    baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
+    "cold-import": [
+      'const start = performance.now();',
+      'await import(' + entry + ');',
+      'console.log(JSON.stringify({ tImport: performance.now() - start }));',
+    ].join("\n"),
+    "cold-full": [
+      'const start = performance.now();',
+      'const { Bash } = await import(' + entry + ');',
+      'const imported = performance.now();',
+      'const bash = new Bash();',
+      'const constructed = performance.now();',
+      'await bash.exec("echo hi");',
+      'const executed = performance.now();',
+      'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
+      '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
+    ].join("\n"),
+  };
+
+  const runs = [];
+  for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
+    console.error(variant + " repetition " + (runs.length + 1));
+    runs.push(runSeries(seed, coldCode, entry, node));
+  }
+  const summary = Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
+    const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
+    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
+  }));
+  const result = { variant, environment, wasmOpt, summary, sizes: sizes(tree, env), runs };
+  writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
+  console.log(JSON.stringify({ variant, wasmOpt, summary, sizes: result.sizes }, null, 2));
 }
-const summary = Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
-  const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
-  return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
-}));
-const result = { variant, environment, summary, sizes: sizes(), runs };
-writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
-console.log(JSON.stringify({ variant, summary, sizes: result.sizes }, null, 2));
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main(process.argv.slice(2));
