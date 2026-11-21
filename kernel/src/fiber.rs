@@ -222,7 +222,7 @@ pub struct Fiber {
     overlay: Env,
     pub(crate) cwd: KBytes,
     pub(crate) last_exit: i32,
-    last_arg: KBytes,
+    last_arg: Option<KRc<KBytes>>,
     params: KVec<KBytes>,
     args: KVec<KBytes>,
     epoch: u64,
@@ -287,7 +287,7 @@ impl Fiber {
                 if !o.replace_env {
                     env.copy_from(&shell.env)?;
                 }
-                env.copy_from(&overlay)?;
+                env.merge_shared(&overlay)?;
                 let opt_cwd = o.cwd.filter(|p| !p.is_empty());
                 let resolved = opt_cwd
                     .filter(|_| !shell.granted(G_HOST_FS) && !o.env.is_empty() && overlay.get(b"PWD").is_none())
@@ -303,11 +303,11 @@ impl Fiber {
                     cwd.try_extend_from_slice(path)?;
                 }
                 if opt_cwd.is_some() {
-                    env.set(
-                        b"PWD",
-                        overlay.get(b"PWD").map_or(cwd.as_slice(), |pwd| &pwd.value),
-                        true,
-                    )?;
+                    if let Some(pwd) = overlay.get(b"PWD") {
+                        env.replace_shared(b"PWD", pwd.value.clone(), true)?;
+                    } else {
+                        env.set(b"PWD", &cwd, true)?;
+                    }
                 }
                 args.try_reserve_exact(o.args.len())?;
                 for arg in o.args {
@@ -338,7 +338,7 @@ impl Fiber {
             kept: KVec::new_in(&live),
             vm: Vm::new(&live),
             params: KVec::new_in(&live),
-            last_arg: KBytes::new_in(&live),
+            last_arg: None,
             coverage: KVec::new_in(&live),
             shell,
             live,
@@ -937,18 +937,8 @@ impl Fiber {
             Fail::CallDepth(func) => {
                 let cap = lim[I_CALL_DEPTH];
                 let func = core::str::from_utf8(&func).unwrap_or("?");
-                let mut suffix = Diagnostic::new();
-                let _ = writeln!(suffix, ": maximum recursion depth ({cap}) exceeded, increase executionLimits.maxCallDepth");
-                let suffix = core::str::from_utf8(suffix.bytes()).unwrap_or_default();
-                let available = self.out_cap.saturating_sub(self.out_total) as usize;
-                let func_cap = available.saturating_sub(b"bash: ".len() + suffix.len());
-                let func = &func[..func.floor_char_boundary(func.len().min(func_cap))];
-                let _ = write!(text, "bash: {func}{suffix}");
-                let message = core::str::from_utf8(text.bytes()).unwrap_or_default();
-                let message = &message[..message.floor_char_boundary(message.len().min(available))];
-                self.finish_early(126, Status::LimitExceeded, Some("maxCallDepth"),
-                    Some(format_args!("{message}")));
-                return self.done_step();
+                let _ = writeln!(text, "bash: {func}: maximum recursion depth ({cap}) exceeded, increase executionLimits.maxCallDepth");
+                "maxCallDepth"
             }
             Fail::ExecDepth => {
                 let _ = writeln!(
@@ -1033,7 +1023,7 @@ impl Fiber {
         self.stdin.clear();
         self.body.clear();
         self.input_window = KBytes::new_in(&self.live);
-        self.last_arg = KBytes::new_in(&self.live);
+        self.last_arg = None;
         self.params = KVec::new_in(&self.live);
         self.args = KVec::new_in(&self.live);
         self.kept = KVec::new_in(&self.live);
@@ -1044,8 +1034,8 @@ impl Fiber {
             drop(env);
             env = reserve_scope(|| {
                 let mut env = Env::new_in(&self.scratch);
-                let _ = env.copy_from(&self.shell.env);
-                let _ = env.copy_from(&self.overlay);
+                let _ = env.merge_shared(&self.shell.env);
+                let _ = env.merge_shared(&self.overlay);
                 env
             });
         }

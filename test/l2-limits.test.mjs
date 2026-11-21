@@ -121,14 +121,51 @@ test("deep shell recursion saves its call frames on budgeted heap memory", async
   await usable(shell);
 });
 
-test("a recursion diagnostic uses only the remaining output budget", async () => {
-  const shell = new Bash({ executionLimits: { maxCallDepth: 1, maxOutputSize: 128 } });
+test("a recursion diagnostic survives a full, zero, or nearly spent output budget", async () => {
   const name = "f".repeat(1024);
-  const r = await shell.exec(`echo begin; ${name}() { ${name}; }; ${name}`);
-  assert.equal(r.exitCode, 126);
-  assert.equal(r.stdout, "begin\n");
   const suffix = ": maximum recursion depth (1) exceeded, increase executionLimits.maxCallDepth\n";
-  assert.equal(r.stderr, "bash: " + name.slice(0, 128 - r.stdout.length - 6 - suffix.length) + suffix);
+  for (const maxOutputSize of [0, 6, 20]) {
+    const shell = new Bash({ executionLimits: { maxCallDepth: 1, maxOutputSize } });
+    const prefix = maxOutputSize === 0 ? "" : "echo begin; ";
+    const r = await shell.exec(`${prefix}${name}() { ${name}; }; ${name}`);
+    assert.equal(r.exitCode, 126);
+    assert.equal(r.stdout, prefix ? "begin\n" : "");
+    assert.equal(r.stderr, "bash: " + name.slice(0, 128) + suffix);
+    assert.equal((await shell.exec("A=ok")).env.A, "ok");
+  }
+  const shell = bash({ executionLimits: { maxCallDepth: 1, maxOutputSize: 6 } });
+  const r = await shell.exec("__err 6; f() { f; }; f");
+  assert.equal(r.exitCode, 126);
+  assert.equal(r.stderr, "aaaaaa" + callDepth(1));
+  await usable(shell);
+});
+
+test("a recursion limit has a host diagnostic if no kernel stderr is available", async () => {
+  const shell = bash({ executionLimits: { maxCallDepth: 1 } }, {
+    onEngine({ Fiber }) {
+      Fiber.prototype.takeStderr = () => new Uint8Array();
+    },
+  });
+  const r = await shell.exec("f() { f; }; f");
+  assert.equal(r.exitCode, 126);
+  assert.equal(r.stderr, "bash: maxCallDepth exceeded\n");
+});
+
+test("an exec overlay can fit in the live budget as one copy", async () => {
+  const shell = new Bash({ executionLimits: { maxLiveBytes: 8_192, maxCallDepth: 1 } });
+  const payload = "x".repeat(5_000);
+  const opts = { env: { PAYLOAD: payload, A: "before" }, replaceEnv: true };
+  const r = await shell.exec("A=after; echo ok", opts);
+  assert.equal(r.exitCode, 0, r.stderr);
+  assert.equal(r.stdout, "ok\n");
+  assert.equal(r.env.PAYLOAD, payload);
+  assert.equal(r.env.A, "after");
+  assert.equal(r.env.PWD, undefined);
+  const early = await shell.exec("A=; f() { f; }; f", opts);
+  assert.equal(early.exitCode, 126);
+  assert.equal(early.stderr, callDepth(1));
+  assert.equal(early.env.PAYLOAD, payload);
+  assert.equal(early.env.A, "before");
   await usable(shell);
 });
 

@@ -237,7 +237,7 @@ function finish(x, er) {
   const env = envToObject(er.env);
   let stderr = decodeUtf8(concat(x.err));
   if (x.err.length === 0) {
-    if (er.status === "limit-exceeded" && er.limitName && er.limitName !== "maxCallDepth") {
+    if (er.status === "limit-exceeded" && er.limitName) {
       stderr = `bash: ${er.limitName} exceeded\n`;
     }
     if (er.status === "aborted" || er.status === "deadline") stderr = "bash: execution aborted\n";
