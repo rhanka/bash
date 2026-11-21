@@ -71,8 +71,8 @@ export function compare(expected, actual, path = "", out = []) {
     const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].sort();
     for (const k of keys) {
       const p = keyPath(path, k);
-      if (!(k in actual)) out.push({ path: p, message: `${p}: missing in actual, expected ${short(expected[k])}` });
-      else if (!(k in expected)) out.push({ path: p, message: `${p}: unexpected in actual, got ${short(actual[k])}` });
+      if (!Object.hasOwn(actual, k)) out.push({ path: p, message: `${p}: missing in actual, expected ${short(expected[k])}` });
+      else if (!Object.hasOwn(expected, k)) out.push({ path: p, message: `${p}: unexpected in actual, got ${short(actual[k])}` });
       else compare(expected[k], actual[k], p, out);
     }
   } else if (expected !== actual) {
