@@ -21,6 +21,7 @@ test("a generated file name that escapes the output directory is refused", () =>
 });
 
 const reallocProbe = "\n\t\ttry {\n\t\t\tWebAssembly.promising(exports1.cabi_realloc);\n\t\t} catch {}";
+const alias = "\n\tlet WebAssembly = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;\n";
 const postReturnProbe = (name) => {
   const ref = `exports1["cabi_post_${name}"]`;
   return `\n\t\ttry {\n\t\t\tWebAssembly.promising(${ref});\n\t\t} catch {\n\t\t\t${ref};\n\t\t}`;
@@ -31,16 +32,41 @@ test("the probe guard rejects a fixture with an unexpected count", () => {
 });
 
 test("the probe guard rejects a changed catch body even with the expected count", () => {
-  const fixture = Array.from({ length: 13 }, (_, index) => postReturnProbe(index)).join("") + reallocProbe;
+  const fixture = alias + Array.from({ length: 13 }, (_, index) => postReturnProbe(index)).join("") + reallocProbe;
   assert.equal(guardPromisingProbes(fixture), fixture.replaceAll(".promising(", ".promising?.("));
   const changed = fixture.replace("} catch {}", "} catch { throw new Error(); }");
   assert.throws(() => guardPromisingProbes(changed), /probe drift.*expected 1 realloc probes/);
 });
 
+for (const minify of [false, true]) {
+  const binding = minify ? "let r=n?.shim?.globals?.WebAssembly??globalThis.WebAssembly;" : alias;
+  const post = minify
+    ? (index) => {
+      const ref = "n[`cabi_post_" + index + "`]";
+      return "try{r.promising(" + ref + ")}catch{" + ref + "}";
+    }
+    : postReturnProbe;
+  const fixture = binding + Array.from({ length: 13 }, (_, index) => post(index)).join("") +
+    (minify ? "try{r.promising(n.cabi_realloc)}catch{}" : reallocProbe);
+
+  test(`the probe guard rejects alternate access and alias drift (minify=${minify})`, () => {
+    const options = { minify };
+    assert.equal(guardPromisingProbes(fixture, options), fixture.replaceAll(".promising(", ".promising?.("));
+    for (const extra of ["const { promising } = r;", "r[`promising`];", '"promising" in r;']) {
+      assert.throws(() => guardPromisingProbes(fixture + extra, options), /expected 14 references, found 15/);
+    }
+    assert.throws(() => guardPromisingProbes(fixture.replace("globalThis.WebAssembly", "globalThis.Other"), options),
+      /WebAssembly alias changed/);
+    assert.throws(() => guardPromisingProbes(fixture.replace(/catch\s*\{\}$/, "catch{throw 1}"), options),
+      /expected 1 realloc probes/);
+  });
+}
+
 test("shipped kernel glue contains exactly 14 guarded probes and no unguarded calls", () => {
   const source = readFileSync(new URL("../dist/js/kernel/kernel.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.promising\s*\(/);
   assert.equal([...source.matchAll(/\.promising\?\.\(/g)].length, 14);
+  assert.equal([...source.matchAll(/\bpromising\b/g)].length, 14);
 });
 
 const encode = (text) => new TextEncoder().encode(text);
