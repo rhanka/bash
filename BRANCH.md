@@ -66,10 +66,11 @@ Replace the bootstrap with the L2 shell, command registry, and `echo`. Replay th
 - Raw / gzip JS group sizes, unminified then shipping minified
   - Generated glue 565,157 / 63,043 B and 273,336 / 45,167 B.
   - Registry 54 / 74 B and 54 / 74 B.
-  - Other browser-reachable entry code 69,135 / 22,681 B and 69,135 / 22,681 B.
+  - Other browser-reachable entry code 69,100 / 22,669 B and 69,100 / 22,669 B.
   - Node-only 1,790 / 853 B and 1,790 / 853 B.
-  - All shipped JS (M6-js) 636,136 / 86,651 B and 344,315 / 68,775 B.
+  - All shipped JS (M6-js) 636,101 / 86,639 B and 344,280 / 68,763 B.
 - Binaryen 132.0.0 is unpinned for core optimization. The driver reports wasm-opt as not measured. Optimization flags and gain are pending. wasmOpt stays disabled.
+- Each warm workload runs in a separate process and collects garbage once after warmup. M6-js counts each candidate's packed JavaScript files.
 - Upstream-defect candidates are VFS quota exceptions, lone-surrogate echo escapes, and mixed valid and invalid UTF-8 output.
 - Coverage snapshots use defenseInDepth: false because the reference can block the first lazy command import.
 - The parser token cap requires a function call tree to reach the contain and normal command caps. The deadline suite advances the driver clock while retaining the profile values.
