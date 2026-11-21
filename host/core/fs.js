@@ -2,7 +2,7 @@
 import { decodeUtf8, concat, latin1FromBytes, unsafeBytesFromLatin1, utf8 } from "./bytes.js";
 import { NotSupportedError } from "./errors.js";
 import { Holder } from "./holder.js";
-import { DEFAULT_PROFILE, PROFILES, profileLimits } from "./limits.js";
+import { DEFAULT_PROFILE, PROFILES, profileLimits, stringLimit } from "./limits.js";
 import { resolvePath as resolve, dirname } from "./paths.js";
 
 const CHUNK = 1 << 20;
@@ -75,7 +75,7 @@ function toMs(v) {
  * object or a function (a lazy file). Missing parent directories are created.
  */
 export function addFiles(fs, files, base = "/") {
-  if (files === null || typeof files !== "object") throw new TypeError("initial files must be an object");
+  if (files === null || typeof files !== "object" || Array.isArray(files)) throw new TypeError("initial files must be an object");
   for (const [path, value] of Object.entries(files)) {
     const p = resolve(base, path);
     const dir = dirname(p);
@@ -115,10 +115,15 @@ export function createInMemoryFs(loader) {
     constructor(initialFiles, internal) {
       const hooks = internal?.hooks;
       const profile = internal?.profile ?? DEFAULT_PROFILE;
-      const maxBytes = internal?.maxFileSystemBytes ?? profileLimits(profile).maxFileSystemBytes;
+      const limits = profileLimits(profile);
+      const maxBytes = internal?.maxFileSystemBytes ?? limits.maxFileSystemBytes;
       const ceiling = hooks?.ceilingBytes ?? PROFILES[profile].ceiling;
       const holder = internal?.holder ?? new Holder(loader, hooks, ceiling);
-      const st = { holder, vfs: null, lazy: new Set(), owner: internal?.owner ?? null };
+      const st = {
+        holder, vfs: null, lazy: new Set(), owner: internal?.owner ?? null,
+        maxStringLength: internal?.maxStringLength ?? limits.maxStringLength,
+        headroom: PROFILES[profile].headroom,
+      };
       STATE.set(this, st);
       holder.stage((inst) => {
         st.vfs = inst.call(() => inst.engine.Vfs.create(BigInt(maxBytes)));
@@ -156,7 +161,15 @@ export function createInMemoryFs(loader) {
       return inst;
     }
 
+    #encodePath(path, syscall) {
+      const { holder, maxStringLength, headroom } = this.#state();
+      holder.instance?.check();
+      if (stringLimit([path], maxStringLength, headroom)) throw fsError("too-large", syscall, path);
+      return utf8(path);
+    }
+
     #writeSync(path, bytes, opts = {}, append = false) {
+      const encoded = this.#encodePath(path, "open");
       const holder = this.#state().holder;
       const run = (inst) => {
         let pos = 0;
@@ -168,7 +181,7 @@ export function createInMemoryFs(loader) {
             {
               tag: "write-file",
               val: {
-                path: utf8(path),
+                path: encoded,
                 data: chunk,
                 offset: append ? undefined : BigInt(pos),
                 truncate: first && !append,
@@ -194,7 +207,8 @@ export function createInMemoryFs(loader) {
     mkdirSync(path, options) {
       const p = resolve("/", path);
       const recursive = !!options?.recursive;
-      const run = (inst) => this.#unwrap(inst, { tag: "mkdir", val: { path: utf8(p), recursive, mode: undefined } }, "mkdir", p);
+      const encoded = this.#encodePath(p, "mkdir");
+      const run = (inst) => this.#unwrap(inst, { tag: "mkdir", val: { path: encoded, recursive, mode: undefined } }, "mkdir", p);
       const holder = this.#state().holder;
       if (holder.instance) {
         holder.instance.check();
@@ -230,12 +244,13 @@ export function createInMemoryFs(loader) {
     }
 
     async #readBytes(p) {
+      const encoded = this.#encodePath(p, "open");
       const inst = await this.#ready();
       if (this.#state().lazy.has(p)) throw new NotSupportedError(`lazy file ${p}: lazy files are not supported yet`);
       const chunks = [];
       let offset = 0n;
       for (;;) {
-        const d = this.#unwrap(inst, { tag: "read-file", val: { path: utf8(p), offset, len: CHUNK } }, "open", p);
+        const d = this.#unwrap(inst, { tag: "read-file", val: { path: encoded, offset, len: CHUNK } }, "open", p);
         chunks.push(d);
         offset += BigInt(d.length);
         if (d.length < CHUNK) break;
@@ -258,37 +273,37 @@ export function createInMemoryFs(loader) {
 
     async exists(path) {
       const inst = await this.#ready();
-      return this.#unwrap(inst, { tag: "exists", val: utf8(resolve("/", path)) }, "access", path);
+      return this.#unwrap(inst, { tag: "exists", val: this.#encodePath(resolve("/", path), "access") }, "access", path);
     }
 
     async stat(path) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      return statOut(this.#unwrap(inst, { tag: "stat", val: utf8(p) }, "stat", p));
+      return statOut(this.#unwrap(inst, { tag: "stat", val: this.#encodePath(p, "stat") }, "stat", p));
     }
 
     async lstat(path) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      return statOut(this.#unwrap(inst, { tag: "lstat", val: utf8(p) }, "lstat", p));
+      return statOut(this.#unwrap(inst, { tag: "lstat", val: this.#encodePath(p, "lstat") }, "lstat", p));
     }
 
     async mkdir(path, options) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      this.#unwrap(inst, { tag: "mkdir", val: { path: utf8(p), recursive: !!options?.recursive, mode: undefined } }, "mkdir", p);
+      this.#unwrap(inst, { tag: "mkdir", val: { path: this.#encodePath(p, "mkdir"), recursive: !!options?.recursive, mode: undefined } }, "mkdir", p);
     }
 
     async readdir(path) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      return this.#unwrap(inst, { tag: "read-dir", val: utf8(p) }, "scandir", p).map((e) => decodeUtf8(e.name));
+      return this.#unwrap(inst, { tag: "read-dir", val: this.#encodePath(p, "scandir") }, "scandir", p).map((e) => decodeUtf8(e.name));
     }
 
     async readdirWithFileTypes(path) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      return this.#unwrap(inst, { tag: "read-dir", val: utf8(p) }, "scandir", p).map((e) => ({
+      return this.#unwrap(inst, { tag: "read-dir", val: this.#encodePath(p, "scandir") }, "scandir", p).map((e) => ({
         name: decodeUtf8(e.name),
         isFile: e.kind === "file",
         isDirectory: e.kind === "directory",
@@ -299,7 +314,7 @@ export function createInMemoryFs(loader) {
     async rm(path, options) {
       const inst = await this.#ready();
       const p = resolve("/", path);
-      this.#unwrap(inst, { tag: "remove", val: { path: utf8(p), recursive: !!options?.recursive, force: !!options?.force } }, "rm", p);
+      this.#unwrap(inst, { tag: "remove", val: { path: this.#encodePath(p, "rm"), recursive: !!options?.recursive, force: !!options?.force } }, "rm", p);
     }
 
     resolvePath(base, path) {

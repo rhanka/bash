@@ -1,6 +1,19 @@
 // Limit profiles (EVOL Annex B), mirrored from kernel/src/limits.rs (a test compares the two tables).
 // Column order of the rows: normal, hardened, contain, micro.
+import { utf8Length } from "./bytes.js";
+
 const MIB = 1024 * 1024;
+
+/** Checks canonical-ABI string payloads before lowering, including fixed-size list records. */
+export function stringLimit(strings, maxStringLength, headroom, overhead = 0) {
+  let total = overhead;
+  for (const s of strings) {
+    const n = utf8Length(s);
+    if (n > maxStringLength) return "maxStringLength";
+    total += n;
+  }
+  if (total > Math.floor(headroom / 2)) return "headroom";
+}
 
 const ROWS = [
   ["maxSourceBytes", [64 * MIB, 8 * MIB, 8 * MIB, 4 * MIB]],

@@ -1,9 +1,9 @@
 // The facade: `Bash`, `defineCommand` and the name helpers (spec 7.1-7.3), bound to a loader.
 import { decodeUtf8, unsafeBytesFromLatin1, utf8 } from "./bytes.js";
-import { envToObject, execLoop, nullObject, runAsync, runSync } from "./driver.js";
+import { anySignal, envToObject, execLoop, nullObject, runAsync, runSync } from "./driver.js";
 import { AsyncCapabilityError, NotSupportedError } from "./errors.js";
 import { addFiles, createInMemoryFs, fsState } from "./fs.js";
-import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits } from "./limits.js";
+import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits, stringLimit } from "./limits.js";
 import { resolvePath } from "./paths.js";
 import { INTERNAL } from "./instance.js";
 
@@ -17,11 +17,11 @@ function fail(message) {
 }
 
 function isObject(v) {
-  return v !== null && typeof v === "object";
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 function stringRecord(v, what) {
-  if (!isObject(v) || Array.isArray(v)) throw fail(`${what} must be an object of strings`);
+  if (!isObject(v)) throw fail(`${what} must be an object of strings`);
   const out = [];
   for (const [k, val] of Object.entries(v)) {
     if (typeof val !== "string") throw fail(`${what}.${k} must be a string`);
@@ -87,8 +87,8 @@ export function createFacade(loader) {
       if (options.cwd !== undefined && typeof options.cwd !== "string") throw fail("cwd must be a string");
       const userEnv = options.env === undefined ? [] : stringRecord(options.env, "env");
       if (options.files !== undefined && !isObject(options.files)) throw fail("files must be an object");
-      const overrides = Object.assign(Object.create(null), options.executionLimits ?? {});
       if (options.executionLimits !== undefined && !isObject(options.executionLimits)) throw fail("executionLimits must be an object");
+      const overrides = Object.assign(Object.create(null), options.executionLimits ?? {});
       for (const alias of ["maxCallDepth", "maxCommandCount", "maxLoopIterations"]) {
         if (options[alias] !== undefined) {
           if (typeof options[alias] !== "number") throw fail(`${alias} must be a number`);
@@ -108,49 +108,45 @@ export function createFacade(loader) {
       customs.forEach(checkCommand);
 
       // The filesystem and its instance.
-      let rootFs;
-      let userFs = null;
       const given = options.fs;
-      const profileCeiling = hooks?.ceilingBytes ?? PROFILES[profile].ceiling;
-      if (given instanceof InMemoryFs) {
-        rootFs = given;
-      } else if (given !== undefined) {
-        if (!isObject(given)) throw fail("fs must be an object");
-        userFs = given;
-      }
-      let limits;
-      if (rootFs) {
-        const holder = fsState(rootFs).holder;
-        const effective = hooks?.ceilingBytes ?? Math.max(holder.ceiling, PROFILES[profile].ceiling);
-        limits = resolveLimits(profile, overrides, effective);
-        if (hooks?.ceilingBytes === undefined) holder.raiseCeiling(effective);
-      } else {
-        limits = resolveLimits(profile, overrides, profileCeiling);
-        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes });
-      }
-      const holder = fsState(rootFs).holder;
-
+      const sharedFs = given instanceof InMemoryFs ? given : null;
+      const userFs = sharedFs ? null : (given ?? null);
+      if (given !== undefined && !isObject(given)) throw fail("fs must be an object");
+      const sharedHolder = sharedFs && fsState(sharedFs).holder;
+      const effective = hooks?.ceilingBytes ?? Math.max(sharedHolder?.ceiling ?? 0, PROFILES[profile].ceiling);
+      const limits = resolveLimits(profile, overrides, effective);
       const hasFiles = options.files !== undefined;
       const cwd = options.cwd ?? (hasFiles ? "/" : "/home/user");
+      const initialCwd = resolvePath("/", cwd);
       const home = options.cwd === undefined && !hasFiles ? "/home/user" : "/";
-      const envEntries = initialEnvEntries(resolvePath("/", cwd), home, userEnv);
+      const envEntries = initialEnvEntries(initialCwd, home, userEnv);
+      const commands = customs.map((c) => c.name);
+      const headroom = PROFILES[profile].headroom;
+      const limit = stringLimit([...userEnv.flat(), ...commands, options.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
+        stringLimit([...envEntries.flat(), ...commands, initialCwd, ...Object.keys(overrides)], Infinity, headroom,
+          envEntries.length * 20 + commands.length * 8 + Object.keys(overrides).length * 16);
+      if (limit) throw new RangeError(`shell configuration: ${limit} exceeded`);
+
+      if (hooks?.ceilingBytes === undefined) sharedHolder?.raiseCeiling(effective);
+      const rootFs = sharedFs ?? new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength });
       const B = {
-        holder,
+        holder: fsState(rootFs).holder,
         rootFs,
         userFs,
         limits,
-        headroom: PROFILES[profile].headroom,
+        headroom,
         profile,
         commands: new Map(),
         sleep: options.sleep,
         fetch: options.fetch,
+        network: options.network,
         trace: options.trace,
         coverage: options.coverage,
         logger: options.logger,
         hooks,
         shell: null,
         initialEnv: nullObject(envEntries),
-        initialCwd: resolvePath("/", cwd),
+        initialCwd,
         resolveCommand: async (entry) => {
           if (entry.cmd) return entry.cmd;
           if (typeof entry.src.execute === "function") entry.cmd = entry.src;
@@ -179,19 +175,21 @@ export function createFacade(loader) {
         trace: typeof options.trace === "function",
         coverage: !!options.coverage,
       };
-      holder.stage((inst) => {
+      B.holder.stage((inst) => {
         B.shell = inst.call(() => inst.engine.Shell.create(fsState(rootFs).vfs, shellConfig));
       });
     }
 
     #register(B, c, stage) {
       checkCommand(c);
-      B.commands.set(c.name, { src: c, cmd: null, trusted: c.trusted });
       if (stage) {
+        const limit = stringLimit([c.name], B.limits.maxStringLength, B.headroom);
+        if (limit) throw new RangeError(`command name: ${limit} exceeded`);
         B.holder.stage((inst) => {
           inst.call(() => B.shell.registerCommand(c.name));
         });
       }
+      B.commands.set(c.name, { src: c, cmd: null, trusted: c.trusted });
     }
 
     get fs() {
@@ -282,7 +280,7 @@ export function createFacade(loader) {
       const B = STATE.get(this);
       if (typeof commandLine !== "string") throw fail("the command line must be a string");
       B.holder.instance?.check();
-      if (B.userFs || B.fetch || B.sleep || B.commands.size > 0 || B.hooks?.networkConfigured) throw new AsyncCapabilityError();
+      if (B.userFs || B.fetch || B.sleep || B.commands.size > 0 || B.network !== undefined) throw new AsyncCapabilityError();
       if (!B.holder.instance) throw new AsyncCapabilityError("execSync needs the kernel module: call `await Bash.precompile()` first");
       const o = this.#normalize(B, options, true);
       B.holder.instance.check();
@@ -293,11 +291,11 @@ export function createFacade(loader) {
 
     async #runChild(B, command, options, scope, parent) {
       const o = this.#normalize(B, options ?? {}, false);
-      const signals = [scope.signal, o.signal].filter(Boolean);
-      o.signal = signals.length === 2 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : signals[0];
+      o.signal = anySignal(scope.signal, o.signal);
       o.parent = parent;
       const r = await runAsync(execLoop(B, command, o));
-      return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode };
+      const { stdout, stderr, exitCode, stdoutKind } = r;
+      return stdoutKind === "bytes" ? { stdout, stderr, exitCode, stdoutKind } : { stdout, stderr, exitCode };
     }
 
     transform() {

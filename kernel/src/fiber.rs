@@ -20,11 +20,12 @@ pub struct ExecResult {
     pub status: Status,
     pub limit_name: Option<KString>,
     pub env: Env,
+    pub stdout_bytes: bool,
 }
 
 impl TryClone for ExecResult {
     fn try_clone(&self) -> MemResult<Self> {
-        Ok(ExecResult { exit: self.exit, status: self.status, limit_name: self.limit_name.try_clone()?, env: self.env.try_clone()? })
+        Ok(ExecResult { exit: self.exit, status: self.status, limit_name: self.limit_name.try_clone()?, env: self.env.try_clone()?, stdout_bytes: self.stdout_bytes })
     }
 }
 
@@ -71,6 +72,7 @@ pub enum CancelReason {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Chan {
     Stdout,
+    StdoutBytes,
     Stderr,
     Body,
 }
@@ -148,6 +150,7 @@ pub struct Fiber {
     out_total: u64,
     in_cap: u64,
     stdout: Out,
+    stdout_bytes: bool,
     stderr: Out,
     script: KBytes,
     pos: usize,
@@ -228,6 +231,7 @@ impl Fiber {
         Ok(Fiber {
             in_cap: shell.lim.vals[I_INPUT_BYTES],
             stdout: Out::new(&out_budget),
+            stdout_bytes: false,
             stderr: Out::new(&out_budget),
             stdin: KBytes::new_in(&live),
             body: KBytes::new_in(&live),
@@ -287,6 +291,7 @@ impl Fiber {
             Err(e) => return Err(self.map_out(e)),
         }
         self.out_total += s.len() as u64;
+        self.stdout_bytes |= c == Chan::StdoutBytes;
         Ok(())
     }
 
@@ -355,14 +360,34 @@ impl Fiber {
     }
 
     pub fn read_call_input(&mut self, epoch: u64, fd: u32, max: usize) -> Result<&[u8], CallError> {
+        let len = self.call_input_chunk(epoch, fd, max)?.len();
+        let start = self.stdin_pos.min(self.stdin.len());
+        self.consume_call_input(len);
+        Ok(&self.stdin[start..start + len])
+    }
+
+    pub(crate) fn call_input_chunk(&self, epoch: u64, fd: u32, max: usize) -> Result<&[u8], CallError> {
         self.check_call(epoch)?;
         if fd != 0 {
             return Ok(&[]);
         }
         let start = self.stdin_pos.min(self.stdin.len());
         let end = self.stdin.len().min(start.saturating_add(max));
-        self.stdin_pos = end;
         Ok(&self.stdin[start..end])
+    }
+
+    pub(crate) fn consume_call_input(&mut self, len: usize) {
+        self.stdin_pos += len;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn fail_abi_transfer(&mut self) {
+        self.finish(126, Status::LimitExceeded, Some("memory-ceiling"));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn stdout_bytes(&self) -> bool {
+        self.stdout_bytes
     }
 
     pub fn push_call_data(&mut self, epoch: u64, c: Chan, chunk: &[u8]) -> Result<(), CallError> {
@@ -410,7 +435,7 @@ impl Fiber {
 
     pub fn run(&mut self, fuel: u64) -> Step {
         self.fuel = fuel;
-        self.advance(fuel)
+        self.advance()
     }
 
     pub fn resume(&mut self, epoch: u64, o: Outcome<'_>) -> Result<Step, CallError> {
@@ -429,15 +454,14 @@ impl Fiber {
         if let Some(e) = self.call_env.take() {
             self.env = e;
         }
-        let fuel = self.fuel;
-        Ok(self.advance(fuel))
+        Ok(self.advance())
     }
 
     fn done_step(&self) -> Step {
         match &self.result {
             Some(r) => match r.try_clone() {
                 Ok(c) => Step::Done(c),
-                Err(_) => Step::Done(ExecResult { exit: r.exit, status: r.status, limit_name: None, env: Env::new_in(&self.scratch) }),
+                Err(_) => Step::Done(ExecResult { exit: r.exit, status: r.status, limit_name: None, env: Env::new_in(&self.scratch), stdout_bytes: r.stdout_bytes }),
             },
             None => Step::OutOfFuel,
         }
@@ -447,7 +471,7 @@ impl Fiber {
         matches!(self.st, St::Done)
     }
 
-    fn advance(&mut self, mut fuel: u64) -> Step {
+    fn advance(&mut self) -> Step {
         loop {
             match self.st {
                 St::Done => return self.done_step(),
@@ -468,12 +492,12 @@ impl Fiber {
                 self.finish(exit, Status::Completed, None);
                 return self.done_step();
             };
-            if fuel == 0 {
+            if self.fuel == 0 {
                 // Not started: put the line back.
                 self.pos = a;
                 return Step::OutOfFuel;
             }
-            fuel -= 1;
+            self.fuel -= 1;
             let script = core::mem::replace(&mut self.script, KBytes::new_in(&self.scratch));
             let flow = self.exec_line(&script[a..b]);
             self.script = script;
@@ -677,7 +701,7 @@ impl Fiber {
         let mut code = KString::new_in(&self.scratch);
         let _ = write!(code, "{exit}");
         let _ = env.set(b"?", code.as_str().as_bytes(), false);
-        self.result = Some(ExecResult { exit, status, limit_name, env });
+        self.result = Some(ExecResult { exit, status, limit_name, env, stdout_bytes: self.stdout_bytes });
         self.st = St::Done;
         // Release what the exec held, so that the instance stays usable.
         self.script = KBytes::new_in(&self.scratch);
@@ -694,7 +718,7 @@ impl Fiber {
         }
         match self.done_step() {
             Step::Done(r) => r,
-            _ => ExecResult { exit: 1, status: Status::Completed, limit_name: None, env: Env::new_in(&self.scratch) },
+            _ => ExecResult { exit: 1, status: Status::Completed, limit_name: None, env: Env::new_in(&self.scratch), stdout_bytes: self.stdout_bytes },
         }
     }
 

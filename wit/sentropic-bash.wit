@@ -35,11 +35,13 @@ interface types {
     bypass-custom: option<string>,         // run the built-in of that name, not the custom command
   }
   enum exec-status { completed, limit-exceeded, aborted, deadline }
+  enum stdout-kind { text, bytes }
   record exec-result {
     exit-code: s32,
     status: exec-status,
     limit-name: option<string>,
     env: list<env-var>,
+    stdout-kind: stdout-kind,
   }
 
   enum node-kind { file, directory, symlink }
@@ -104,7 +106,7 @@ interface types {
   record pending-call { epoch: u64, req: host-req }
   variant step { done(exec-result), out-of-fuel, host-call(pending-call) }
   enum cancel-reason { aborted, deadline, limit }
-  enum out-channel { stdout, stderr, body }
+  enum out-channel { stdout, stderr, body, stdout-bytes }
 
   enum kernel-error-code { not-configured, already-configured, ceiling, invalid-config,
                            stale-epoch, bad-state, too-large, denied }

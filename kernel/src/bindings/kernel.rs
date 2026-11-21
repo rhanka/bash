@@ -219,16 +219,52 @@ pub mod exports {
           }
         }
 
+        #[repr(u8)]
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        pub enum StdoutKind {
+          Text,
+          Bytes,
+        }
+        impl ::core::fmt::Debug for StdoutKind {
+          fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self {
+              StdoutKind::Text => {
+                f.debug_tuple("StdoutKind::Text").finish()
+              }
+              StdoutKind::Bytes => {
+                f.debug_tuple("StdoutKind::Bytes").finish()
+              }
+            }
+          }
+        }
+
+        impl StdoutKind{
+          #[doc(hidden)]
+          pub unsafe fn _lift(val: u8) -> StdoutKind{
+            if !cfg!(debug_assertions) {
+              return unsafe { ::core::mem::transmute(val) };
+            }
+
+            match val {
+              0 => StdoutKind::Text,
+              1 => StdoutKind::Bytes,
+
+              _ => panic!("invalid enum discriminant"),
+            }
+          }
+        }
+
         #[derive(Clone)]
         pub struct ExecResult {
           pub exit_code: i32,
           pub status: ExecStatus,
           pub limit_name: ::core::option::Option<_rt::String>,
           pub env: _rt::Vec::<EnvVar>,
+          pub stdout_kind: StdoutKind,
         }
         impl ::core::fmt::Debug for ExecResult {
           fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_struct("ExecResult").field("exit-code", &self.exit_code).field("status", &self.status).field("limit-name", &self.limit_name).field("env", &self.env).finish()
+            f.debug_struct("ExecResult").field("exit-code", &self.exit_code).field("status", &self.status).field("limit-name", &self.limit_name).field("env", &self.env).field("stdout-kind", &self.stdout_kind).finish()
           }
         }
         #[repr(u8)]
@@ -1005,6 +1041,7 @@ pub mod exports {
           Stdout,
           Stderr,
           Body,
+          StdoutBytes,
         }
         impl ::core::fmt::Debug for OutChannel {
           fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
@@ -1017,6 +1054,9 @@ pub mod exports {
               }
               OutChannel::Body => {
                 f.debug_tuple("OutChannel::Body").finish()
+              }
+              OutChannel::StdoutBytes => {
+                f.debug_tuple("OutChannel::StdoutBytes").finish()
               }
             }
           }
@@ -1033,6 +1073,7 @@ pub mod exports {
               0 => OutChannel::Stdout,
               1 => OutChannel::Stderr,
               2 => OutChannel::Body,
+              3 => OutChannel::StdoutBytes,
 
               _ => panic!("invalid enum discriminant"),
             }
@@ -3000,7 +3041,7 @@ use super::super::super::super::exports::sentropic::bash::types::Step as V69;
 match result0 {
   V69::Done(e) => {
     *ptr1.add(0).cast::<u8>() = (0i32) as u8;
-    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = e;
+    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, stdout_kind:stdout_kind2, } = e;
     *ptr1.add(8).cast::<i32>() = _rt::as_i32(exit_code2);
     *ptr1.add(12).cast::<u8>() = (status2.clone() as i32) as u8;
     match limit_name2 {
@@ -3043,6 +3084,7 @@ match result0 {
     }
     *ptr1.add(16+4*::core::mem::size_of::<*const u8>()).cast::<usize>() = len7;
     *ptr1.add(16+3*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result7;
+    *ptr1.add(16+5*::core::mem::size_of::<*const u8>()).cast::<u8>() = (stdout_kind2.clone() as i32) as u8;
   },
   V69::OutOfFuel=> {
     {
@@ -4185,7 +4227,7 @@ match result0 {
         match e {
           V146::Done(e) => {
             *ptr78.add(8).cast::<u8>() = (0i32) as u8;
-            let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code79, status:status79, limit_name:limit_name79, env:env79, } = e;
+            let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code79, status:status79, limit_name:limit_name79, env:env79, stdout_kind:stdout_kind79, } = e;
             *ptr78.add(16).cast::<i32>() = _rt::as_i32(exit_code79);
             *ptr78.add(20).cast::<u8>() = (status79.clone() as i32) as u8;
             match limit_name79 {
@@ -4228,6 +4270,7 @@ match result0 {
             }
             *ptr78.add(24+4*::core::mem::size_of::<*const u8>()).cast::<usize>() = len84;
             *ptr78.add(24+3*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result84;
+            *ptr78.add(24+5*::core::mem::size_of::<*const u8>()).cast::<u8>() = (stdout_kind79.clone() as i32) as u8;
           },
           V146::OutOfFuel=> {
             {
@@ -5245,7 +5288,7 @@ _rt::run_ctors_once();let result0 = {
   T_::cancel(FiberBorrow::lift(core::ptr::with_exposed_provenance(arg0 as u32 as usize)).get(), super::super::super::super::exports::sentropic::bash::types::CancelReason::_lift(arg1 as u8))
 };
 let ptr1 = (&raw mut _RET_AREA.0).cast::<u8>();
-let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, } = result0;
+let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code2, status:status2, limit_name:limit_name2, env:env2, stdout_kind:stdout_kind2, } = result0;
 *ptr1.add(0).cast::<i32>() = _rt::as_i32(exit_code2);
 *ptr1.add(4).cast::<u8>() = (status2.clone() as i32) as u8;
 match limit_name2 {
@@ -5288,6 +5331,7 @@ for (i, e) in vec7.into_iter().enumerate() {
 }
 *ptr1.add(8+4*::core::mem::size_of::<*const u8>()).cast::<usize>() = len7;
 *ptr1.add(8+3*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result7;
+*ptr1.add(8+5*::core::mem::size_of::<*const u8>()).cast::<u8>() = (stdout_kind2.clone() as i32) as u8;
 ptr1
 } }
 #[doc(hidden)]
@@ -5802,7 +5846,7 @@ match result90 {
   Ok(e) => { {
     *ptr91.add(0).cast::<u8>() = (0i32) as u8;
     let super::super::super::super::exports::sentropic::bash::types::OneshotResult{ outcome:outcome92, stdout:stdout92, stderr:stderr92, changed:changed92, removed:removed92, } = e;
-    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code93, status:status93, limit_name:limit_name93, env:env93, } = outcome92;
+    let super::super::super::super::exports::sentropic::bash::types::ExecResult{ exit_code:exit_code93, status:status93, limit_name:limit_name93, env:env93, stdout_kind:stdout_kind93, } = outcome92;
     *ptr91.add(::core::mem::size_of::<*const u8>()).cast::<i32>() = _rt::as_i32(exit_code93);
     *ptr91.add(4+1*::core::mem::size_of::<*const u8>()).cast::<u8>() = (status93.clone() as i32) as u8;
     match limit_name93 {
@@ -5845,18 +5889,19 @@ match result90 {
     }
     *ptr91.add(8+5*::core::mem::size_of::<*const u8>()).cast::<usize>() = len98;
     *ptr91.add(8+4*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result98;
+    *ptr91.add(8+6*::core::mem::size_of::<*const u8>()).cast::<u8>() = (stdout_kind93.clone() as i32) as u8;
     let vec99 = <_ as Into<_rt::Vec<_>>>::into(stdout92).into_boxed_slice();
     let ptr99 = vec99.as_ptr().cast::<u8>();
     let len99 = vec99.len();
     ::core::mem::forget(vec99);
-    *ptr91.add(8+7*::core::mem::size_of::<*const u8>()).cast::<usize>() = len99;
-    *ptr91.add(8+6*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr99.cast_mut();
+    *ptr91.add(8+8*::core::mem::size_of::<*const u8>()).cast::<usize>() = len99;
+    *ptr91.add(8+7*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr99.cast_mut();
     let vec100 = <_ as Into<_rt::Vec<_>>>::into(stderr92).into_boxed_slice();
     let ptr100 = vec100.as_ptr().cast::<u8>();
     let len100 = vec100.len();
     ::core::mem::forget(vec100);
-    *ptr91.add(8+9*::core::mem::size_of::<*const u8>()).cast::<usize>() = len100;
-    *ptr91.add(8+8*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr100.cast_mut();
+    *ptr91.add(8+10*::core::mem::size_of::<*const u8>()).cast::<usize>() = len100;
+    *ptr91.add(8+9*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = ptr100.cast_mut();
     let vec104 = changed92;
     let len104 = vec104.len();
     let layout104 = _rt::alloc::Layout::from_size_align(vec104.len() * (5*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>()).unwrap();
@@ -5880,8 +5925,8 @@ match result90 {
         *base.add(4*::core::mem::size_of::<*const u8>()).cast::<i32>() = _rt::as_i32(mode101);
       }
     }
-    *ptr91.add(8+11*::core::mem::size_of::<*const u8>()).cast::<usize>() = len104;
-    *ptr91.add(8+10*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result104;
+    *ptr91.add(8+12*::core::mem::size_of::<*const u8>()).cast::<usize>() = len104;
+    *ptr91.add(8+11*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result104;
     let vec106 = removed92;
     let len106 = vec106.len();
     let layout106 = _rt::alloc::Layout::from_size_align(vec106.len() * (2*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>()).unwrap();
@@ -5897,8 +5942,8 @@ match result90 {
         *base.add(0).cast::<*mut u8>() = ptr105.cast_mut();
       }
     }
-    *ptr91.add(8+13*::core::mem::size_of::<*const u8>()).cast::<usize>() = len106;
-    *ptr91.add(8+12*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result106;
+    *ptr91.add(8+14*::core::mem::size_of::<*const u8>()).cast::<usize>() = len106;
+    *ptr91.add(8+13*::core::mem::size_of::<*const u8>()).cast::<*mut u8>() = result106;
   } },
   Err(e) => { {
     *ptr91.add(0).cast::<u8>() = (1i32) as u8;
@@ -5948,18 +5993,18 @@ pub unsafe fn __post_return_exec_oneshot<T_: Guest>(arg0: *mut u8,) { unsafe {
         }
       }
       _rt::cabi_dealloc(base12, len12 * (5*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>());
-      let l13 = *arg0.add(8+6*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
-      let l14 = *arg0.add(8+7*::core::mem::size_of::<*const u8>()).cast::<usize>();
+      let l13 = *arg0.add(8+7*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+      let l14 = *arg0.add(8+8*::core::mem::size_of::<*const u8>()).cast::<usize>();
       let base15 = l13;
       let len15 = l14;
       _rt::cabi_dealloc(base15, len15 * 1, 1);
-      let l16 = *arg0.add(8+8*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
-      let l17 = *arg0.add(8+9*::core::mem::size_of::<*const u8>()).cast::<usize>();
+      let l16 = *arg0.add(8+9*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+      let l17 = *arg0.add(8+10*::core::mem::size_of::<*const u8>()).cast::<usize>();
       let base18 = l16;
       let len18 = l17;
       _rt::cabi_dealloc(base18, len18 * 1, 1);
-      let l19 = *arg0.add(8+10*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
-      let l20 = *arg0.add(8+11*::core::mem::size_of::<*const u8>()).cast::<usize>();
+      let l19 = *arg0.add(8+11*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+      let l20 = *arg0.add(8+12*::core::mem::size_of::<*const u8>()).cast::<usize>();
       let base27 = l19;
       let len27 = l20;
       for i in 0..len27 {
@@ -5978,8 +6023,8 @@ pub unsafe fn __post_return_exec_oneshot<T_: Guest>(arg0: *mut u8,) { unsafe {
         }
       }
       _rt::cabi_dealloc(base27, len27 * (5*::core::mem::size_of::<*const u8>()), ::core::mem::size_of::<*const u8>());
-      let l28 = *arg0.add(8+12*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
-      let l29 = *arg0.add(8+13*::core::mem::size_of::<*const u8>()).cast::<usize>();
+      let l28 = *arg0.add(8+13*::core::mem::size_of::<*const u8>()).cast::<*mut u8>();
+      let l29 = *arg0.add(8+14*::core::mem::size_of::<*const u8>()).cast::<usize>();
       let base33 = l28;
       let len33 = l29;
       for i in 0..len33 {
@@ -6905,9 +6950,9 @@ pub(crate) use __export_kernel_impl as export;
 #[unsafe(link_section = "component-type:wit-bindgen:0.63.0:sentropic:bash@0.1.0-draft:kernel:encoded world")]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5732] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe7+\x01A\x02\x01A\x16\
-\x01B\x87\x01\x01p}\x04\0\x05bytes\x03\0\0\x01m\x04\x05micro\x07contain\x08harde\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 5794] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa5,\x01A\x02\x01A\x16\
+\x01B\x89\x01\x01p}\x04\0\x05bytes\x03\0\0\x01m\x04\x05micro\x07contain\x08harde\
 ned\x06normal\x04\0\x07profile\x03\0\x02\x01r\x02\x04names\x05valuew\x04\0\x0eli\
 mit-override\x03\0\x04\x01p\x05\x01r\x02\x07profile\x03\x09overrides\x06\x04\0\x06\
 limits\x03\0\x07\x01n\x06\x07host-fs\x07network\x0areal-clock\x0areal-sleep\x07e\
@@ -6921,111 +6966,113 @@ nfig\x03\0\x16\x01r\x02\x0butf16-unitsw\x0autf8-bytesw\x04\0\x0fscript-overflow\
 \0\x18\x01k\x19\x01p\x01\x01ks\x01r\x08\x06script\x01\x0fscript-overflow\x1a\x04\
 args\x1b\x03env\x13\x0breplace-env\x7f\x03cwd\x14\x0araw-script\x7f\x0dbypass-cu\
 stom\x1c\x04\0\x09exec-opts\x03\0\x1d\x01m\x04\x09completed\x0elimit-exceeded\x07\
-aborted\x08deadline\x04\0\x0bexec-status\x03\0\x1f\x01r\x04\x09exit-codez\x06sta\
-tus\x20\x0alimit-name\x1c\x03env\x13\x04\0\x0bexec-result\x03\0!\x01m\x03\x04fil\
-e\x09directory\x07symlink\x04\0\x09node-kind\x03\0#\x01r\x06\x04kind$\x04sizew\x04\
-modey\x08mtime-msx\x03devw\x03inow\x04\0\x04stat\x03\0%\x01r\x02\x04name\x01\x04\
-kind$\x04\0\x09dir-entry\x03\0'\x01r\x02\x04path\x01\x04info&\x04\0\x0awalk-entr\
-y\x03\0)\x01m\x0f\x09not-found\x06exists\x0dnot-directory\x0cis-directory\x09not\
--empty\x0apermission\x07invalid\x09link-loop\x09too-large\x08no-space\x04busy\x0c\
-cross-device\x09read-only\x0bunsupported\x02io\x04\0\x0dfs-error-code\x03\0+\x01\
-r\x02\x04code,\x04path\x01\x04\0\x08fs-error\x03\0-\x01r\x03\x04path\x01\x06offs\
-etw\x03leny\x04\0\x08read-req\x03\0/\x01kw\x01ky\x01kx\x01r\x06\x04path\x01\x04d\
-ata\x01\x06offset1\x08truncate\x7f\x04mode2\x08mtime-ms3\x04\0\x09write-req\x03\0\
-4\x01r\x03\x04path\x01\x04modey\x08mtime-ms3\x04\0\x08lazy-req\x03\06\x01r\x03\x04\
-path\x01\x04modey\x09directory\x7f\x04\0\x0acreate-req\x03\08\x01r\x03\x04path\x01\
-\x09recursive\x7f\x04mode2\x04\0\x09mkdir-req\x03\0:\x01r\x03\x04path\x01\x09rec\
-ursive\x7f\x05force\x7f\x04\0\x0aremove-req\x03\0<\x01r\x03\x06source\x01\x06tar\
-get\x01\x09recursive\x7f\x04\0\x08pair-req\x03\0>\x01r\x02\x04path\x01\x04modey\x04\
-\0\x09chmod-req\x03\0@\x01r\x03\x04path\x01\x08atime-msx\x08mtime-msx\x04\0\x0au\
-times-req\x03\0B\x01r\x03\x04root\x01\x09max-depthy\x0bmax-entriesy\x04\0\x08wal\
-k-req\x03\0D\x01q\x15\x04stat\x01\x01\0\x05lstat\x01\x01\0\x06exists\x01\x01\0\x09\
-read-link\x01\x01\0\x09real-path\x01\x01\0\x08read-dir\x01\x01\0\x0dread-dir-plu\
-s\x01\x01\0\x04walk\x01\xc5\0\0\x09all-paths\0\0\x09read-file\x010\0\x0awrite-fi\
-le\x015\0\x0awrite-lazy\x017\0\x10create-exclusive\x019\0\x05mkdir\x01;\0\x06rem\
-ove\x01=\0\x04copy\x01?\0\x06rename\x01?\0\x07symlink\x01?\0\x09hard-link\x01?\0\
-\x05chmod\x01\xc1\0\0\x06utimes\x01\xc3\0\0\x04\0\x05fs-op\x03\0F\x01p(\x01p*\x01\
-q\x08\x04none\0\0\x04flag\x01\x7f\0\x04info\x01&\0\x04path\x01\x01\0\x04data\x01\
-\x01\0\x05paths\x01\x1b\0\x07entries\x01\xc8\0\0\x0centries-plus\x01\xc9\0\0\x04\
-\0\x05fs-ok\x03\0J\x01j\x01\xcb\0\x01.\x04\0\x09fs-result\x03\0L\x01p\xc7\0\x01r\
-\x02\x08mount-idy\x03ops\xce\0\x04\0\x0cfs-batch-req\x03\0O\x01r\x02\x04path\x01\
-\x07removed\x7f\x04\0\x0cchanged-file\x03\0Q\x01r\x02\x04names\x05value\x01\x04\0\
-\x06header\x03\0S\x01p\x0e\x01r\x07\x04names\x04args\x1b\x03cwd\x01\x03env\x13\x03\
-fds\xd5\0\x09input-lenw\x08xpg-echo\x7f\x04\0\x0ccommand-call\x03\0V\x01p\xd4\0\x01\
-r\x08\x06methods\x03urls\x07headers\xd8\0\x09input-lenw\x10follow-redirects\x7f\x0d\
-max-redirects2\x0atimeout-msy\x12max-response-bytesw\x04\0\x09fetch-req\x03\0Y\x01\
-r\x04\x03urls\x06status{\x0bstatus-texts\x07headers\xd8\0\x04\0\x0credirect-hop\x03\
-\0[\x01p\xdc\0\x01r\x05\x06status{\x0bstatus-texts\x03urls\x07headers\xd8\0\x0er\
-edirect-chain\xdd\0\x04\0\x0afetch-resp\x03\0^\x01m\x07\x0daccess-denied\x12meth\
-od-not-allowed\x0fredirect-denied\x12too-many-redirects\x12response-too-large\x07\
-timeout\x07network\x04\0\x0enet-error-code\x03\0`\x01r\x02\x04code\xe1\0\x06deta\
-il\x01\x04\0\x09net-error\x03\0b\x01r\x02\x07wall-msx\x0cmonotonic-nsw\x04\0\x0d\
-clock-reading\x03\0d\x01q\x08\x08fs-batch\x01\xd0\0\0\x09lazy-file\x01\x01\0\x0e\
-custom-command\x01\xd7\0\0\x05fetch\x01\xda\0\0\x05sleep\x01w\0\x05clock\0\0\x07\
-entropy\x01y\0\x0btrace-clock\0\0\x04\0\x08host-req\x03\0f\x01p\xcd\0\x01q\x0a\x02\
-fs\x01\xe8\0\0\x04data\x01\x01\0\x0ccommand-exit\x01z\0\x07fetched\x01\xdf\0\0\x05\
-clock\x01\xe5\0\0\x09completed\0\0\x06denied\0\0\x0elimit-exceeded\x01s\0\x0anet\
--failed\x01\xe3\0\0\x06failed\x01\x01\0\x04\0\x0chost-outcome\x03\0i\x01r\x02\x05\
-epochw\x03req\xe7\0\x04\0\x0cpending-call\x03\0k\x01q\x03\x04done\x01\"\0\x0bout\
--of-fuel\0\0\x09host-call\x01\xec\0\0\x04\0\x04step\x03\0m\x01m\x03\x07aborted\x08\
-deadline\x05limit\x04\0\x0dcancel-reason\x03\0o\x01m\x03\x06stdout\x06stderr\x04\
-body\x04\0\x0bout-channel\x03\0q\x01m\x08\x0enot-configured\x12already-configure\
-d\x07ceiling\x0einvalid-config\x0bstale-epoch\x09bad-state\x09too-large\x06denie\
-d\x04\0\x11kernel-error-code\x03\0s\x01r\x02\x04code\xf4\0\x06details\x04\0\x0ck\
-ernel-error\x03\0u\x01r\x03\x04usedw\x07ceilingw\x0ahigh-waterw\x04\0\x0cmemory-\
-usage\x03\0w\x01q\x02\x06number\x01u\0\x04text\x01\x01\0\x04\0\x0btrace-value\x03\
-\0y\x01r\x02\x03keys\x05value\xfa\0\x04\0\x0ctrace-detail\x03\0{\x01p\xfc\0\x01r\
-\x04\x08categorys\x04names\x0bduration-msu\x07details\xfd\0\x04\0\x0btrace-event\
-\x03\0~\x01r\x03\x04path\x01\x04data\x01\x04modey\x04\0\x0coneshot-file\x03\0\x80\
-\x01\x01p\x81\x01\x01r\x05\x05files\x82\x01\x06config\x17\x04opts\x1e\x05stdin\x01\
-\x04fuelw\x04\0\x0boneshot-req\x03\0\x83\x01\x01r\x05\x07outcome\"\x06stdout\x01\
-\x06stderr\x01\x07changed\x82\x01\x07removed\x1b\x04\0\x0eoneshot-result\x03\0\x85\
-\x01\x04\0\x20sentropic:bash/types@0.1.0-draft\x05\0\x02\x03\0\0\x05bytes\x02\x03\
-\0\0\x07env-var\x02\x03\0\0\x0cshell-config\x02\x03\0\0\x09exec-opts\x02\x03\0\0\
-\x0bexec-result\x02\x03\0\0\x04step\x02\x03\0\0\x0chost-outcome\x02\x03\0\0\x0bt\
-race-event\x02\x03\0\0\x0dcancel-reason\x02\x03\0\0\x0bout-channel\x02\x03\0\0\x05\
-fs-op\x02\x03\0\0\x09fs-result\x02\x03\0\0\x08fs-error\x02\x03\0\0\x0cchanged-fi\
-le\x02\x03\0\0\x0ckernel-error\x02\x03\0\0\x0cmemory-usage\x02\x03\0\0\x0bonesho\
-t-req\x02\x03\0\0\x0eoneshot-result\x01Bt\x02\x03\x02\x01\x01\x04\0\x05bytes\x03\
-\0\0\x02\x03\x02\x01\x02\x04\0\x07env-var\x03\0\x02\x02\x03\x02\x01\x03\x04\0\x0c\
-shell-config\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x09exec-opts\x03\0\x06\x02\x03\x02\
-\x01\x05\x04\0\x0bexec-result\x03\0\x08\x02\x03\x02\x01\x06\x04\0\x04step\x03\0\x0a\
-\x02\x03\x02\x01\x07\x04\0\x0chost-outcome\x03\0\x0c\x02\x03\x02\x01\x08\x04\0\x0b\
-trace-event\x03\0\x0e\x02\x03\x02\x01\x09\x04\0\x0dcancel-reason\x03\0\x10\x02\x03\
-\x02\x01\x0a\x04\0\x0bout-channel\x03\0\x12\x02\x03\x02\x01\x0b\x04\0\x05fs-op\x03\
-\0\x14\x02\x03\x02\x01\x0c\x04\0\x09fs-result\x03\0\x16\x02\x03\x02\x01\x0d\x04\0\
-\x08fs-error\x03\0\x18\x02\x03\x02\x01\x0e\x04\0\x0cchanged-file\x03\0\x1a\x02\x03\
-\x02\x01\x0f\x04\0\x0ckernel-error\x03\0\x1c\x02\x03\x02\x01\x10\x04\0\x0cmemory\
--usage\x03\0\x1e\x02\x03\x02\x01\x11\x04\0\x0boneshot-req\x03\0\x20\x02\x03\x02\x01\
-\x12\x04\0\x0eoneshot-result\x03\0\"\x04\0\x03vfs\x03\x01\x04\0\x05shell\x03\x01\
-\x04\0\x05fiber\x03\x01\x01i$\x01j\x01'\x01\x1d\x01@\x01\x09max-bytesw\0(\x04\0\x12\
-[static]vfs.create\x01)\x01h$\x01@\x02\x04self*\x03req\x15\0\x17\x04\0\x0e[metho\
-d]vfs.op\x01+\x01j\0\x01\x19\x01@\x03\x04self*\x04path\x01\x06source*\0,\x04\0\x15\
-[method]vfs.mount-vfs\x01-\x01@\x03\x04self*\x04path\x01\x08mount-idy\0,\x04\0\x16\
-[method]vfs.mount-host\x01.\x01@\x02\x04self*\x04path\x01\0,\x04\0\x13[method]vf\
-s.unmount\x01/\x01p\x1b\x01@\x01\x04self*\00\x04\0\x16[method]vfs.take-dirty\x01\
-1\x01@\x01\x04self*\0w\x04\0\x16[method]vfs.used-bytes\x012\x01i%\x01j\x013\x01\x1d\
-\x01@\x02\x04root*\x06config\x05\04\x04\0\x14[static]shell.create\x015\x01h%\x01\
-j\0\x01\x1d\x01@\x02\x04self6\x04names\07\x04\0\x1e[method]shell.register-comman\
-d\x018\x01p\x03\x01@\x01\x04self6\09\x04\0\x11[method]shell.env\x01:\x01@\x01\x04\
-self6\0\x01\x04\0\x11[method]shell.cwd\x01;\x01h&\x01k<\x01i&\x01j\x01>\x01\x1d\x01\
-@\x03\x05owner6\x06parent=\x04opts\x07\0?\x04\0\x13[static]fiber.spawn\x01@\x01@\
-\x03\x04self<\x05chunk\x01\x04last\x7f\07\x04\0\x19[method]fiber.write-stdin\x01\
-A\x01@\x02\x04self<\x04fuelw\0\x0b\x04\0\x11[method]fiber.run\x01B\x01j\x01\x0b\x01\
-\x1d\x01@\x03\x04self<\x05epochw\x07outcome\x0d\0\xc3\0\x04\0\x14[method]fiber.r\
-esume\x01D\x01j\x01\x01\x01\x1d\x01@\x04\x04self<\x05epochw\x02fdy\x03maxy\0\xc5\
-\0\x04\0\x1d[method]fiber.read-call-input\x01F\x01@\x04\x04self<\x05epochw\x07ch\
-annel\x13\x05chunk\x01\07\x04\0\x1c[method]fiber.push-call-data\x01G\x01k\x01\x01\
-@\x05\x04self<\x05epochw\x04name\x01\x05value\x01\x09subscript\xc8\0\07\x04\0\x1d\
-[method]fiber.assign-variable\x01I\x01@\x03\x04self<\x05epochw\x03env9\07\x04\0\x1a\
-[method]fiber.set-call-env\x01J\x01@\x02\x04self<\x06reason\x11\0\x09\x04\0\x14[\
-method]fiber.cancel\x01K\x01@\x02\x04self<\x03maxy\0\x01\x04\0\x19[method]fiber.\
-take-stdout\x01L\x04\0\x19[method]fiber.take-stderr\x01L\x01p\x0f\x01@\x02\x04se\
-lf<\x03maxy\0\xcd\0\x04\0\x18[method]fiber.take-trace\x01N\x01p{\x01@\x02\x04sel\
-f<\x03maxy\0\xcf\0\x04\0\x1b[method]fiber.take-coverage\x01P\x01@\x01\x14memory-\
-ceiling-bytesw\07\x04\0\x09configure\x01Q\x04\0\x0draise-ceiling\x01Q\x01@\0\0\x1f\
-\x04\0\x05usage\x01R\x01ps\x01@\0\0\xd3\0\x04\0\x11coverage-features\x01T\x01j\x01\
-#\x01\x1d\x01@\x01\x03req!\0\xd5\0\x04\0\x0cexec-oneshot\x01V\x04\0!sentropic:ba\
-sh/engine@0.1.0-draft\x05\x13\x04\0!sentropic:bash/kernel@0.1.0-draft\x04\0\x0b\x0c\
-\x01\0\x06kernel\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-componen\
-t\x070.262.0\x10wit-bindgen-rust\x060.63.0";
+aborted\x08deadline\x04\0\x0bexec-status\x03\0\x1f\x01m\x02\x04text\x05bytes\x04\
+\0\x0bstdout-kind\x03\0!\x01r\x05\x09exit-codez\x06status\x20\x0alimit-name\x1c\x03\
+env\x13\x0bstdout-kind\"\x04\0\x0bexec-result\x03\0#\x01m\x03\x04file\x09directo\
+ry\x07symlink\x04\0\x09node-kind\x03\0%\x01r\x06\x04kind&\x04sizew\x04modey\x08m\
+time-msx\x03devw\x03inow\x04\0\x04stat\x03\0'\x01r\x02\x04name\x01\x04kind&\x04\0\
+\x09dir-entry\x03\0)\x01r\x02\x04path\x01\x04info(\x04\0\x0awalk-entry\x03\0+\x01\
+m\x0f\x09not-found\x06exists\x0dnot-directory\x0cis-directory\x09not-empty\x0ape\
+rmission\x07invalid\x09link-loop\x09too-large\x08no-space\x04busy\x0ccross-devic\
+e\x09read-only\x0bunsupported\x02io\x04\0\x0dfs-error-code\x03\0-\x01r\x02\x04co\
+de.\x04path\x01\x04\0\x08fs-error\x03\0/\x01r\x03\x04path\x01\x06offsetw\x03leny\
+\x04\0\x08read-req\x03\01\x01kw\x01ky\x01kx\x01r\x06\x04path\x01\x04data\x01\x06\
+offset3\x08truncate\x7f\x04mode4\x08mtime-ms5\x04\0\x09write-req\x03\06\x01r\x03\
+\x04path\x01\x04modey\x08mtime-ms5\x04\0\x08lazy-req\x03\08\x01r\x03\x04path\x01\
+\x04modey\x09directory\x7f\x04\0\x0acreate-req\x03\0:\x01r\x03\x04path\x01\x09re\
+cursive\x7f\x04mode4\x04\0\x09mkdir-req\x03\0<\x01r\x03\x04path\x01\x09recursive\
+\x7f\x05force\x7f\x04\0\x0aremove-req\x03\0>\x01r\x03\x06source\x01\x06target\x01\
+\x09recursive\x7f\x04\0\x08pair-req\x03\0@\x01r\x02\x04path\x01\x04modey\x04\0\x09\
+chmod-req\x03\0B\x01r\x03\x04path\x01\x08atime-msx\x08mtime-msx\x04\0\x0autimes-\
+req\x03\0D\x01r\x03\x04root\x01\x09max-depthy\x0bmax-entriesy\x04\0\x08walk-req\x03\
+\0F\x01q\x15\x04stat\x01\x01\0\x05lstat\x01\x01\0\x06exists\x01\x01\0\x09read-li\
+nk\x01\x01\0\x09real-path\x01\x01\0\x08read-dir\x01\x01\0\x0dread-dir-plus\x01\x01\
+\0\x04walk\x01\xc7\0\0\x09all-paths\0\0\x09read-file\x012\0\x0awrite-file\x017\0\
+\x0awrite-lazy\x019\0\x10create-exclusive\x01;\0\x05mkdir\x01=\0\x06remove\x01?\0\
+\x04copy\x01\xc1\0\0\x06rename\x01\xc1\0\0\x07symlink\x01\xc1\0\0\x09hard-link\x01\
+\xc1\0\0\x05chmod\x01\xc3\0\0\x06utimes\x01\xc5\0\0\x04\0\x05fs-op\x03\0H\x01p*\x01\
+p,\x01q\x08\x04none\0\0\x04flag\x01\x7f\0\x04info\x01(\0\x04path\x01\x01\0\x04da\
+ta\x01\x01\0\x05paths\x01\x1b\0\x07entries\x01\xca\0\0\x0centries-plus\x01\xcb\0\
+\0\x04\0\x05fs-ok\x03\0L\x01j\x01\xcd\0\x010\x04\0\x09fs-result\x03\0N\x01p\xc9\0\
+\x01r\x02\x08mount-idy\x03ops\xd0\0\x04\0\x0cfs-batch-req\x03\0Q\x01r\x02\x04pat\
+h\x01\x07removed\x7f\x04\0\x0cchanged-file\x03\0S\x01r\x02\x04names\x05value\x01\
+\x04\0\x06header\x03\0U\x01p\x0e\x01r\x07\x04names\x04args\x1b\x03cwd\x01\x03env\
+\x13\x03fds\xd7\0\x09input-lenw\x08xpg-echo\x7f\x04\0\x0ccommand-call\x03\0X\x01\
+p\xd6\0\x01r\x08\x06methods\x03urls\x07headers\xda\0\x09input-lenw\x10follow-red\
+irects\x7f\x0dmax-redirects4\x0atimeout-msy\x12max-response-bytesw\x04\0\x09fetc\
+h-req\x03\0[\x01r\x04\x03urls\x06status{\x0bstatus-texts\x07headers\xda\0\x04\0\x0c\
+redirect-hop\x03\0]\x01p\xde\0\x01r\x05\x06status{\x0bstatus-texts\x03urls\x07he\
+aders\xda\0\x0eredirect-chain\xdf\0\x04\0\x0afetch-resp\x03\0`\x01m\x07\x0dacces\
+s-denied\x12method-not-allowed\x0fredirect-denied\x12too-many-redirects\x12respo\
+nse-too-large\x07timeout\x07network\x04\0\x0enet-error-code\x03\0b\x01r\x02\x04c\
+ode\xe3\0\x06detail\x01\x04\0\x09net-error\x03\0d\x01r\x02\x07wall-msx\x0cmonoto\
+nic-nsw\x04\0\x0dclock-reading\x03\0f\x01q\x08\x08fs-batch\x01\xd2\0\0\x09lazy-f\
+ile\x01\x01\0\x0ecustom-command\x01\xd9\0\0\x05fetch\x01\xdc\0\0\x05sleep\x01w\0\
+\x05clock\0\0\x07entropy\x01y\0\x0btrace-clock\0\0\x04\0\x08host-req\x03\0h\x01p\
+\xcf\0\x01q\x0a\x02fs\x01\xea\0\0\x04data\x01\x01\0\x0ccommand-exit\x01z\0\x07fe\
+tched\x01\xe1\0\0\x05clock\x01\xe7\0\0\x09completed\0\0\x06denied\0\0\x0elimit-e\
+xceeded\x01s\0\x0anet-failed\x01\xe5\0\0\x06failed\x01\x01\0\x04\0\x0chost-outco\
+me\x03\0k\x01r\x02\x05epochw\x03req\xe9\0\x04\0\x0cpending-call\x03\0m\x01q\x03\x04\
+done\x01$\0\x0bout-of-fuel\0\0\x09host-call\x01\xee\0\0\x04\0\x04step\x03\0o\x01\
+m\x03\x07aborted\x08deadline\x05limit\x04\0\x0dcancel-reason\x03\0q\x01m\x04\x06\
+stdout\x06stderr\x04body\x0cstdout-bytes\x04\0\x0bout-channel\x03\0s\x01m\x08\x0e\
+not-configured\x12already-configured\x07ceiling\x0einvalid-config\x0bstale-epoch\
+\x09bad-state\x09too-large\x06denied\x04\0\x11kernel-error-code\x03\0u\x01r\x02\x04\
+code\xf6\0\x06details\x04\0\x0ckernel-error\x03\0w\x01r\x03\x04usedw\x07ceilingw\
+\x0ahigh-waterw\x04\0\x0cmemory-usage\x03\0y\x01q\x02\x06number\x01u\0\x04text\x01\
+\x01\0\x04\0\x0btrace-value\x03\0{\x01r\x02\x03keys\x05value\xfc\0\x04\0\x0ctrac\
+e-detail\x03\0}\x01p\xfe\0\x01r\x04\x08categorys\x04names\x0bduration-msu\x07det\
+ails\xff\0\x04\0\x0btrace-event\x03\0\x80\x01\x01r\x03\x04path\x01\x04data\x01\x04\
+modey\x04\0\x0coneshot-file\x03\0\x82\x01\x01p\x83\x01\x01r\x05\x05files\x84\x01\
+\x06config\x17\x04opts\x1e\x05stdin\x01\x04fuelw\x04\0\x0boneshot-req\x03\0\x85\x01\
+\x01r\x05\x07outcome$\x06stdout\x01\x06stderr\x01\x07changed\x84\x01\x07removed\x1b\
+\x04\0\x0eoneshot-result\x03\0\x87\x01\x04\0\x20sentropic:bash/types@0.1.0-draft\
+\x05\0\x02\x03\0\0\x05bytes\x02\x03\0\0\x07env-var\x02\x03\0\0\x0cshell-config\x02\
+\x03\0\0\x09exec-opts\x02\x03\0\0\x0bexec-result\x02\x03\0\0\x04step\x02\x03\0\0\
+\x0chost-outcome\x02\x03\0\0\x0btrace-event\x02\x03\0\0\x0dcancel-reason\x02\x03\
+\0\0\x0bout-channel\x02\x03\0\0\x05fs-op\x02\x03\0\0\x09fs-result\x02\x03\0\0\x08\
+fs-error\x02\x03\0\0\x0cchanged-file\x02\x03\0\0\x0ckernel-error\x02\x03\0\0\x0c\
+memory-usage\x02\x03\0\0\x0boneshot-req\x02\x03\0\0\x0eoneshot-result\x01Bt\x02\x03\
+\x02\x01\x01\x04\0\x05bytes\x03\0\0\x02\x03\x02\x01\x02\x04\0\x07env-var\x03\0\x02\
+\x02\x03\x02\x01\x03\x04\0\x0cshell-config\x03\0\x04\x02\x03\x02\x01\x04\x04\0\x09\
+exec-opts\x03\0\x06\x02\x03\x02\x01\x05\x04\0\x0bexec-result\x03\0\x08\x02\x03\x02\
+\x01\x06\x04\0\x04step\x03\0\x0a\x02\x03\x02\x01\x07\x04\0\x0chost-outcome\x03\0\
+\x0c\x02\x03\x02\x01\x08\x04\0\x0btrace-event\x03\0\x0e\x02\x03\x02\x01\x09\x04\0\
+\x0dcancel-reason\x03\0\x10\x02\x03\x02\x01\x0a\x04\0\x0bout-channel\x03\0\x12\x02\
+\x03\x02\x01\x0b\x04\0\x05fs-op\x03\0\x14\x02\x03\x02\x01\x0c\x04\0\x09fs-result\
+\x03\0\x16\x02\x03\x02\x01\x0d\x04\0\x08fs-error\x03\0\x18\x02\x03\x02\x01\x0e\x04\
+\0\x0cchanged-file\x03\0\x1a\x02\x03\x02\x01\x0f\x04\0\x0ckernel-error\x03\0\x1c\
+\x02\x03\x02\x01\x10\x04\0\x0cmemory-usage\x03\0\x1e\x02\x03\x02\x01\x11\x04\0\x0b\
+oneshot-req\x03\0\x20\x02\x03\x02\x01\x12\x04\0\x0eoneshot-result\x03\0\"\x04\0\x03\
+vfs\x03\x01\x04\0\x05shell\x03\x01\x04\0\x05fiber\x03\x01\x01i$\x01j\x01'\x01\x1d\
+\x01@\x01\x09max-bytesw\0(\x04\0\x12[static]vfs.create\x01)\x01h$\x01@\x02\x04se\
+lf*\x03req\x15\0\x17\x04\0\x0e[method]vfs.op\x01+\x01j\0\x01\x19\x01@\x03\x04sel\
+f*\x04path\x01\x06source*\0,\x04\0\x15[method]vfs.mount-vfs\x01-\x01@\x03\x04sel\
+f*\x04path\x01\x08mount-idy\0,\x04\0\x16[method]vfs.mount-host\x01.\x01@\x02\x04\
+self*\x04path\x01\0,\x04\0\x13[method]vfs.unmount\x01/\x01p\x1b\x01@\x01\x04self\
+*\00\x04\0\x16[method]vfs.take-dirty\x011\x01@\x01\x04self*\0w\x04\0\x16[method]\
+vfs.used-bytes\x012\x01i%\x01j\x013\x01\x1d\x01@\x02\x04root*\x06config\x05\04\x04\
+\0\x14[static]shell.create\x015\x01h%\x01j\0\x01\x1d\x01@\x02\x04self6\x04names\0\
+7\x04\0\x1e[method]shell.register-command\x018\x01p\x03\x01@\x01\x04self6\09\x04\
+\0\x11[method]shell.env\x01:\x01@\x01\x04self6\0\x01\x04\0\x11[method]shell.cwd\x01\
+;\x01h&\x01k<\x01i&\x01j\x01>\x01\x1d\x01@\x03\x05owner6\x06parent=\x04opts\x07\0\
+?\x04\0\x13[static]fiber.spawn\x01@\x01@\x03\x04self<\x05chunk\x01\x04last\x7f\0\
+7\x04\0\x19[method]fiber.write-stdin\x01A\x01@\x02\x04self<\x04fuelw\0\x0b\x04\0\
+\x11[method]fiber.run\x01B\x01j\x01\x0b\x01\x1d\x01@\x03\x04self<\x05epochw\x07o\
+utcome\x0d\0\xc3\0\x04\0\x14[method]fiber.resume\x01D\x01j\x01\x01\x01\x1d\x01@\x04\
+\x04self<\x05epochw\x02fdy\x03maxy\0\xc5\0\x04\0\x1d[method]fiber.read-call-inpu\
+t\x01F\x01@\x04\x04self<\x05epochw\x07channel\x13\x05chunk\x01\07\x04\0\x1c[meth\
+od]fiber.push-call-data\x01G\x01k\x01\x01@\x05\x04self<\x05epochw\x04name\x01\x05\
+value\x01\x09subscript\xc8\0\07\x04\0\x1d[method]fiber.assign-variable\x01I\x01@\
+\x03\x04self<\x05epochw\x03env9\07\x04\0\x1a[method]fiber.set-call-env\x01J\x01@\
+\x02\x04self<\x06reason\x11\0\x09\x04\0\x14[method]fiber.cancel\x01K\x01@\x02\x04\
+self<\x03maxy\0\x01\x04\0\x19[method]fiber.take-stdout\x01L\x04\0\x19[method]fib\
+er.take-stderr\x01L\x01p\x0f\x01@\x02\x04self<\x03maxy\0\xcd\0\x04\0\x18[method]\
+fiber.take-trace\x01N\x01p{\x01@\x02\x04self<\x03maxy\0\xcf\0\x04\0\x1b[method]f\
+iber.take-coverage\x01P\x01@\x01\x14memory-ceiling-bytesw\07\x04\0\x09configure\x01\
+Q\x04\0\x0draise-ceiling\x01Q\x01@\0\0\x1f\x04\0\x05usage\x01R\x01ps\x01@\0\0\xd3\
+\0\x04\0\x11coverage-features\x01T\x01j\x01#\x01\x1d\x01@\x01\x03req!\0\xd5\0\x04\
+\0\x0cexec-oneshot\x01V\x04\0!sentropic:bash/engine@0.1.0-draft\x05\x13\x04\0!se\
+ntropic:bash/kernel@0.1.0-draft\x04\0\x0b\x0c\x01\0\x06kernel\x03\0\0\0G\x09prod\
+ucers\x01\x0cprocessed-by\x02\x0dwit-component\x070.262.0\x10wit-bindgen-rust\x06\
+0.63.0";

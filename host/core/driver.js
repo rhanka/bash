@@ -3,6 +3,7 @@
 // share one body: the generator yields a promise to await, or a tick to give the event loop a turn.
 import { concat, decodeUtf8, latin1FromBytes, unsafeBytesFromLatin1, utf8, utf8Length } from "./bytes.js";
 import { AsyncCapabilityError, KernelPoisonedError } from "./errors.js";
+import { stringLimit } from "./limits.js";
 import { FS_METHODS, Scope, settleWithin } from "./membrane.js";
 
 const CHUNK = 1 << 20;
@@ -33,7 +34,9 @@ function fatalResult(B) {
 }
 
 function limitResult(B, name) {
-  return { stdout: "", stderr: `bash: ${name} exceeded\n`, exitCode: 126, env: nullObject(Object.entries(B.initialEnv)) };
+  const env = nullObject(Object.entries(B.initialEnv));
+  env["?"] = "126";
+  return { stdout: "", stderr: `bash: ${name} exceeded\n`, exitCode: 126, env };
 }
 
 /** Awaits the end of an asynchronous generator-driven loop. */
@@ -64,14 +67,20 @@ export function runSync(gen) {
   return r.value;
 }
 
-function anySignal(a, b) {
+export function anySignal(a, b) {
   if (!a) return b;
   if (!b) return a;
   if (typeof AbortSignal.any === "function") return AbortSignal.any([a, b]);
   const c = new AbortController();
-  for (const s of [a, b]) {
-    if (s.aborted) c.abort();
-    else s.addEventListener("abort", () => c.abort(), { once: true });
+  const abort = (event) => {
+    a.removeEventListener("abort", abort);
+    b.removeEventListener("abort", abort);
+    c.abort(event.target.reason);
+  };
+  if (a.aborted || b.aborted) c.abort((a.aborted ? a : b).reason);
+  else {
+    a.addEventListener("abort", abort, { once: true });
+    b.addEventListener("abort", abort, { once: true });
   }
   return c.signal;
 }
@@ -87,15 +96,9 @@ export function* execLoop(B, script, o) {
   inst.check();
   const L = B.limits;
   // Pre-checks (7.3 step 1): nothing is lowered, no kernel call is made.
-  const half = Math.floor(B.headroom / 2);
-  let total = 0;
-  const strings = [...o.env.map((e) => e[1]), ...o.args, ...(o.cwd !== undefined ? [o.cwd] : [])];
-  for (const s of strings) {
-    const n = utf8Length(s);
-    if (n > L.maxStringLength) return limitResult(B, "maxStringLength");
-    total += n;
-  }
-  if (total > half) return limitResult(B, "headroom");
+  const strings = [...o.env.flat(), ...o.args, o.cwd ?? "", o.bypass ?? ""];
+  const limit = stringLimit(strings, L.maxStringLength, B.headroom, o.env.length * 20 + o.args.length * 8);
+  if (limit) return limitResult(B, limit);
 
   const utf16 = script.length;
   let scriptBytes;
@@ -115,7 +118,6 @@ export function* execLoop(B, script, o) {
     scopes: new Set(),
     signal: o.signal,
     deadline: now() + L.maxExecutionTimeMs,
-    started: false,
   };
   const engine = inst.engine;
   try {
@@ -131,7 +133,6 @@ export function* execLoop(B, script, o) {
         bypassCustom: o.bypass,
       }),
     );
-    x.started = true;
     if (o.signal?.aborted) return finish(x, cancel(x, "aborted"));
     // stdin in chunks of at most 1 MiB, the last with `last = true`.
     const stdin = o.stdin;
@@ -148,25 +149,27 @@ export function* execLoop(B, script, o) {
     let step = inst.call(() => x.fiber.run(FUEL));
     for (;;) {
       if (step.tag === "done") return finish(x, step.val);
+      drain(x);
+      let reason = cancelReason(x);
+      if (reason) return finish(x, cancel(x, reason));
+      if (now() - lastYield >= YIELD_MS) {
+        yield { tick: true };
+        lastYield = now();
+        reason = cancelReason(x);
+        if (reason) return finish(x, cancel(x, reason));
+      }
       if (step.tag === "out-of-fuel") {
-        drain(x);
-        if (o.signal?.aborted) return finish(x, cancel(x, "aborted"));
-        if (now() > x.deadline) return finish(x, cancel(x, "deadline"));
-        if (now() - lastYield >= YIELD_MS) {
-          yield { tick: true };
-          lastYield = now();
-        }
         step = inst.call(() => x.fiber.run(FUEL));
         continue;
       }
       // host-call
-      drain(x);
       const served = yield* serve(x, step.val);
       if (served.cancel) return finish(x, cancel(x, served.cancel));
       step = inst.call(() => x.fiber.resume(step.val.epoch, served.outcome));
     }
   } catch (e) {
-    if (e instanceof KernelPoisonedError && x.started) return fatalResult(B);
+    if (e instanceof KernelPoisonedError) return fatalResult(B);
+    if (!x.fiber && e?.code === "ceiling") return limitResult(B, e.detail || "memory-ceiling");
     throw e;
   } finally {
     for (const s of x.scopes) s.revoke();
@@ -178,6 +181,11 @@ export function* execLoop(B, script, o) {
       }
     }
   }
+}
+
+function cancelReason(x) {
+  if (x.signal?.aborted) return "aborted";
+  if (now() >= x.deadline) return "deadline";
 }
 
 function cancel(x, reason) {
@@ -201,12 +209,17 @@ function drain(x) {
 
 function finish(x, er) {
   drain(x);
+  const env = envToObject(er.env);
+  env["?"] ??= String(er.exitCode);
   const r = {
-    stdout: decodeUtf8(concat(x.out)),
-    stderr: decodeUtf8(concat(x.err)),
+    stdout: (er.stdoutKind === "bytes" ? latin1FromBytes : decodeUtf8)(concat(x.out)),
+    stderr: x.err.length === 0 && er.status === "limit-exceeded" && er.limitName
+      ? `bash: ${er.limitName} exceeded\n`
+      : decodeUtf8(concat(x.err)),
     exitCode: er.exitCode,
-    env: envToObject(er.env),
+    env,
   };
+  if (er.stdoutKind === "bytes") r.stdoutKind = "bytes";
   return r;
 }
 
@@ -223,13 +236,19 @@ function raceExec(x, promise) {
       for (const c of cleanups) c();
       resolve(r);
     };
+    const interrupted = () => {
+      if (x.inst.poisoned) return { kind: "poison" };
+      const reason = cancelReason(x);
+      if (reason) return { kind: reason === "aborted" ? "abort" : "deadline" };
+    };
     promise.then(
-      (value) => fin({ kind: "ok", value }),
-      (error) => fin({ kind: "err", error }),
+      (value) => fin(interrupted() ?? { kind: "ok", value }),
+      (error) => fin(interrupted() ?? { kind: "err", error }),
     );
+    const already = interrupted();
+    if (already) return fin(already);
     const sig = x.signal;
     if (sig) {
-      if (sig.aborted) fin({ kind: "abort" });
       const on = () => fin({ kind: "abort" });
       sig.addEventListener("abort", on, { once: true });
       cleanups.push(() => sig.removeEventListener("abort", on));
@@ -309,20 +328,23 @@ function* serveFsBatch(x, batch) {
   );
 }
 
-const HOST_PATH_HINTS = [];
+const HOST_PATH_HINTS = new Set();
+const PATH_TAIL = String.raw`[^\s'":<>|]*`;
+const GENERIC_HOST_PREFIX = String.raw`file:\/\/(?:(?:[^\s/'":<>|]*\/)?[A-Za-z]:)?|[A-Za-z]:[\\/]|\/(?:Users|root|var|tmp|private|opt|mnt|usr|srv|etc|workspace|app|nix|proc|run)\/|\/home\/(?!user(?:\/|\b))`;
+let hostPath = new RegExp(`(?:${GENERIC_HOST_PREFIX})${PATH_TAIL}`, "g");
 
 /** Registers host path prefixes that must never appear in the stderr of a failed command (node loader). */
 export function addHostPathHints(...paths) {
-  for (const p of paths) if (p && p !== "/" && !HOST_PATH_HINTS.includes(p)) HOST_PATH_HINTS.push(p);
+  for (const p of paths) {
+    if (p && p !== "/") HOST_PATH_HINTS.add(p);
+  }
+  const hints = [...HOST_PATH_HINTS].sort((a, b) => b.length - a.length).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  hostPath = new RegExp(`(?:${[...hints, GENERIC_HOST_PREFIX].join("|")})${PATH_TAIL}`, "g");
 }
-
-const GENERIC_HOST_PATH = /(?:file:\/\/[^\s'"]*|[A-Za-z]:\\[^\s'"]*|\/(?:Users|root|var|tmp|private|opt|mnt|usr|srv)\/[^\s'":]*|\/home\/(?!user(?:\/|\b))[^/\s'"]+\/[^\s'":]*)/g;
 
 /** Replaces host paths in an error message by `<path>`. */
 export function sanitizeMessage(text) {
-  let out = String(text);
-  for (const h of HOST_PATH_HINTS) out = out.split(h).join("<path>");
-  return out.replace(GENERIC_HOST_PATH, "<path>");
+  return String(text).replace(hostPath, "<path>");
 }
 
 class FrozenMap extends Map {
@@ -349,7 +371,14 @@ function* serveCustom(x, epoch, call) {
   const entry = B.commands.get(name);
   if (!entry) return { outcome: { tag: "denied" } };
   const trusted = entry.trusted !== false;
-  const envFlags = new Map(call.env.map((e) => [decodeUtf8(e.name), e.exported]));
+  const originalEnv = new Map();
+  const envFlags = new Map();
+  for (const e of call.env) {
+    const key = decodeUtf8(e.name);
+    originalEnv.set(key, decodeUtf8(e.value));
+    envFlags.set(key, e.exported);
+  }
+  let assignmentLimit;
   const result = yield* serveExtension(
     x,
     async (scope) => {
@@ -358,11 +387,7 @@ function* serveCustom(x, epoch, call) {
         return fn(...a);
       };
       const env = trusted ? new Map() : new FrozenMap();
-      for (const e of call.env) {
-        const k = decodeUtf8(e.name);
-        if (trusted) env.set(k, decodeUtf8(e.value));
-        else Map.prototype.set.call(env, k, decodeUtf8(e.value));
-      }
+      for (const [k, v] of originalEnv) Map.prototype.set.call(env, k, v);
       let stdinText;
       const ctx = {
         fs: scope.wrap(B.userFs ?? B.rootFs, FS_METHODS),
@@ -370,8 +395,8 @@ function* serveCustom(x, epoch, call) {
         env,
         exportedEnv: nullObject([...envFlags].filter(([, ex]) => ex).map(([k]) => [k, env.get(k)])),
         limits: { ...B.limits },
-        signal: anySignal(scope.signal, undefined),
-        getRegisteredCommands: () => [...B.commands.keys()],
+        signal: anySignal(scope.signal, x.signal),
+        getRegisteredCommands: live(() => [...B.commands.keys()]),
         xpgEcho: !!call.xpgEcho,
       };
       Object.defineProperty(ctx, "stdin", {
@@ -408,21 +433,32 @@ function* serveCustom(x, epoch, call) {
       if (B.fetch) ctx.fetch = scope.guard(B.fetch);
       if (B.sleep) ctx.sleep = scope.guard(B.sleep);
       if (B.trace) ctx.trace = live(B.trace);
-      if (B.coverage) ctx.coverage = B.coverage;
-      ctx.assignShellVariable = async (n, v, subscript) => {
+      if (B.coverage) ctx.coverage = { hit: live((feature) => B.coverage.hit(feature)) };
+      if (trusted) ctx.assignShellVariable = async (n, v, subscript) => {
         scope.check();
+        if (typeof n !== "string" || typeof v !== "string" || (subscript !== undefined && typeof subscript !== "string")) {
+          throw new TypeError("assignment name, value and subscript must be strings");
+        }
+        const limit = stringLimit([n, v, subscript ?? ""], B.limits.maxStringLength, B.headroom);
+        if (limit) {
+          assignmentLimit ??= limit;
+          throw new RangeError(`${limit} exceeded`);
+        }
         try {
           inst.call(() => x.fiber.assignVariable(epoch, utf8(n), utf8(v), subscript === undefined ? undefined : utf8(subscript)));
         } catch (e) {
           if (e instanceof KernelPoisonedError) throw e;
           throw new Error(`cannot assign ${n}: ${e?.code ?? "refused"}`);
         }
+        env.set(n, v);
+        envFlags.set(n, false);
       };
       ctx.exec = scope.guard((command, options) => B.runChild(command, options, scope, x));
       ctx.origCommand = scope.guard((args) => B.runChild([name, ...args].map(shellQuote).join(" "), { cwd: ctx.cwd, bypass: name }, scope, x));
-      const cmd = await B.resolveCommand(entry);
       let r;
       try {
+        const cmd = await B.resolveCommand(entry);
+        scope.check();
         r = await cmd.execute(call.args.map((a) => decodeUtf8(a)), ctx);
       } catch (e) {
         scope.check();
@@ -434,20 +470,36 @@ function* serveCustom(x, epoch, call) {
     { failed: "command failed" },
   );
   if (result.cancel) return result;
+  if (assignmentLimit) return { outcome: { tag: "limit-exceeded", val: assignmentLimit } };
   const out = result.outcome;
   if (out.failed !== undefined) {
     pushText(x, epoch, "stderr", `${out.failed}\n`);
     return { outcome: { tag: "command-exit", val: 1 } };
   }
   const r = out.r ?? {};
-  const kindBytes = r.stdoutKind === "bytes";
-  pushBytes(x, epoch, "stdout", kindBytes ? unsafeBytesFromLatin1(String(r.stdout ?? "")) : utf8(String(r.stdout ?? "")));
-  pushText(x, epoch, "stderr", String(r.stderr ?? ""));
   if (trusted && out.env) {
-    const list = [];
-    for (const [k, v] of out.env) list.push({ name: utf8(k), value: utf8(v), exported: envFlags.get(k) ?? false });
-    inst.call(() => x.fiber.setCallEnv(epoch, list));
+    const entries = [...out.env].map(([k, v]) => [String(k), String(v)]);
+    const changed = entries.filter(([k, v]) => originalEnv.get(k) !== v);
+    const originals = originalEnv.keys();
+    const reordered = entries.length !== originalEnv.size || entries.some(([k]) => originals.next().value !== k);
+    if (changed.length || reordered) {
+      const limit = stringLimit(changed.flat(), B.limits.maxStringLength, B.headroom) ??
+        stringLimit(entries.flat(), Infinity, B.headroom, entries.length * 20);
+      if (limit) return { outcome: { tag: "limit-exceeded", val: limit } };
+      const list = entries.map(([k, v]) => ({ name: utf8(k), value: utf8(v), exported: envFlags.get(k) ?? false }));
+      try {
+        inst.call(() => x.fiber.setCallEnv(epoch, list));
+      } catch (e) {
+        if (e?.code !== "ceiling") throw e;
+        return { outcome: { tag: "limit-exceeded", val: e.detail || "memory-ceiling" } };
+      }
+    }
   }
+  const kindBytes = r.stdoutKind === "bytes";
+  const stdout = String(r.stdout ?? "");
+  if (kindBytes && stdout.length === 0) inst.call(() => x.fiber.pushCallData(epoch, "stdout-bytes", new Uint8Array(0)));
+  else pushBytes(x, epoch, kindBytes ? "stdout-bytes" : "stdout", kindBytes ? unsafeBytesFromLatin1(stdout) : utf8(stdout));
+  pushText(x, epoch, "stderr", String(r.stderr ?? ""));
   const code = typeof r.exitCode === "number" ? r.exitCode | 0 : 0;
   return { outcome: { tag: "command-exit", val: code } };
 }

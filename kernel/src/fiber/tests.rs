@@ -189,9 +189,14 @@ mod commands {
             assert_eq!(r.exit, 126, "{cmd}");
             assert_eq!(drain(&mut f, true), "denied\n");
         }
-        let mut f = fib(&sh, "__sleep 5000\n__clock\n__entropy 16");
+        let mut f = fib(&sh, "__sleep 5000\n__clock");
         assert_eq!(run_done(&mut f).exit, 0);
-        assert_eq!(drain(&mut f, false), "5000\n16\n");
+        assert_eq!(drain(&mut f, false), "5000\n");
+        let mut entropy = fib(&sh, "__entropy 16");
+        let r = run_done(&mut entropy);
+        assert_eq!(r.exit, 0);
+        assert!(r.stdout_bytes);
+        assert_eq!(entropy.stdout_chunk(16), &[0xad, 0x4d, 0xf3, 0x0b, 0xae, 0x77, 0x1b, 0xdc, 0x76, 0x60, 0x6e, 0x02, 0xb9, 0xee, 0xf0, 0x64]);
     }
 
     #[test]

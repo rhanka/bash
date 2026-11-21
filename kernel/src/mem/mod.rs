@@ -21,6 +21,11 @@ pub mod abi {
     pub use super::alloc::string::String;
     pub use super::alloc::vec;
     pub use super::alloc::vec::Vec;
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn with_reserve<R>(f: impl FnOnce() -> R) -> R {
+        super::ceiling::with_abi_reserve(f)
+    }
 }
 
 mod boxed;
