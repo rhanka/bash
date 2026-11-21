@@ -210,41 +210,43 @@ impl Vfs {
             Some(n) if n.kind != Kind::Dir => return Err(Code::NotDirectory),
             Some(_) => {}
         }
-        if !inner.map.contains_key(p.as_slice()) {
+        let write = |n: &mut Node| -> Result<(), Code> {
+            if n.kind == Kind::Dir {
+                return Err(Code::IsDirectory);
+            }
+            let len = n.data.len();
+            let start = match offset {
+                Some(o) => usize::try_from(o).map_err(|_| Code::NoSpace)?,
+                None if truncate => 0,
+                None => len,
+            };
+            let end = start.checked_add(data.len()).ok_or(Code::NoSpace)?;
+            // Reserve before changing file content or metadata. Resizing now uses the reserved space.
+            n.data.try_reserve_exact(end.saturating_sub(len)).map_err(map_mem)?;
+            if truncate {
+                n.data.truncate(start);
+            }
+            if end > n.data.len() {
+                n.data.try_resize(end, 0).map_err(map_mem)?;
+            }
+            n.data[start..end].copy_from_slice(data);
+            if let Some(m) = mode {
+                n.mode = m;
+            }
+            if let Some(t) = mtime_ms {
+                n.mtime_ms = t;
+            }
+            Ok(())
+        };
+        if let Some(n) = inner.map.get_mut(p.as_slice()) {
+            write(n)?;
+        } else {
             let ino = inner.next_ino;
+            let mut node = Node { kind: Kind::File, data: KBytes::new_in(&self.budget), mode: 0o644, mtime_ms: 0, ino };
+            write(&mut node)?;
             let key = bytes_in(&p, &self.budget).map_err(map_mem)?;
-            let node = Node { kind: Kind::File, data: KBytes::new_in(&self.budget), mode: mode.unwrap_or(0o644), mtime_ms: mtime_ms.unwrap_or(0), ino };
             inner.map.try_insert(key, node).map_err(map_mem)?;
             inner.next_ino += 1;
-        }
-        let n = inner.map.get_mut(p.as_slice()).ok_or(Code::NotFound)?;
-        if n.kind == Kind::Dir {
-            return Err(Code::IsDirectory);
-        }
-        let start = match offset {
-            Some(o) => usize::try_from(o).map_err(|_| Code::NoSpace)?,
-            None if truncate => 0,
-            None => n.data.len(),
-        };
-        let end = start.checked_add(data.len()).ok_or(Code::NoSpace)?;
-        if truncate {
-            n.data.truncate(start.min(n.data.len()));
-        }
-        if end > n.data.len() {
-            // Grow exactly: file content is stored exactly-sized to keep the charge predictable.
-            let more = end - n.data.len();
-            n.data.try_reserve_exact(more).map_err(map_mem)?;
-            n.data.try_resize(end, 0).map_err(map_mem)?;
-        }
-        n.data[start..end].copy_from_slice(data);
-        if let Some(m) = mode {
-            n.mode = m;
-        }
-        if let Some(t) = mtime_ms {
-            n.mtime_ms = t;
-        }
-        if truncate && end < n.data.len() && offset.is_none() {
-            n.data.truncate(end);
         }
         Ok(Ok_::None)
     }
@@ -396,9 +398,16 @@ mod tests {
     #[test]
     fn budget_gives_no_space() {
         let v = vol(300);
-        write(&v, b"/a", &[0u8; 64]).unwrap();
+        let contents = [42; 64];
+        write(&v, b"/a", &contents).unwrap();
+        let used = v.used_bytes();
         assert!(matches!(write(&v, b"/b", &[0u8; 1000]), Err(Code::NoSpace)));
-        assert!(v.used_bytes() <= 300);
-        assert_eq!(read(&v, b"/a").unwrap().len(), 64);
+        assert!(matches!(v.op(Op::Exists(b"/b")), Ok(Ok_::Flag(false))));
+        assert!(matches!(v.op(Op::WriteFile {
+            path: b"/a", data: &[0; 1000], offset: Some(7), truncate: true, mode: Some(0o600), mtime_ms: Some(17),
+        }), Err(Code::NoSpace)));
+        assert_eq!(v.used_bytes(), used);
+        assert_eq!(read(&v, b"/a").unwrap(), contents);
+        assert!(matches!(v.op(Op::Stat(b"/a")), Ok(Ok_::Info(Stat { mode: 0o644, mtime_ms: 0, .. }))));
     }
 }
