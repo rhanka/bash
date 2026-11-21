@@ -29,7 +29,8 @@ const MAX_HEIGHT: usize = 20;
 #[repr(C)]
 struct Leaf<K, V> {
     len: u16,
-    entries: [MaybeUninit<(K, V)>; CAP],
+    keys: [MaybeUninit<K>; CAP],
+    values: [MaybeUninit<V>; CAP],
 }
 
 #[repr(C)]
@@ -65,13 +66,26 @@ unsafe fn set_nlen<K, V>(n: Node<K, V>, len: usize) {
         (*n.as_ptr()).len = len as u16;
     }
 }
-unsafe fn ent<K, V>(n: Node<K, V>, i: usize) -> *mut (K, V) {
-    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
-    // bounds, ranges that fit), which is what every operation below relies on.
+unsafe fn key_ptr<K, V>(n: Node<K, V>, i: usize) -> *mut K {
+    // SAFETY: the caller supplies a live node and an index at most CAP; no reference to the array is made.
+    unsafe { ptr::addr_of_mut!((*n.as_ptr()).keys).cast::<K>().add(i) }
+}
+
+unsafe fn value_ptr<K, V>(n: Node<K, V>, i: usize) -> *mut V {
+    // SAFETY: the caller supplies a live node and an index at most CAP; no reference to the array is made.
+    unsafe { ptr::addr_of_mut!((*n.as_ptr()).values).cast::<V>().add(i) }
+}
+
+unsafe fn read_entry<K, V>(n: Node<K, V>, i: usize) -> (K, V) {
+    // SAFETY: the caller transfers ownership of both initialized fields at this index.
+    unsafe { (key_ptr(n, i).read(), value_ptr(n, i).read()) }
+}
+
+unsafe fn write_entry<K, V>(n: Node<K, V>, i: usize, (key, value): (K, V)) {
+    // SAFETY: the caller owns the destination slot and has removed any previously owned entry.
     unsafe {
-        ptr::addr_of_mut!((*n.as_ptr()).entries)
-            .cast::<(K, V)>()
-            .add(i)
+        key_ptr(n, i).write(key);
+        value_ptr(n, i).write(value);
     }
 }
 unsafe fn edg<K, V>(n: Node<K, V>, i: usize) -> *mut Node<K, V> {
@@ -128,7 +142,7 @@ unsafe fn free_subtree<K, V>(budget: &Budget, n: Node<K, V>, height: usize) -> u
         let len = nlen(n);
         let mut freed = 1;
         for i in 0..len {
-            ptr::drop_in_place(ent(n, i));
+            drop(read_entry(n, i));
         }
         if height > 0 {
             for i in 0..=len {
@@ -150,7 +164,7 @@ unsafe fn search<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
         let (mut lo, mut hi) = (0, nlen(n));
         while lo < hi {
             let mid = (lo + hi) / 2;
-            match (*ent(n, mid)).0.borrow().cmp(key) {
+            match (*key_ptr(n, mid)).borrow().cmp(key) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Equal => return Ok(mid),
                 Ordering::Greater => hi = mid,
@@ -171,9 +185,20 @@ unsafe fn move_entries<K, V>(
     // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
     // bounds, ranges that fit), which is what every operation below relies on.
     unsafe {
-        ptr::copy_nonoverlapping(ent(src, from), ent(dst, to), count);
+        ptr::copy_nonoverlapping(key_ptr(src, from), key_ptr(dst, to), count);
+        ptr::copy_nonoverlapping(value_ptr(src, from), value_ptr(dst, to), count);
     }
 }
+
+/// Shifts initialized entries within a node. The source and destination may overlap.
+unsafe fn shift_entries<K, V>(n: Node<K, V>, from: usize, to: usize, count: usize) {
+    // SAFETY: the caller keeps both ranges within the arrays and moves ownership to the destination range.
+    unsafe {
+        ptr::copy(key_ptr(n, from), key_ptr(n, to), count);
+        ptr::copy(value_ptr(n, from), value_ptr(n, to), count);
+    }
+}
+
 unsafe fn move_edges<K, V>(src: Node<K, V>, from: usize, dst: Node<K, V>, to: usize, count: usize) {
     // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
     // bounds, ranges that fit), which is what every operation below relies on.
@@ -193,8 +218,8 @@ unsafe fn insert_nonfull<K, V>(
     // bounds, ranges that fit), which is what every operation below relies on.
     unsafe {
         let len = nlen(n);
-        ptr::copy(ent(n, pos), ent(n, pos + 1), len - pos);
-        ent(n, pos).write(entry);
+        shift_entries(n, pos, pos + 1, len - pos);
+        write_entry(n, pos, entry);
         if let Some(r) = right {
             ptr::copy(edg(n, pos + 1), edg(n, pos + 2), len - pos);
             edg(n, pos + 1).write(r);
@@ -227,7 +252,7 @@ unsafe fn insert_here<K, V>(
         let internal = height > 0;
         match pos.cmp(&MIN) {
             Ordering::Less => {
-                let med = ent(n, MIN - 1).read();
+                let med = read_entry(n, MIN - 1);
                 move_entries(n, MIN, sib, 0, CAP - MIN);
                 if internal {
                     move_edges(n, MIN, sib, 0, CAP - MIN + 1);
@@ -248,7 +273,7 @@ unsafe fn insert_here<K, V>(
                 Some((entry, sib))
             }
             Ordering::Greater => {
-                let med = ent(n, MIN).read();
+                let med = read_entry(n, MIN);
                 move_entries(n, MIN + 1, sib, 0, CAP - MIN - 1);
                 if internal {
                     move_edges(n, MIN + 1, sib, 0, CAP - MIN);
@@ -292,8 +317,8 @@ unsafe fn leaf_remove<K, V>(n: Node<K, V>, i: usize) -> (K, V) {
     // bounds, ranges that fit), which is what every operation below relies on.
     unsafe {
         let len = nlen(n);
-        let out = ent(n, i).read();
-        ptr::copy(ent(n, i + 1), ent(n, i), len - i - 1);
+        let out = read_entry(n, i);
+        shift_entries(n, i + 1, i, len - i - 1);
         set_nlen(n, len - 1);
         out
     }
@@ -314,9 +339,9 @@ unsafe fn fix_child<K, V>(budget: &Budget, parent: Node<K, V>, height: usize, i:
             // Borrow from the left sibling through the separator.
             let left = *edg(parent, i - 1);
             let (lc, cc) = (nlen(left), nlen(child));
-            ptr::copy(ent(child, 0), ent(child, 1), cc);
-            ent(child, 0).write(ent(parent, i - 1).read());
-            ent(parent, i - 1).write(ent(left, lc - 1).read());
+            shift_entries(child, 0, 1, cc);
+            write_entry(child, 0, read_entry(parent, i - 1));
+            write_entry(parent, i - 1, read_entry(left, lc - 1));
             if internal {
                 ptr::copy(edg(child, 0), edg(child, 1), cc + 1);
                 edg(child, 0).write(*edg(left, lc));
@@ -328,9 +353,9 @@ unsafe fn fix_child<K, V>(budget: &Budget, parent: Node<K, V>, height: usize, i:
             // Borrow from the right sibling through the separator.
             let right = *edg(parent, i + 1);
             let (rc, cc) = (nlen(right), nlen(child));
-            ent(child, cc).write(ent(parent, i).read());
-            ent(parent, i).write(ent(right, 0).read());
-            ptr::copy(ent(right, 1), ent(right, 0), rc - 1);
+            write_entry(child, cc, read_entry(parent, i));
+            write_entry(parent, i, read_entry(right, 0));
+            shift_entries(right, 1, 0, rc - 1);
             if internal {
                 edg(child, cc + 1).write(*edg(right, 0));
                 ptr::copy(edg(right, 1), edg(right, 0), rc);
@@ -343,14 +368,14 @@ unsafe fn fix_child<K, V>(budget: &Budget, parent: Node<K, V>, height: usize, i:
             let j = if i > 0 { i - 1 } else { i };
             let (left, right) = (*edg(parent, j), *edg(parent, j + 1));
             let (lc, rc) = (nlen(left), nlen(right));
-            ent(left, lc).write(ent(parent, j).read());
+            write_entry(left, lc, read_entry(parent, j));
             move_entries(right, 0, left, lc + 1, rc);
             if internal {
                 move_edges(right, 0, left, lc + 1, rc + 1);
             }
             set_nlen(left, lc + 1 + rc);
             free_node(budget, right, internal);
-            ptr::copy(ent(parent, j + 1), ent(parent, j), n - j - 1);
+            shift_entries(parent, j + 1, j, n - j - 1);
             ptr::copy(edg(parent, j + 2), edg(parent, j + 1), n - j - 1);
             set_nlen(parent, n - 1);
             1
@@ -394,7 +419,8 @@ unsafe fn remove_rec<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
                     return Some(leaf_remove(n, i));
                 }
                 let pred = remove_max(budget, *edg(n, i), height - 1, freed);
-                let old = ptr::replace(ent(n, i), pred);
+                let old = read_entry(n, i);
+                write_entry(n, i, pred);
                 *freed += fix_child(budget, n, height, i);
                 Some(old)
             }
@@ -445,7 +471,7 @@ impl<K: Ord, V> KMap<K, V> {
             // SAFETY: `node` is a live node of this tree at height `h`.
             unsafe {
                 match search::<K, V, K>(node, &key) {
-                    Ok(i) => return Ok(Some(core::mem::replace(&mut (*ent(node, i)).1, value))),
+                    Ok(i) => return Ok(Some(value_ptr(node, i).replace(value))),
                     Err(i) => {
                         run = if nlen(node) == CAP { run + 1 } else { 0 };
                         if h == 0 {
@@ -483,7 +509,7 @@ impl<K: Ord, V> KMap<K, V> {
                 .expect("a new root was preallocated");
             // SAFETY: `top` is a fresh empty internal node; the old root and `right` are at the same height.
             unsafe {
-                ent(top, 0).write(med);
+                write_entry(top, 0, med);
                 edg(top, 0).write(root);
                 edg(top, 1).write(right);
                 set_nlen(top, 1);
@@ -508,7 +534,7 @@ impl<K: Ord, V> KMap<K, V> {
             // it alive and unmodified for the returned lifetime.
             unsafe {
                 match search::<K, V, Q>(node, key) {
-                    Ok(i) => return Some(&(*ent(node, i)).1),
+                    Ok(i) => return Some(&*value_ptr(node, i)),
                     Err(i) => {
                         if h == 0 {
                             return None;
@@ -532,7 +558,7 @@ impl<K: Ord, V> KMap<K, V> {
             // SAFETY: as for `get`, with the exclusive borrow of the map.
             unsafe {
                 match search::<K, V, Q>(node, key) {
-                    Ok(i) => return Some(&mut (*ent(node, i)).1),
+                    Ok(i) => return Some(&mut *value_ptr(node, i)),
                     Err(i) => {
                         if h == 0 {
                             return None;
@@ -634,14 +660,14 @@ impl<K: Ord, V> KMap<K, V> {
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         let it = self.raw_iter();
         // SAFETY: the shared borrow of the map keeps every entry alive and unmodified.
-        it.map(|p| unsafe { (&(*p).0, &(*p).1) })
+        it.map(|(key, value)| unsafe { (&*key, &*value) })
     }
 
     /// Pairs in ascending key order, values mutable.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         let it = self.raw_iter();
         // SAFETY: the exclusive borrow of the map gives access to each entry once; keys stay shared.
-        it.map(|p| unsafe { (&(*p).0, &mut (*p).1) })
+        it.map(|(key, value)| unsafe { (&*key, &mut *value) })
     }
 
     /// Keys in ascending order.
@@ -662,8 +688,7 @@ impl<K: Ord, V> KMap<K, V> {
             for _ in 0..self.height {
                 node = *edg(node, 0);
             }
-            let e = ent(node, 0);
-            Some((&(*e).0, &(*e).1))
+            Some((&*key_ptr(node, 0), &*value_ptr(node, 0)))
         }
     }
 
@@ -675,8 +700,8 @@ impl<K: Ord, V> KMap<K, V> {
             for _ in 0..self.height {
                 node = *edg(node, nlen(node));
             }
-            let e = ent(node, nlen(node) - 1);
-            Some((&(*e).0, &(*e).1))
+            let i = nlen(node) - 1;
+            Some((&*key_ptr(node, i), &*value_ptr(node, i)))
         }
     }
 
@@ -702,9 +727,9 @@ struct RawIter<K, V> {
 }
 
 impl<K, V> Iterator for RawIter<K, V> {
-    type Item = *mut (K, V);
+    type Item = (*mut K, *mut V);
 
-    fn next(&mut self) -> Option<*mut (K, V)> {
+    fn next(&mut self) -> Option<Self::Item> {
         // The leaf frame is the last pushed one; frames above it are internal.
         loop {
             if self.depth == 0 {
@@ -718,7 +743,7 @@ impl<K, V> Iterator for RawIter<K, V> {
                     continue;
                 }
                 self.stack[self.depth - 1] = Some((node, i + 1));
-                let item = ent(node, i);
+                let item = (key_ptr(node, i), value_ptr(node, i));
                 // An internal frame continues with the subtree to the right of the entry just yielded.
                 if self.is_internal(self.depth - 1) {
                     let mut child = *edg(node, i + 1);
