@@ -10,7 +10,7 @@ fn bound(len: usize, nodes: usize, entry: usize) -> u64 {
 }
 
 /// 200 000 seeded operations against a model; ascending iteration every 1 000th step.
-fn model(_base: u64) {
+fn model() {
     let b = root(10, BIG);
     let mut m: KMap<u64, u64> = KMap::new_in(&b);
     let mut r: BTreeMap<u64, u64> = BTreeMap::new();
@@ -39,11 +39,12 @@ fn model(_base: u64) {
     m.clear();
     assert_eq!((m.len(), b.used(), m.node_count()), (0, 0, 0), "clear releases everything");
     drop(m);
+    assert_eq!(b.used(), 0);
 }
 
 /// Sequential, reverse and random insertion followed by removal in several orders: every node kind (split at
 /// each position, borrow left and right, merge, root collapse) is crossed; the budget returns to 0.
-fn structure(_base: u64) {
+fn structure() {
     for n in [0usize, 1, 7, 8, 16, 17, 100, 1000, 5000] {
         for order in 0..4 {
             let b = root(11, BIG);
@@ -83,12 +84,14 @@ fn structure(_base: u64) {
             }
             assert!(m.is_empty());
             assert_eq!((b.used(), m.node_count()), (0, 0), "n={n} order={order}");
+            drop(m);
+            assert_eq!(b.used(), 0);
         }
     }
 }
 
 /// A refusal in the middle of an insertion (a split that cannot allocate) leaves the map as it was.
-fn atomicity(_base: u64) {
+fn atomicity() {
     let mut rng = Rng(99);
     let probe = root(12, BIG);
     let mut full: KMap<u64, u64> = KMap::new_in(&probe);
@@ -98,6 +101,7 @@ fn atomicity(_base: u64) {
     }
     let total = probe.used();
     drop(full);
+    assert_eq!(probe.used(), 0);
     for cap in [total / 3, total / 2, total - 1, total] {
         let b = root(12, cap);
         let mut m: KMap<u64, u64> = KMap::new_in(&b);
@@ -122,11 +126,13 @@ fn atomicity(_base: u64) {
             assert!(m.try_insert(k, 5).unwrap().is_some());
             assert_eq!(m.remove(&k), Some(5));
         }
+        drop(m);
+        assert_eq!(b.used(), 0);
     }
 }
 
 /// Keys that own memory are dropped exactly once; `TryClone`, `Debug`, borrowed lookups.
-fn ownership(_base: u64) {
+fn ownership() {
     let b = root(13, BIG);
     let mut m: KMap<KString, KBytes> = KMap::new_in(&b);
     for i in 0..500u32 {
@@ -153,6 +159,8 @@ fn ownership(_base: u64) {
     assert_eq!(zm.try_insert((), ()).unwrap(), None);
     assert_eq!(zm.try_insert((), ()).unwrap(), Some(()));
     assert_eq!(zm.len(), 1);
+    drop(zm);
+    assert_eq!(z.used(), 0);
 }
 
 /// Count keys and values without the padding that a tuple would add to every slot.
@@ -166,6 +174,8 @@ fn padded_pair_bound() {
     assert!(b.used() <= limit, "{} bytes charged, bound {limit}", b.used());
     assert!(m.iter().enumerate().all(|(i, (&k, &v))| k == i as u64 && v == i as u8));
     m.clear();
+    assert_eq!(b.used(), 0);
+    drop(m);
     assert_eq!(b.used(), 0);
 }
 
@@ -197,13 +207,12 @@ fn clear_after_panicking_drop() {
 
 #[test]
 fn kmap() {
-    let base = start();
-    model(base);
-    structure(base);
-    atomicity(base);
-    ownership(base);
+    start();
+    model();
+    structure();
+    atomicity();
+    ownership();
     padded_pair_bound();
-    assert_eq!(usage().used, base, "no leak");
     // Run last because the interrupted destructor leaves the old tree allocated.
     clear_after_panicking_drop();
 }

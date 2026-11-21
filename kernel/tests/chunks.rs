@@ -16,7 +16,7 @@ fn fill(rng: &mut Rng, n: usize) -> Vec<u8> {
 }
 
 /// 20 000 seeded operations; sizes straddle the 64 KiB chunk edge.
-fn model(_base: u64) {
+fn model() {
     let b = root(30, BIG);
     let mut c = KChunks::new_in(&b);
     let mut r: Vec<u8> = vec![];
@@ -100,7 +100,7 @@ fn model(_base: u64) {
 }
 
 /// 100 MiB in 1 MiB steps: no block larger than a chunk, bounded charge; the sizes of small sequences.
-fn sizing(_base: u64) {
+fn sizing() {
     let b = root(31, BIG);
     let mut c = KChunks::new_in(&b);
     let step = vec![0xA5u8; 1 << 20];
@@ -134,10 +134,12 @@ fn sizing(_base: u64) {
     assert!(b.used() <= 64 + 16, "shrunk after truncate: {}", b.used());
     drop(s);
     assert_eq!(b.used(), 0);
+    drop(c);
+    assert_eq!(b.used(), 0);
 }
 
 /// A refusal leaves length and content unchanged and the budget as it was.
-fn refusal(_base: u64) {
+fn refusal() {
     let cap = 3 * KChunks::CHUNK as u64;
     let b = root(32, cap);
     let mut c = KChunks::new_in(&b);
@@ -195,6 +197,8 @@ fn shrink_after_large_removal() {
         c.clear();
         assert_eq!(b.used(), 0);
     }
+    drop(c);
+    assert_eq!(b.used(), 0);
 }
 
 fn truncate_after_partial_drain() {
@@ -210,6 +214,8 @@ fn truncate_after_partial_drain() {
     assert!(b.used() <= 80, "{} bytes charged for 10 bytes", b.used());
     c.try_append(b"next").unwrap();
     assert_eq!(contents(&c), b"0123456789next");
+    drop(c);
+    assert_eq!(b.used(), 0);
 }
 
 fn short_drain_result_across_chunk_boundary() {
@@ -222,16 +228,17 @@ fn short_drain_result_across_chunk_boundary() {
     assert_eq!(contents(&c), b"0123456789");
     assert_eq!(c.chunk_count(), 1);
     assert!(b.used() <= 80, "{} bytes charged for 10 bytes", b.used());
+    drop(c);
+    assert_eq!(b.used(), 0);
 }
 
 #[test]
 fn chunks() {
-    let base = start();
-    model(base);
-    sizing(base);
-    refusal(base);
+    start();
+    model();
+    sizing();
+    refusal();
     shrink_after_large_removal();
     truncate_after_partial_drain();
     short_drain_result_across_chunk_boundary();
-    assert_eq!(usage().used, base, "no leak");
 }

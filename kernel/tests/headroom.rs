@@ -39,7 +39,6 @@ fn headroom_account() {
         transfer_free(core::ptr::null_mut(), 0, 1);
     }
     assert_eq!(headroom().used(), 0, "released to exactly its previous value");
-    assert_eq!(usage().used, base);
 
     // set_headroom: below the current use is refused and changes nothing; an explicit cap sticks.
     // SAFETY: as above.
@@ -57,5 +56,5 @@ fn headroom_account() {
     // Test support forgets the explicit cap.
     testing::reset(BIG);
     assert_eq!(headroom().cap(), BIG / 8);
-    assert_eq!(usage().used, base);
+    assert_eq!(headroom().used(), 0);
 }

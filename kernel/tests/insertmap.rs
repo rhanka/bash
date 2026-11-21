@@ -23,7 +23,7 @@ impl Model {
     }
 }
 
-fn model(_base: u64) {
+fn model() {
     let b = root(20, BIG);
     let mut m: KInsertMap<u64, u64> = KInsertMap::new_in(&b);
     let mut r = Model::default();
@@ -56,10 +56,11 @@ fn model(_base: u64) {
     m.clear();
     assert_eq!((m.len(), b.used()), (0, 0));
     drop(m);
+    assert_eq!(b.used(), 0);
 }
 
 /// Overwriting keeps the position; removal closes the gap; a removed key comes back at the end.
-fn positions(_base: u64) {
+fn positions() {
     let b = root(21, BIG);
     let mut m: KInsertMap<KString, u32> = KInsertMap::new_in(&b);
     let k = |s: &str| KString::try_from_str_in(s, &b).unwrap();
@@ -79,7 +80,7 @@ fn positions(_base: u64) {
 }
 
 /// A refusal leaves the map unchanged, wherever it strikes.
-fn atomicity(_base: u64) {
+fn atomicity() {
     let probe = root(22, BIG);
     let mut full: KInsertMap<u64, u64> = KInsertMap::new_in(&probe);
     let mut rng = Rng(5);
@@ -89,6 +90,7 @@ fn atomicity(_base: u64) {
     }
     let total = probe.used();
     drop(full);
+    assert_eq!(probe.used(), 0);
     for cap in [total / 4, total / 2, total - 1] {
         let b = root(22, cap);
         let mut m: KInsertMap<u64, u64> = KInsertMap::new_in(&b);
@@ -108,6 +110,8 @@ fn atomicity(_base: u64) {
         }
         assert!(refused > 0);
         assert!(m.keys().copied().eq(kept.iter().copied()));
+        drop(m);
+        assert_eq!(b.used(), 0);
     }
 }
 
@@ -142,14 +146,16 @@ fn memory_bound(n: usize) {
         m.len(),
         fresh_budget.used()
     );
+    drop((fresh, m));
+    assert_eq!(fresh_budget.used(), 0);
+    assert_eq!(b.used(), 0);
 }
 
 #[test]
 fn insertmap() {
-    let base = start();
-    model(base);
-    positions(base);
-    atomicity(base);
+    start();
+    model();
+    positions();
+    atomicity();
     memory_bound(50_000);
-    assert_eq!(usage().used, base, "no leak");
 }

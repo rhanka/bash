@@ -9,14 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 #[test]
 fn semantics() {
-    let base = start();
+    start();
     map_matches_a_model();
     rc_semantics();
     unsize();
     formatting();
     vec_semantics();
     try_clone();
-    assert_eq!(usage().used, base, "no leak");
     panics();
 }
 
@@ -93,6 +92,8 @@ fn map_matches_a_model() {
     k.try_extend_from_slice(b"key").unwrap();
     by_bytes.try_insert(k, 9).unwrap();
     assert_eq!(by_bytes.get(&b"key"[..]), Some(&9));
+    drop((names, by_bytes));
+    assert_eq!(b.used(), 0);
 }
 
 fn rc_semantics() {
@@ -184,6 +185,7 @@ fn unsize() {
     let z = KBox::try_new_in((), &b).unwrap();
     assert_eq!(b.used(), 0);
     z.into_inner();
+    assert_eq!(b.used(), 0);
 }
 
 fn formatting() {
@@ -216,6 +218,9 @@ fn formatting() {
     assert!(KString::try_from_str_in("a", &big).unwrap() < KString::try_from_str_in("b", &big).unwrap());
     let bytes = u.into_bytes();
     assert_eq!(bytes.as_slice(), "h\u{e9}llo".as_bytes());
+    drop((s, t, bytes));
+    assert_eq!(big.used(), 0);
+    assert_eq!(small.used(), 0);
 }
 
 fn vec_semantics() {
@@ -251,7 +256,8 @@ fn vec_semantics() {
     v.try_reserve_exact(10).unwrap();
     assert_eq!(v.capacity(), 10);
     // Zero-sized elements charge nothing and never fail.
-    let mut z: KVec<()> = KVec::new_in(&root(76, 0));
+    let zero = root(76, 0);
+    let mut z: KVec<()> = KVec::new_in(&zero);
     for _ in 0..1000 {
         z.try_push(()).unwrap();
     }
@@ -263,6 +269,9 @@ fn vec_semantics() {
     let copy = src.try_clone().unwrap();
     assert_eq!(copy.as_slice(), src.as_slice());
     assert_eq!(b.used(), before + 12);
+    drop((v, z, src, copy));
+    assert_eq!(b.used(), 0);
+    assert_eq!(zero.used(), 0);
 }
 
 fn try_clone() {
