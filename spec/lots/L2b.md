@@ -89,9 +89,11 @@ Error or discard fields.
    stringification. Encode WIT strings with UTF-8 (`TextEncoder` on a JS string, including replacement of lone
    UTF-16 surrogates). Preserve arbitrary bytes, byte offsets and lengths in `list<u8>`.
 2. **Layout.** Use wasm32 little-endian canonical sizes, alignments, record padding, variant payload alignment,
-   joined flat slots and canonical bitcasts. Lower up to 16 flat parameter slots directly, larger tuples through
-   a pointer. The single flat-result limit determines direct versus indirect returns. Check alignment and
-   non-wrapping `ptr + count * stride` against current memory before every read/write, including nested arrays
+   joined flat slots and canonical bitcasts. Lower up to 16 flat parameter slots directly. For a larger tuple,
+   allocate its aligned parameter buffer with `cabi_realloc` and pass the pointer. On guest entry the callee
+   owns and frees that buffer. JS must never free it a second time. The single flat-result limit determines
+   direct versus indirect returns. Check alignment and non-wrapping `ptr + count * stride` against current
+   memory before every read/write, including nested arrays
    and zero lengths. Preserve direct unsigned i32/i64 bit patterns. Use checked arithmetic in JS before
    converting offsets or counts to wasm32. A zero-length list consumes zero data bytes. Obtain views again after
    each allocation and guest entry that can grow memory. Copy lifted lists/strings before cleanup. Validate
@@ -108,6 +110,11 @@ Error or discard fields.
    call. Keep borrowed wrappers alive through return. Never transfer or drop them as a side effect of borrowing.
    Block disposal/re-entry that would invalidate a live call. Rust may retain its own `KRc`. Numeric handles,
    prototypes, stale/finalized wrappers and foreign stores cannot establish ownership.
+   When the guest drops an owned resource, its imported `[resource-drop]<kind>(handle)` looks up the handle
+   in that store's table for `vfs`, `shell` or `fiber`. Require a live, guest-owned entry with no active borrow.
+   An invalid drop traps and poisons the calling store. On success remove the entry, unregister any finalizer,
+   and invoke the matching `[dtor]<kind>(rep)` exactly once with the saved representation. Retire ownership
+   before entering the destructor so a trap or a stale finalizer cannot destroy it again.
 5. **Return and destruction.** On normal guest return and successful lifting call the declared `cabi_post_*`
    hook exactly once with the original raw result before exposing success or throwing a typed error. Multiple
    export names can share one compiled function. A guest/realloc/lift/post-return/destructor trap stops the
@@ -149,7 +156,11 @@ Error or discard fields.
    growth (verify buffer identity changed), another call and disposal. Assert exact bytes. For all 3 resource
    kinds exercise wrong-kind, foreign, forged, disposed and repeated cleanup paths. On a live store assert one
    destructor per disposed owner and zero destructors caused by borrows. Use deterministic finalizer-token tests
-   without depending on GC scheduling.
+   without depending on GC scheduling. For each kind have a core fixture create and drop a guest-owned handle
+   through the two imports. Assert one destructor with the original representation and no second call from a
+   stale finalizer. In fresh stores a repeated drop, wrong-kind drop and drop during a borrow must each trap,
+   issue one poison notification and leave the destructor count unchanged. For an indirect call (e.g.
+   `Shell.create`), count one allocation of the outer tuple and one guest free on both success and typed error.
 5. **Integration.** Run the real test-kernel trapping command with a second pending fiber, then run `echo ok` on
    an independent store. Replay 30/30 committed L2 oracle cases through each binding with zero exclusions, stale
    snapshots or failures. All 4 limit profiles pass. The default tarball contains zero generated jco runtime
