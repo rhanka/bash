@@ -64,6 +64,9 @@ fn ceiling() {
 
     inner_refusal_keeps_high_water();
 
+    // The default transfer cap is ceiling/8, so it depends on how much the harness had allocated (the
+    // machine): pin it so the hook scenarios do not depend on the host.
+    assert_eq!(set_headroom(1 << 20), Ok(()));
     transfer();
     drop(b);
     assert_eq!(usage().used, base, "no leak");
