@@ -279,7 +279,7 @@ test("a trap in spawn produces one fatal result and subsequent execs reject", as
   await assert.rejects(b.exec(""), { name: "KernelPoisonedError" });
 });
 
-test("poisoning stops the jco store before other calls can use it", async () => {
+test("poisoning stops the binding store before other calls can use it", async () => {
   const base = internal().kernel;
   let store;
   let stopped = 0;
@@ -299,7 +299,7 @@ test("poisoning stops the jco store before other calls can use it", async () => 
   assert.equal(r.fatal, true);
   assert.equal(r.exitCode, 1);
   assert.equal(stopped, 1);
-  assert.throws(() => store.engine.usage(), WebAssembly.RuntimeError);
+  assert.throws(() => store.engine.usage(), { name: "KernelPoisonedError" });
   await assert.rejects(b.exec(""), { name: "KernelPoisonedError" });
   assert.equal(stopped, 1);
 });
@@ -342,19 +342,19 @@ test("gate 14: Bash objects sharing one InMemoryFs share files only", async () =
 });
 
 test("gate 16: a trap poisons the instance, and only that instance", async () => {
-  const gate = (() => {
-    let release;
-    const p = new Promise((r) => (release = r));
-    return { p, release };
-  })();
-  const wait = defineCommand("wait", async () => {
-    await gate.p;
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  let scope;
+  const wait = defineCommand("wait", async (_args, ctx) => {
+    scope = ctx.fs;
+    entered.resolve();
+    await gate.promise;
     return out("never seen");
   });
   const b = bash({ customCommands: [wait] });
-  const other = bash();
+  const other = new Bash();
   const pending = b.exec("__out 1\nwait");
-  await sleep(30);
+  await entered.promise;
   const trapped = await b.exec("__trap");
   assert.equal(trapped.exitCode, 1);
   assert.equal(trapped.stderr, "bash: internal error: sandbox instance failed\n");
@@ -364,11 +364,12 @@ test("gate 16: a trap poisons the instance, and only that instance", async () =>
   assert.equal(concurrent.exitCode, 1);
   assert.equal(concurrent.stderr, "bash: internal error: sandbox instance failed\n");
   assert.equal(concurrent.fatal, true);
-  gate.release();
+  await assert.rejects(async () => scope.readFile("/x"), { name: "ExecutionAbortedError" });
+  gate.resolve();
   await assert.rejects(b.exec(""), { name: "KernelPoisonedError" });
   await assert.rejects(b.readFile("/x"), { name: "KernelPoisonedError" });
   await assert.rejects(b.fs.exists("/x"), { name: "KernelPoisonedError" });
   assert.throws(() => b.getCwd(), { name: "KernelPoisonedError" });
   assert.throws(() => b.execSync(""), { name: "KernelPoisonedError" });
-  assert.equal((await other.exec("__out 2")).stdout, "aa");
+  assert.equal((await other.exec("echo ok")).stdout, "ok\n");
 });

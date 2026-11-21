@@ -6,8 +6,14 @@ import { basename, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { toolsDir } from "./lib.mjs";
 
+export const JCO_VERSION = "0.24.0";
+
 export async function transpileComponent(componentPath, outDir, { minify = false } = {}) {
-  const entry = join(toolsDir(), "npm", "node_modules", "@bytecodealliance", "jco-transpile", "dist", "index.js");
+  const pkg = join(toolsDir(), "npm", "node_modules", "@bytecodealliance", "jco-transpile");
+  if (JSON.parse(readFileSync(join(pkg, "package.json"), "utf8")).version !== JCO_VERSION) {
+    throw new Error("unexpected jco-transpile version, expected " + JCO_VERSION);
+  }
+  const entry = join(pkg, "dist", "index.js");
   const { transpile } = await import(pathToFileURL(entry).href);
   const name = basename(componentPath).replace(/\.component\.wasm$/, "").replace(/\.wasm$/, "");
   const result = await transpile(resolve(componentPath), {
@@ -22,9 +28,9 @@ export async function transpileComponent(componentPath, outDir, { minify = false
     optimize: false,
   });
   if (result.imports.length !== 0) throw new Error(`component has imports: ${result.imports.join(", ")}`);
-  if (name === "kernel") {
-    const glue = Buffer.from(result.files["kernel.js"]).toString("utf8");
-    result.files["kernel.js"] = guardPromisingProbes(glue, { minify });
+  if (name === "kernel" || name === "kernel-test") {
+    const glue = Buffer.from(result.files[name + ".js"]).toString("utf8");
+    result.files[name + ".js"] = guardPromisingProbes(glue, { minify });
   }
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
