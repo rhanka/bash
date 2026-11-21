@@ -15,7 +15,7 @@ use super::vec::KVec;
 use super::alloc::alloc::{alloc, dealloc, realloc, Layout};
 use core::ptr::{self, NonNull};
 
-/// Growable byte sequence stored in chunks; never reallocates existing full chunks. Not `Send`.
+/// Growable byte sequence stored in chunks. Growth keeps existing full chunks in place. Not `Send`.
 pub struct KChunks {
     dir: KVec<NonNull<u8>>,
     head: usize,
@@ -190,6 +190,37 @@ impl KChunks {
         }
     }
 
+    /// Compacts a short sequence and shrinks the final chunk to the rounded size of its data.
+    fn shrink_tail(&mut self) {
+        if self.len <= Self::CHUNK as u64 && self.head > 0 {
+            let used = self.len as usize;
+            let first = self.dir[0];
+            let front = used.min(Self::CHUNK - self.head);
+            // SAFETY: both slices of `front` bytes fit in the first block; they may overlap.
+            unsafe { ptr::copy(first.as_ptr().add(self.head), first.as_ptr(), front) };
+            if self.dir.len() == 2 {
+                let last = self.dir.pop().expect("second chunk");
+                // SAFETY: the first block is full-size when there are two blocks. The remaining
+                // bytes are initialized in the second block, which is disjoint from the first.
+                unsafe { ptr::copy_nonoverlapping(last.as_ptr(), first.as_ptr().add(front), used - front) };
+                self.block_free(last, self.last_cap);
+                self.last_cap = Self::CHUNK;
+            }
+            self.head = 0;
+        }
+        let last = self.dir.len() - 1;
+        let used = (self.end() - last as u64 * Self::CHUNK as u64) as usize;
+        let (p, cap) = self.block_shrink(self.dir[last], self.last_cap, cap_for(used));
+        self.dir.as_mut_slice()[last] = p;
+        self.last_cap = cap;
+    }
+
+    fn shrink_directory(&mut self) {
+        if self.dir.capacity() > 2 * self.dir.len() {
+            self.dir.shrink_to_fit();
+        }
+    }
+
     /// Copies `data` to chunk-space position `abs` (capacity must be reserved).
     fn write_abs(&mut self, mut abs: u64, mut data: &[u8]) {
         while !data.is_empty() {
@@ -276,12 +307,10 @@ impl KChunks {
         let old_last = self.dir.len() - 1;
         let old_cap_last = self.last_cap;
         self.free_blocks_from(n_new, |i| if i == old_last { old_cap_last } else { Self::CHUNK });
-        let used_last = (new_end - (n_new as u64 - 1) * chunk) as usize;
-        let cur = if n_new - 1 == old_last { old_cap_last } else { Self::CHUNK };
-        let (p, cap) = self.block_shrink(self.dir[n_new - 1], cur, cap_for(used_last));
-        self.dir.as_mut_slice()[n_new - 1] = p;
-        self.last_cap = cap;
+        self.last_cap = if n_new - 1 == old_last { old_cap_last } else { Self::CHUNK };
         self.len = len;
+        self.shrink_tail();
+        self.shrink_directory();
     }
 
     /// Removes every byte and releases all storage.
@@ -323,16 +352,10 @@ impl KChunks {
             self.block_free(p, Self::CHUNK);
             self.head -= Self::CHUNK;
         }
-        if self.dir.len() == 1 && self.head > 0 {
-            // A single partial chunk: slide the content to the front and shrink the block to fit.
-            let used = self.len as usize;
-            // SAFETY: `[head, head + used)` and `[0, used)` lie inside the block; `copy` handles the overlap.
-            unsafe { ptr::copy(self.dir[0].as_ptr().add(self.head), self.dir[0].as_ptr(), used) };
-            self.head = 0;
-            let (p, cap) = self.block_shrink(self.dir[0], self.last_cap, cap_for(used));
-            self.dir.as_mut_slice()[0] = p;
-            self.last_cap = cap;
+        if self.len <= Self::CHUNK as u64 {
+            self.shrink_tail();
         }
+        self.shrink_directory();
         m
     }
 

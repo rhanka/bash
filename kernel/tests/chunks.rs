@@ -173,11 +173,65 @@ fn refusal(_base: u64) {
     assert_eq!(b.used(), 0);
 }
 
+fn shrink_after_large_removal() {
+    let b = root(33, BIG);
+    let mut c = KChunks::new_in(&b);
+    let step = vec![0xA5; 1 << 20];
+    for drain in [false, true] {
+        for _ in 0..100 {
+            c.try_append(&step).unwrap();
+        }
+        let remaining = b"0123456789";
+        if drain {
+            let removed = c.len() as usize - remaining.len();
+            c.try_write_at(removed as u64, remaining).unwrap();
+            assert_eq!(c.drain_front(removed, |_| {}), removed);
+        } else {
+            c.try_write_at(0, remaining).unwrap();
+            c.truncate(remaining.len() as u64);
+        }
+        assert_eq!(contents(&c), remaining);
+        assert!(b.used() <= 80, "{} bytes charged for 10 bytes after drain={drain}", b.used());
+        c.clear();
+        assert_eq!(b.used(), 0);
+    }
+}
+
+fn truncate_after_partial_drain() {
+    let b = root(34, BIG);
+    let mut c = KChunks::new_in(&b);
+    let prefix = KChunks::CHUNK - 20;
+    c.try_append(&vec![0; prefix]).unwrap();
+    c.try_append(b"0123456789abcdefghij").unwrap();
+    c.try_append(b"next chunk").unwrap();
+    assert_eq!(c.drain_front(prefix, |_| {}), prefix);
+    c.truncate(10);
+    assert_eq!(contents(&c), b"0123456789");
+    assert!(b.used() <= 80, "{} bytes charged for 10 bytes", b.used());
+    c.try_append(b"next").unwrap();
+    assert_eq!(contents(&c), b"0123456789next");
+}
+
+fn short_drain_result_across_chunk_boundary() {
+    let b = root(35, BIG);
+    let mut c = KChunks::new_in(&b);
+    let prefix = KChunks::CHUNK - 4;
+    c.try_append(&vec![0; prefix]).unwrap();
+    c.try_append(b"0123456789").unwrap();
+    assert_eq!(c.drain_front(prefix, |_| {}), prefix);
+    assert_eq!(contents(&c), b"0123456789");
+    assert_eq!(c.chunk_count(), 1);
+    assert!(b.used() <= 80, "{} bytes charged for 10 bytes", b.used());
+}
+
 #[test]
 fn chunks() {
     let base = start();
     model(base);
     sizing(base);
     refusal(base);
+    shrink_after_large_removal();
+    truncate_after_partial_drain();
+    short_drain_result_across_chunk_boundary();
     assert_eq!(usage().used, base, "no leak");
 }
