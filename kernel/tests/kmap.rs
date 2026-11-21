@@ -155,6 +155,20 @@ fn ownership(_base: u64) {
     assert_eq!(zm.len(), 1);
 }
 
+/// Count keys and values without the padding that a tuple would add to every slot.
+fn padded_pair_bound() {
+    let b = root(15, BIG);
+    let mut m = KMap::<u64, u8>::new_in(&b);
+    for k in 0..1_000_000 {
+        m.try_insert(k, k as u8).unwrap();
+    }
+    let limit = bound(m.len(), m.node_count(), size_of::<u64>() + size_of::<u8>());
+    assert!(b.used() <= limit, "{} bytes charged, bound {limit}", b.used());
+    assert!(m.iter().enumerate().all(|(i, (&k, &v))| k == i as u64 && v == i as u8));
+    m.clear();
+    assert_eq!(b.used(), 0);
+}
+
 #[test]
 fn kmap() {
     let base = start();
@@ -162,5 +176,6 @@ fn kmap() {
     structure(base);
     atomicity(base);
     ownership(base);
+    padded_pair_bound();
     assert_eq!(usage().used, base, "no leak");
 }
