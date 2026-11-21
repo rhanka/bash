@@ -1,5 +1,5 @@
 //! Small helpers over `kernel::mem`: byte copies, the environment table and message formatting.
-use crate::mem::{Budget, KBytes, KString, KVec, MemResult, TryClone};
+use crate::mem::{Budget, KBytes, KRc, KString, KVec, MemResult, TryClone};
 use core::fmt::Write;
 
 /// A copy of `s` with exactly its length reserved.
@@ -46,15 +46,16 @@ pub fn parse_u64(s: &[u8]) -> Option<u64> {
 }
 
 /// One variable of the shell environment. Names and values are bytes.
+#[derive(Clone)]
 pub struct EnvEntry {
-    pub name: KBytes,
-    pub value: KBytes,
+    pub name: KRc<KBytes>,
+    pub value: KRc<KBytes>,
     pub exported: bool,
 }
 
 impl TryClone for EnvEntry {
     fn try_clone(&self) -> MemResult<Self> {
-        Ok(EnvEntry { name: self.name.try_clone()?, value: self.value.try_clone()?, exported: self.exported })
+        Ok(self.clone())
     }
 }
 
@@ -79,25 +80,61 @@ impl Env {
     /// Sets a variable: replaces the value of an existing one in place, or appends.
     pub fn set(&mut self, name: &[u8], value: &[u8], exported: bool) -> MemResult<()> {
         let value = bytes_in(value, self.v.budget())?;
-        self.set_owned(name, value, exported)
-    }
-
-    pub(crate) fn set_owned(&mut self, name: &[u8], value: KBytes, exported: bool) -> MemResult<()> {
         self.replace_owned(name, value, exported).map(drop)
     }
 
-    pub(crate) fn replace_owned(&mut self, name: &[u8], value: KBytes, exported: bool) -> MemResult<Option<(KBytes, bool)>> {
+    pub(crate) fn replace_owned(
+        &mut self,
+        name: &[u8],
+        value: KBytes,
+        exported: bool,
+    ) -> MemResult<Option<(KRc<KBytes>, bool)>> {
+        let value = KRc::try_new_in(value, self.budget()).map_err(|(_, e)| e)?;
+        self.replace_shared(name, value, exported)
+    }
+
+    pub(crate) fn replace_shared(
+        &mut self,
+        name: &[u8],
+        value: KRc<KBytes>,
+        exported: bool,
+    ) -> MemResult<Option<(KRc<KBytes>, bool)>> {
         if let Some(e) = self.v.iter_mut().find(|e| e.name.as_slice() == name) {
-            return Ok(Some((core::mem::replace(&mut e.value, value), core::mem::replace(&mut e.exported, exported))));
+            return Ok(Some((
+                core::mem::replace(&mut e.value, value),
+                core::mem::replace(&mut e.exported, exported),
+            )));
         }
-        let name = bytes_in(name, self.v.budget())?;
-        self.v.try_push(EnvEntry { name, value, exported })?;
+        let name = bytes_in(name, self.budget())?;
+        let name = KRc::try_new_in(name, self.budget()).map_err(|(_, e)| e)?;
+        self.v.try_push(EnvEntry {
+            name,
+            value,
+            exported,
+        })?;
         Ok(None)
     }
 
     pub fn copy_from(&mut self, source: &Self) -> MemResult<()> {
         for entry in source.v.iter() {
             self.set(&entry.name, &entry.value, entry.exported)?;
+        }
+        Ok(())
+    }
+
+    /// Merge immutable entries whose byte allocations are already charged.
+    pub(crate) fn merge_shared(&mut self, source: &Self) -> MemResult<()> {
+        for entry in source.v.iter() {
+            if let Some(existing) = self
+                .v
+                .iter_mut()
+                .find(|e| e.name.as_slice() == entry.name.as_slice())
+            {
+                existing.value = entry.value.clone();
+                existing.exported = entry.exported;
+            } else {
+                self.v.try_push(entry.clone())?;
+            }
         }
         Ok(())
     }

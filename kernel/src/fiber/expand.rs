@@ -168,7 +168,12 @@ impl Cursor {
                 } {
                     Value::Text(bytes) => self.visit(bytes, quoted, eligible, false, &mut visit)?,
                     Value::LastArg => {
-                        self.visit(&ex.fiber.last_arg, quoted, eligible, false, &mut visit)?
+                        let last_arg = ex
+                            .fiber
+                            .last_arg
+                            .as_deref()
+                            .map_or(b"".as_slice(), KBytes::as_slice);
+                        self.visit(last_arg, quoted, eligible, false, &mut visit)?
                     }
                     Value::Env(i) => self.visit(
                         &ex.fiber.env.v[i].value,

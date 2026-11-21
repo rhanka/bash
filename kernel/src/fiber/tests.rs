@@ -95,6 +95,42 @@ fn path_lookup_resumes_inside_one_stage() {
     assert_eq!(drain(&mut f, false), "resolved\n");
 }
 
+#[test]
+fn pipeline_snapshot_yields_and_keeps_stage_assignments_isolated() {
+    let sh = shell(1, &[("maxCommandCount", 3)], 0, &[]);
+    let names: std::vec::Vec<_> = (0..64).map(|i| std::format!("VAR{i}")).collect();
+    let env: std::vec::Vec<_> = names
+        .iter()
+        .map(|n| (n.as_bytes(), b"value".as_slice(), true))
+        .collect();
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts {
+            script: b"A=inner | echo \"$A\"; echo \"$A\"",
+            env: &env,
+            ..Opts::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(f.run(2), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    let result = run_done(&mut f);
+    assert_eq!(result.exit, 0);
+    assert_eq!(result.env.get(b"VAR63").unwrap().value.as_slice(), b"value");
+    assert_eq!(drain(&mut f, false), "1\n1\n");
+}
+
+#[test]
+fn a_long_function_definition_spends_multiple_fuel_units() {
+    let sh = shell(1, &[("maxCommandCount", 1)], 0, &[]);
+    let name = "f".repeat(64 * 1024);
+    let script = std::format!("{name}() {{ echo unused; }}");
+    let mut f = fib(&sh, &script);
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert_eq!(run_done(&mut f).exit, 0);
+}
+
 fn drain(f: &mut Fiber, err: bool) -> std::string::String {
     let mut out = std::vec::Vec::new();
     loop {
