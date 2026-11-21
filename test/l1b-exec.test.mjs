@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { Bash, T, bash, countKernelCalls, INTERNAL, internal } from "./kt.mjs";
+import { assertUnderTime } from "./timing.mjs";
 
 const EXIT_ABORTED = "bash: execution aborted\n";
 
@@ -206,13 +207,13 @@ test("gate 7: fuel slices, abort and the wall-time limit", async () => {
   assert.equal(r.exitCode, 124);
   assert.equal(r.stdout, "aaaa");
   assert.equal(r.stderr, EXIT_ABORTED);
-  assert.ok(performance.now() - t0 < 200, `took ${performance.now() - t0}`);
+  assertUnderTime("Abort during fuel slices", performance.now() - t0, 200);
   const w = bash({ executionLimits: { maxExecutionTimeMs: 200 } });
   const t1 = performance.now();
   const r2 = await w.exec("__out 2\n__spin");
   assert.equal(r2.exitCode, 124);
   assert.equal(r2.stdout, "aa");
-  assert.ok(performance.now() - t1 < 400, `took ${performance.now() - t1}`);
+  assertUnderTime("Wall-time limit during fuel slices", performance.now() - t1, 400);
   assert.equal((await w.exec("__out 3")).stdout, "aaa");
 });
 

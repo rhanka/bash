@@ -49,7 +49,10 @@ test("gate 20: the staging queue replays construction, registerCommand and synch
   assert.throws(() => b.execSync(""), { name: "AsyncCapabilityError" });
   assert.equal(b.fs.resolvePath("/a", "../b"), "/b");
   const r = await b.exec("hello\nlater\n__cat /work/a.txt\n__cat /work/b.txt");
-  assert.ok(performance.now() - t0 >= 45, "the module resolved after about 50 ms");
+  const elapsedMs = performance.now() - t0;
+  const timing = `Staging queue replay: ${elapsedMs.toFixed(2)} ms (minimum 45 ms)`;
+  console.log(timing);
+  assert.ok(elapsedMs >= 45, timing);
   assert.equal(r.stdout, "hello\nlater\nfrom filesfrom sync write");
   assert.equal(r.exitCode, 0);
   assert.equal(await b.fs.exists("/work/d"), true);

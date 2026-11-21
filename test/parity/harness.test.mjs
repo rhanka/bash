@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { repoRoot, scratch } from "../helpers.mjs";
+import { assertUnderTime } from "../timing.mjs";
 import { canonicalize } from "../../harness/parity/canonical.mjs";
 import { recordAll } from "../../harness/parity/record.mjs";
 import { evaluateCase, runParity } from "../../harness/parity/replay.mjs";
@@ -411,12 +412,12 @@ test("isolation scan: the bypasses of the former regex are caught", () => {
 });
 
 // 13. Cost
-test("cost: replaying the committed sample takes less than 2 seconds", async () => {
+test("cost: replaying the committed sample stays within its time limit", async () => {
   const t0 = performance.now();
   const { outcomes } = await runParity({ adapter: mock, casesDir: SAMPLE_CASES, snapshotsDir: SAMPLE_SNAPS, exclusions: NO_EXCLUSIONS });
   const ms = performance.now() - t0;
   assert.equal(outcomes.filter((o) => o.status === "passed").length, outcomes.length);
-  assert.ok(ms < 2000, `${ms} ms`);
+  assertUnderTime("L10a sample replay", ms, 2000);
 });
 
 // 14. API skeleton
