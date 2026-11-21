@@ -12,9 +12,9 @@
 //! the layout of `Leaf` (height 0) or `Internal` (height > 0, which starts with its `Leaf` part); entries
 //! `0..len` are initialised; an internal node has edges `0..=len` initialised, each pointing to a node one
 //! level lower; the tree owns every node and entry.
+use super::alloc::alloc::{alloc, dealloc, Layout};
 use super::budget::Budget;
 use super::error::{MemError, MemResult};
-use super::alloc::alloc::{alloc, dealloc, Layout};
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
@@ -54,16 +54,34 @@ pub struct KMap<K: Ord, V> {
 // ---- raw node access ----
 
 unsafe fn nlen<K, V>(n: Node<K, V>) -> usize {
-    (*n.as_ptr()).len as usize
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe { (*n.as_ptr()).len as usize }
 }
 unsafe fn set_nlen<K, V>(n: Node<K, V>, len: usize) {
-    (*n.as_ptr()).len = len as u16;
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        (*n.as_ptr()).len = len as u16;
+    }
 }
 unsafe fn ent<K, V>(n: Node<K, V>, i: usize) -> *mut (K, V) {
-    ptr::addr_of_mut!((*n.as_ptr()).entries).cast::<(K, V)>().add(i)
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        ptr::addr_of_mut!((*n.as_ptr()).entries)
+            .cast::<(K, V)>()
+            .add(i)
+    }
 }
 unsafe fn edg<K, V>(n: Node<K, V>, i: usize) -> *mut Node<K, V> {
-    ptr::addr_of_mut!((*n.cast::<Internal<K, V>>().as_ptr()).edges).cast::<Node<K, V>>().add(i)
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        ptr::addr_of_mut!((*n.cast::<Internal<K, V>>().as_ptr()).edges)
+            .cast::<Node<K, V>>()
+            .add(i)
+    }
 }
 
 fn node_layout<K, V>(internal: bool) -> Layout {
@@ -93,58 +111,96 @@ fn alloc_node<K, V>(budget: &Budget, internal: bool) -> MemResult<Node<K, V>> {
 }
 
 unsafe fn free_node<K, V>(budget: &Budget, n: Node<K, V>, internal: bool) {
-    let layout = node_layout::<K, V>(internal);
-    dealloc(n.as_ptr() as *mut u8, layout);
-    budget.release(layout.size() as u64);
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let layout = node_layout::<K, V>(internal);
+        dealloc(n.as_ptr() as *mut u8, layout);
+        budget.release(layout.size() as u64);
+    }
 }
 
 /// Drops every entry below `n` and frees its nodes.
 unsafe fn free_subtree<K, V>(budget: &Budget, n: Node<K, V>, height: usize) -> usize {
-    let len = nlen(n);
-    let mut freed = 1;
-    for i in 0..len {
-        ptr::drop_in_place(ent(n, i));
-    }
-    if height > 0 {
-        for i in 0..=len {
-            freed += free_subtree(budget, *edg(n, i), height - 1);
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let len = nlen(n);
+        let mut freed = 1;
+        for i in 0..len {
+            ptr::drop_in_place(ent(n, i));
         }
+        if height > 0 {
+            for i in 0..=len {
+                freed += free_subtree(budget, *edg(n, i), height - 1);
+            }
+        }
+        free_node(budget, n, height > 0);
+        freed
     }
-    free_node(budget, n, height > 0);
-    freed
 }
 
-unsafe fn search<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(n: Node<K, V>, key: &Q) -> Result<usize, usize> {
-    let (mut lo, mut hi) = (0, nlen(n));
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        match (*ent(n, mid)).0.borrow().cmp(key) {
-            Ordering::Less => lo = mid + 1,
-            Ordering::Equal => return Ok(mid),
-            Ordering::Greater => hi = mid,
+unsafe fn search<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
+    n: Node<K, V>,
+    key: &Q,
+) -> Result<usize, usize> {
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let (mut lo, mut hi) = (0, nlen(n));
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match (*ent(n, mid)).0.borrow().cmp(key) {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Equal => return Ok(mid),
+                Ordering::Greater => hi = mid,
+            }
         }
+        Err(lo)
     }
-    Err(lo)
 }
 
 /// Moves `count` entries `src[from..]` to `dst[to..]` (distinct nodes, or non-overlapping ranges).
-unsafe fn move_entries<K, V>(src: Node<K, V>, from: usize, dst: Node<K, V>, to: usize, count: usize) {
-    ptr::copy_nonoverlapping(ent(src, from), ent(dst, to), count);
+unsafe fn move_entries<K, V>(
+    src: Node<K, V>,
+    from: usize,
+    dst: Node<K, V>,
+    to: usize,
+    count: usize,
+) {
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        ptr::copy_nonoverlapping(ent(src, from), ent(dst, to), count);
+    }
 }
 unsafe fn move_edges<K, V>(src: Node<K, V>, from: usize, dst: Node<K, V>, to: usize, count: usize) {
-    ptr::copy_nonoverlapping(edg(src, from), edg(dst, to), count);
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        ptr::copy_nonoverlapping(edg(src, from), edg(dst, to), count);
+    }
 }
 
 /// Inserts `entry` at `pos` of a node with room, with `right` as the edge just after it (internal nodes).
-unsafe fn insert_nonfull<K, V>(n: Node<K, V>, pos: usize, entry: (K, V), right: Option<Node<K, V>>) {
-    let len = nlen(n);
-    ptr::copy(ent(n, pos), ent(n, pos + 1), len - pos);
-    ent(n, pos).write(entry);
-    if let Some(r) = right {
-        ptr::copy(edg(n, pos + 1), edg(n, pos + 2), len - pos);
-        edg(n, pos + 1).write(r);
+unsafe fn insert_nonfull<K, V>(
+    n: Node<K, V>,
+    pos: usize,
+    entry: (K, V),
+    right: Option<Node<K, V>>,
+) {
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let len = nlen(n);
+        ptr::copy(ent(n, pos), ent(n, pos + 1), len - pos);
+        ent(n, pos).write(entry);
+        if let Some(r) = right {
+            ptr::copy(edg(n, pos + 1), edg(n, pos + 2), len - pos);
+            edg(n, pos + 1).write(r);
+        }
+        set_nlen(n, len + 1);
     }
-    set_nlen(n, len + 1);
 }
 
 /// Inserts `entry` (and the edge `right` after it, for internal nodes) at `pos` of the node at `height`. A
@@ -158,44 +214,50 @@ unsafe fn insert_here<K, V>(
     right: Option<Node<K, V>>,
     pool: &mut [Option<Node<K, V>>; MAX_HEIGHT + 2],
 ) -> Option<((K, V), Node<K, V>)> {
-    if nlen(n) < CAP {
-        insert_nonfull(n, pos, entry, right);
-        return None;
-    }
-    let sib = pool[height].take().expect("a sibling was preallocated for every split");
-    let internal = height > 0;
-    match pos.cmp(&MIN) {
-        Ordering::Less => {
-            let med = ent(n, MIN - 1).read();
-            move_entries(n, MIN, sib, 0, CAP - MIN);
-            if internal {
-                move_edges(n, MIN, sib, 0, CAP - MIN + 1);
-            }
-            set_nlen(sib, CAP - MIN);
-            set_nlen(n, MIN - 1);
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        if nlen(n) < CAP {
             insert_nonfull(n, pos, entry, right);
-            Some((med, sib))
+            return None;
         }
-        Ordering::Equal => {
-            move_entries(n, MIN, sib, 0, CAP - MIN);
-            if internal {
-                edg(sib, 0).write(right.expect("internal insert carries an edge"));
-                move_edges(n, MIN + 1, sib, 1, CAP - MIN);
+        let sib = pool[height]
+            .take()
+            .expect("a sibling was preallocated for every split");
+        let internal = height > 0;
+        match pos.cmp(&MIN) {
+            Ordering::Less => {
+                let med = ent(n, MIN - 1).read();
+                move_entries(n, MIN, sib, 0, CAP - MIN);
+                if internal {
+                    move_edges(n, MIN, sib, 0, CAP - MIN + 1);
+                }
+                set_nlen(sib, CAP - MIN);
+                set_nlen(n, MIN - 1);
+                insert_nonfull(n, pos, entry, right);
+                Some((med, sib))
             }
-            set_nlen(sib, CAP - MIN);
-            set_nlen(n, MIN);
-            Some((entry, sib))
-        }
-        Ordering::Greater => {
-            let med = ent(n, MIN).read();
-            move_entries(n, MIN + 1, sib, 0, CAP - MIN - 1);
-            if internal {
-                move_edges(n, MIN + 1, sib, 0, CAP - MIN);
+            Ordering::Equal => {
+                move_entries(n, MIN, sib, 0, CAP - MIN);
+                if internal {
+                    edg(sib, 0).write(right.expect("internal insert carries an edge"));
+                    move_edges(n, MIN + 1, sib, 1, CAP - MIN);
+                }
+                set_nlen(sib, CAP - MIN);
+                set_nlen(n, MIN);
+                Some((entry, sib))
             }
-            set_nlen(sib, CAP - MIN - 1);
-            set_nlen(n, MIN);
-            insert_nonfull(sib, pos - MIN - 1, entry, right);
-            Some((med, sib))
+            Ordering::Greater => {
+                let med = ent(n, MIN).read();
+                move_entries(n, MIN + 1, sib, 0, CAP - MIN - 1);
+                if internal {
+                    move_edges(n, MIN + 1, sib, 0, CAP - MIN);
+                }
+                set_nlen(sib, CAP - MIN - 1);
+                set_nlen(n, MIN);
+                insert_nonfull(sib, pos - MIN - 1, entry, right);
+                Some((med, sib))
+            }
         }
     }
 }
@@ -206,93 +268,114 @@ unsafe fn insert_rec<K: Ord, V>(
     entry: (K, V),
     pool: &mut [Option<Node<K, V>>; MAX_HEIGHT + 2],
 ) -> Option<((K, V), Node<K, V>)> {
-    let pos = match search::<K, V, K>(n, &entry.0) {
-        Err(p) => p,
-        Ok(_) => unreachable!("the key was checked absent"),
-    };
-    if height == 0 {
-        return insert_here(n, 0, pos, entry, None, pool);
-    }
-    let child = *edg(n, pos);
-    match insert_rec(child, height - 1, entry, pool) {
-        None => None,
-        Some((med, right)) => insert_here(n, height, pos, med, Some(right), pool),
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let pos = match search::<K, V, K>(n, &entry.0) {
+            Err(p) => p,
+            Ok(_) => unreachable!("the key was checked absent"),
+        };
+        if height == 0 {
+            return insert_here(n, 0, pos, entry, None, pool);
+        }
+        let child = *edg(n, pos);
+        match insert_rec(child, height - 1, entry, pool) {
+            None => None,
+            Some((med, right)) => insert_here(n, height, pos, med, Some(right), pool),
+        }
     }
 }
 
 /// Removes entry `i` of a leaf.
 unsafe fn leaf_remove<K, V>(n: Node<K, V>, i: usize) -> (K, V) {
-    let len = nlen(n);
-    let out = ent(n, i).read();
-    ptr::copy(ent(n, i + 1), ent(n, i), len - i - 1);
-    set_nlen(n, len - 1);
-    out
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let len = nlen(n);
+        let out = ent(n, i).read();
+        ptr::copy(ent(n, i + 1), ent(n, i), len - i - 1);
+        set_nlen(n, len - 1);
+        out
+    }
 }
 
 /// Restores the minimum fill of child `i` of `parent` (at `height`) after it lost an entry.
 unsafe fn fix_child<K, V>(budget: &Budget, parent: Node<K, V>, height: usize, i: usize) -> usize {
-    let child = *edg(parent, i);
-    if nlen(child) >= MIN {
-        return 0;
-    }
-    let internal = height > 1;
-    let n = nlen(parent);
-    if i > 0 && nlen(*edg(parent, i - 1)) > MIN {
-        // Borrow from the left sibling through the separator.
-        let left = *edg(parent, i - 1);
-        let (lc, cc) = (nlen(left), nlen(child));
-        ptr::copy(ent(child, 0), ent(child, 1), cc);
-        ent(child, 0).write(ent(parent, i - 1).read());
-        ent(parent, i - 1).write(ent(left, lc - 1).read());
-        if internal {
-            ptr::copy(edg(child, 0), edg(child, 1), cc + 1);
-            edg(child, 0).write(*edg(left, lc));
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        let child = *edg(parent, i);
+        if nlen(child) >= MIN {
+            return 0;
         }
-        set_nlen(left, lc - 1);
-        set_nlen(child, cc + 1);
-        0
-    } else if i < n && nlen(*edg(parent, i + 1)) > MIN {
-        // Borrow from the right sibling through the separator.
-        let right = *edg(parent, i + 1);
-        let (rc, cc) = (nlen(right), nlen(child));
-        ent(child, cc).write(ent(parent, i).read());
-        ent(parent, i).write(ent(right, 0).read());
-        ptr::copy(ent(right, 1), ent(right, 0), rc - 1);
-        if internal {
-            edg(child, cc + 1).write(*edg(right, 0));
-            ptr::copy(edg(right, 1), edg(right, 0), rc);
+        let internal = height > 1;
+        let n = nlen(parent);
+        if i > 0 && nlen(*edg(parent, i - 1)) > MIN {
+            // Borrow from the left sibling through the separator.
+            let left = *edg(parent, i - 1);
+            let (lc, cc) = (nlen(left), nlen(child));
+            ptr::copy(ent(child, 0), ent(child, 1), cc);
+            ent(child, 0).write(ent(parent, i - 1).read());
+            ent(parent, i - 1).write(ent(left, lc - 1).read());
+            if internal {
+                ptr::copy(edg(child, 0), edg(child, 1), cc + 1);
+                edg(child, 0).write(*edg(left, lc));
+            }
+            set_nlen(left, lc - 1);
+            set_nlen(child, cc + 1);
+            0
+        } else if i < n && nlen(*edg(parent, i + 1)) > MIN {
+            // Borrow from the right sibling through the separator.
+            let right = *edg(parent, i + 1);
+            let (rc, cc) = (nlen(right), nlen(child));
+            ent(child, cc).write(ent(parent, i).read());
+            ent(parent, i).write(ent(right, 0).read());
+            ptr::copy(ent(right, 1), ent(right, 0), rc - 1);
+            if internal {
+                edg(child, cc + 1).write(*edg(right, 0));
+                ptr::copy(edg(right, 1), edg(right, 0), rc);
+            }
+            set_nlen(right, rc - 1);
+            set_nlen(child, cc + 1);
+            0
+        } else {
+            // Merge with a sibling (both are at the minimum): right node `j + 1` into left node `j`.
+            let j = if i > 0 { i - 1 } else { i };
+            let (left, right) = (*edg(parent, j), *edg(parent, j + 1));
+            let (lc, rc) = (nlen(left), nlen(right));
+            ent(left, lc).write(ent(parent, j).read());
+            move_entries(right, 0, left, lc + 1, rc);
+            if internal {
+                move_edges(right, 0, left, lc + 1, rc + 1);
+            }
+            set_nlen(left, lc + 1 + rc);
+            free_node(budget, right, internal);
+            ptr::copy(ent(parent, j + 1), ent(parent, j), n - j - 1);
+            ptr::copy(edg(parent, j + 2), edg(parent, j + 1), n - j - 1);
+            set_nlen(parent, n - 1);
+            1
         }
-        set_nlen(right, rc - 1);
-        set_nlen(child, cc + 1);
-        0
-    } else {
-        // Merge with a sibling (both are at the minimum): right node `j + 1` into left node `j`.
-        let j = if i > 0 { i - 1 } else { i };
-        let (left, right) = (*edg(parent, j), *edg(parent, j + 1));
-        let (lc, rc) = (nlen(left), nlen(right));
-        ent(left, lc).write(ent(parent, j).read());
-        move_entries(right, 0, left, lc + 1, rc);
-        if internal {
-            move_edges(right, 0, left, lc + 1, rc + 1);
-        }
-        set_nlen(left, lc + 1 + rc);
-        free_node(budget, right, internal);
-        ptr::copy(ent(parent, j + 1), ent(parent, j), n - j - 1);
-        ptr::copy(edg(parent, j + 2), edg(parent, j + 1), n - j - 1);
-        set_nlen(parent, n - 1);
-        1
     }
 }
 
 /// Removes the largest entry below `n`. `freed` counts the nodes released.
-unsafe fn remove_max<K, V>(budget: &Budget, n: Node<K, V>, height: usize, freed: &mut usize) -> (K, V) {
-    if height == 0 {
-        return leaf_remove(n, nlen(n) - 1);
+unsafe fn remove_max<K, V>(
+    budget: &Budget,
+    n: Node<K, V>,
+    height: usize,
+    freed: &mut usize,
+) -> (K, V) {
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        if height == 0 {
+            return leaf_remove(n, nlen(n) - 1);
+        }
+        let i = nlen(n);
+        let out = remove_max(budget, *edg(n, i), height - 1, freed);
+        *freed += fix_child(budget, n, height, i);
+        out
     }
-    let i = nlen(n);
-    let out = remove_max(budget, *edg(n, i), height - 1, freed);
-    *freed += fix_child(budget, n, height, i);
-    out
 }
 
 unsafe fn remove_rec<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
@@ -302,25 +385,29 @@ unsafe fn remove_rec<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
     key: &Q,
     freed: &mut usize,
 ) -> Option<(K, V)> {
-    match search::<K, V, Q>(n, key) {
-        Ok(i) => {
-            if height == 0 {
-                return Some(leaf_remove(n, i));
-            }
-            let pred = remove_max(budget, *edg(n, i), height - 1, freed);
-            let old = ptr::replace(ent(n, i), pred);
-            *freed += fix_child(budget, n, height, i);
-            Some(old)
-        }
-        Err(i) => {
-            if height == 0 {
-                return None;
-            }
-            let out = remove_rec(budget, *edg(n, i), height - 1, key, freed);
-            if out.is_some() {
+    // SAFETY: the caller upholds this function's contract (live nodes of the tree, indexes within the node
+    // bounds, ranges that fit), which is what every operation below relies on.
+    unsafe {
+        match search::<K, V, Q>(n, key) {
+            Ok(i) => {
+                if height == 0 {
+                    return Some(leaf_remove(n, i));
+                }
+                let pred = remove_max(budget, *edg(n, i), height - 1, freed);
+                let old = ptr::replace(ent(n, i), pred);
                 *freed += fix_child(budget, n, height, i);
+                Some(old)
             }
-            out
+            Err(i) => {
+                if height == 0 {
+                    return None;
+                }
+                let out = remove_rec(budget, *edg(n, i), height - 1, key, freed);
+                if out.is_some() {
+                    *freed += fix_child(budget, n, height, i);
+                }
+                out
+            }
         }
     }
 }
@@ -328,7 +415,14 @@ unsafe fn remove_rec<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized>(
 impl<K: Ord, V> KMap<K, V> {
     /// An empty map on `budget`. Allocates nothing.
     pub fn new_in(budget: &Budget) -> KMap<K, V> {
-        KMap { root: None, height: 0, len: 0, nodes: 0, budget: budget.clone(), _own: PhantomData }
+        KMap {
+            root: None,
+            height: 0,
+            len: 0,
+            nodes: 0,
+            budget: budget.clone(),
+            _own: PhantomData,
+        }
     }
 
     /// Inserts a pair and returns the previous value for the key. Replacing a value never allocates.
@@ -384,7 +478,9 @@ impl<K: Ord, V> KMap<K, V> {
         // SAFETY: the tree is intact; the pool holds exactly the nodes the splits will consume.
         let split = unsafe { insert_rec(root, self.height, (key, value), &mut pool) };
         if let Some((med, right)) = split {
-            let top = pool[self.height + 1].take().expect("a new root was preallocated");
+            let top = pool[self.height + 1]
+                .take()
+                .expect("a new root was preallocated");
             // SAFETY: `top` is a fresh empty internal node; the old root and `right` are at the same height.
             unsafe {
                 ent(top, 0).write(med);
@@ -465,8 +561,10 @@ impl<K: Ord, V> KMap<K, V> {
     {
         let root = self.root?;
         let mut freed = 0;
+        let (budget, height) = (&self.budget, self.height);
         // SAFETY: the tree is intact and `root` is at `self.height`.
-        let out = unsafe { remove_rec::<K, V, Q>(&self.budget, root, self.height, key, &mut freed) }?;
+        let removed = unsafe { remove_rec::<K, V, Q>(budget, root, height, key, &mut freed) };
+        let out = removed?;
         self.len -= 1;
         self.nodes -= freed;
         // SAFETY: `root` is still live (only merges below it free nodes, and a merge never frees the root).
@@ -509,7 +607,12 @@ impl<K: Ord, V> KMap<K, V> {
     }
 
     fn raw_iter(&self) -> RawIter<K, V> {
-        let mut it = RawIter { stack: [None; MAX_HEIGHT + 1], depth: 0, remaining: self.len, leaf: self.height + 1 };
+        let mut it = RawIter {
+            stack: [None; MAX_HEIGHT + 1],
+            depth: 0,
+            remaining: self.len,
+            leaf: self.height + 1,
+        };
         if let Some(root) = self.root {
             let mut node = root;
             let mut h = self.height;
