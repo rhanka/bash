@@ -32,7 +32,9 @@ export class Instance {
     this.hooks = hooks;
     this.poisoned = false;
     this.waiters = new Set();
-    const { engine, _util } = instantiate(coreModules(mainModule, impl?.shims), { onTrap: () => this.poison() });
+    const { engine, _util } = instantiate(coreModules(mainModule, impl?.shims), {}, undefined, {
+      onTrap: () => this.poison(),
+    });
     this.engine = engine;
     this.util = _util;
     hooks?.onEngine?.(this.engine);

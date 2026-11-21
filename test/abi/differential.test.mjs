@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { functions, resourceKinds, namespace } from "../../host/core/abi/layout.js";
+import { PROFILES } from "../../host/core/limits.js";
+import { sha256 } from "../../tools/lib.mjs";
 import { adapterPair, binary, bytes, compareValues, layoutCases, opts, snapshotResult, testConfig } from "./support.mjs";
 
 const root = bytes("/");
@@ -91,6 +93,7 @@ function transcript({ engine, _util }, testKernel) {
     drop(source);
 
     const config = testConfig({
+      grants: { hostFs: undefined, customCommands: true },
       commands: testKernel ? ["echo", "__out"] : ["echo"],
       cwd: root,
       processInfo: { pid: 4, ppid: 3, uid: 2, gid: 1 },
@@ -100,19 +103,26 @@ function transcript({ engine, _util }, testKernel) {
     err("[static]shell.create", "unknown limit override", "invalid-config", () =>
       engine.Shell.create(v, testConfig({ limits: { profile: "micro", overrides: [{ name: "noSuchLimit", value: 1n }] } })));
     const sh = value("[static]shell.create", "optional config fields", () => engine.Shell.create(v, config));
+    const emptyCwd = invoke("[static]shell.create", "present empty cwd", () =>
+      engine.Shell.create(v, testConfig({ cwd: new Uint8Array() })));
+    if (emptyCwd.value) {
+      value("[method]shell.cwd", "present empty config cwd", () => emptyCwd.value.cwd());
+      drop(emptyCwd.value);
+    }
     value("[method]shell.register-command", "stub", () => sh.registerCommand("stub"));
     value("[method]shell.env", "seeded", () => sh.env());
     assert.deepEqual(value("[method]shell.cwd", "explicit root", () => sh.cwd()), root);
 
-    const parent = value("[static]fiber.spawn", "no parent", () => engine.Fiber.spawn(sh, undefined, opts("stub a")));
+    const parent = value("[static]fiber.spawn", "no parent and empty bypass command", () =>
+      engine.Fiber.spawn(sh, undefined, opts("stub a", { bypassCustom: "" })));
     value("[method]fiber.write-stdin", "sliced non-final bytes", () => parent.writeStdin(binary, false));
     value("[method]fiber.write-stdin", "empty final stdin", () => parent.writeStdin(new Uint8Array(), true));
     assert.equal(value("[method]fiber.run", "zero fuel", () => parent.run(0n)).tag, "out-of-fuel");
     const step = value("[method]fiber.run", "registered custom command", () => parent.run(100n));
     assert.equal(step.tag, "host-call");
     const { epoch } = step.val;
-    const child = value("[static]fiber.spawn", "borrowed parent", () =>
-      engine.Fiber.spawn(sh, parent, opts(testKernel ? "__out 2" : "echo child")));
+    const child = value("[static]fiber.spawn", "borrowed parent and present empty cwd", () =>
+      engine.Fiber.spawn(sh, parent, opts(testKernel ? "__out 2" : "echo child", { cwd: new Uint8Array() })));
     assert.equal(value("[method]fiber.run", "child done", () => child.run(100n)).tag, "done");
     value("[method]fiber.take-stdout", "child drain", () => child.takeStdout(100));
     drop(child);
@@ -123,6 +133,8 @@ function transcript({ engine, _util }, testKernel) {
     const env = [{ name: bytes("NAME"), value: bytes("before"), exported: true }];
     value("[method]fiber.set-call-env", "replace pending environment", () => parent.setCallEnv(epoch, env));
     value("[method]fiber.assign-variable", "no subscript", () => parent.assignVariable(epoch, bytes("NAME"), bytes("after"), undefined));
+    invoke("[method]fiber.assign-variable", "present empty subscript", () =>
+      parent.assignVariable(epoch, bytes("NAME"), bytes("empty subscript"), new Uint8Array()));
     const done = value("[method]fiber.resume", "command exit", () => parent.resume(epoch, { tag: "command-exit", val: 7 }));
     assert.equal(done.tag, "done");
     assert.equal(done.val.exitCode, 7);
@@ -166,8 +178,8 @@ for (const name of ["kernel", "kernel-test"]) {
         ["[export]" + namespace, "[resource-" + op + "]" + kind, "function"])).sort());
     assert.equal(functions.length, 29);
     assert.equal(resourceKinds.length, 3);
-    const first = transcript(pair.firstParty(), name === "kernel-test");
     const oracle = transcript(pair.oracle(), name === "kernel-test");
+    const first = transcript(pair.firstParty(), name === "kernel-test");
     assert.equal(first.length, oracle.length);
     first.forEach(([fn, input, result], i) => {
       assert.deepEqual(oracle[i].slice(0, 2), [fn, input]);
@@ -176,4 +188,40 @@ for (const name of ["kernel", "kernel-test"]) {
     t.diagnostic("29/29 functions, 21/21 fs-op tags, 3/3 step tags, core SHA-256 " + pair.hash);
   });
 }
+
+test("both bindings lift a VFS read larger than the normal profile headroom after a ceiling raise", async () => {
+  const pair = await adapterPair("kernel");
+  const mib = 1 << 20;
+  const headroom = PROFILES.normal.headroom;
+  const length = headroom + 4;
+  const path = bytes("/large");
+  const chunk = new Uint8Array(mib).fill(0x8a);
+  function readLarge({ engine, _util }) {
+    try {
+      engine.configure(BigInt(PROFILES.micro.ceiling));
+      engine.raiseCeiling(BigInt(PROFILES.normal.ceiling));
+      const vfs = engine.Vfs.create(80n << 20n);
+      const shell = engine.Shell.create(vfs, testConfig({ limits: { profile: "normal", overrides: [] } }));
+      assert.deepEqual(shell.cwd(), root);
+      for (let offset = 0; offset < length; offset += mib) {
+        const data = offset < headroom ? chunk : binary;
+        assert.equal(vfs.op({ tag: "write-file", val: { path, data, offset: BigInt(offset), truncate: false } }).tag, "ok");
+      }
+      const result = vfs.op({ tag: "read-file", val: { path, offset: 0n, len: length } });
+      assert.equal(result.tag, "ok");
+      assert.equal(result.val.tag, "data");
+      assert.equal(result.val.val.length, length);
+      assert.deepEqual(result.val.val.subarray(headroom), binary);
+      const hash = sha256(result.val.val);
+      shell[Symbol.dispose]();
+      vfs[Symbol.dispose]();
+      return { hash, usage: engine.usage() };
+    } finally {
+      _util.stop();
+    }
+  }
+  const expected = readLarge(pair.oracle());
+  const actual = readLarge(pair.firstParty());
+  assert.deepEqual(actual, expected);
+});
 

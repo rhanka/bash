@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { Codec } from "../../host/core/abi/codec.js";
 import { alignTo, layout } from "../../host/core/abi/layout.js";
 import { binary, bytes, layoutCases, testConfig } from "./support.mjs";
@@ -88,6 +89,12 @@ test("the codec preserves scalar extrema, UTF-8 with BOM, typed arrays and neste
     grants: { hostFs: false, network: false, realClock: false, realSleep: false, entropy: false, customCommands: true },
     commands: undefined, cwd: undefined, processInfo: undefined,
   }]]);
+  const grants = layout("grants");
+  const codecWithoutMemory = new Codec({});
+  for (const record of [Object.assign(Object.create(null), { customCommands: true }),
+    runInNewContext("({ hostFs: undefined, customCommands: true })")]) {
+    assert.equal(codecWithoutMemory.stage(grants, record, "grants"), 32);
+  }
   roundtrip("trace-event", [[{ category: "builtin", name: "é", durationMs: -0,
     details: [{ key: "float", value: { tag: "number", val: -0 } }, { key: "binary", value: { tag: "text", val: binary } }] }]]);
   roundtrip(["variant", [["float", "f64"], ["signed", "s32"], ["wide", "u64"], ["unit", null]]],
@@ -123,5 +130,64 @@ test("array lengths and staged encodings consume budget before allocating host c
   assert.throws(() => codec.liftFlat(layout(["list", "u16"]), [1, 0]), /misaligned/);
   assert.throws(() => codec.liftFlat(layout("bytes"), [65537, 0]), /out-of-bounds/);
   assert.deepEqual(codec.liftFlat(layout("bytes"), [65536, 0]), new Uint8Array());
+});
+
+test("empty sequences lower to an aligned non-null pointer without reallocating", () => {
+  const core = {
+    memory: new WebAssembly.Memory({ initial: 1 }),
+    cabi_realloc() { assert.fail("empty sequence allocated guest memory"); },
+  };
+  const codec = new Codec({ core });
+  for (const [ref, value, align] of [
+    ["string", "", 1],
+    ["bytes", new Uint8Array(), 1],
+    [["list", "u16"], new Uint16Array(), 2],
+    [["list", "u64"], [], 8],
+  ]) {
+    const type = layout(["option", ref]);
+    const flat = [];
+    codec.flatten(type, codec.stage(type, value, "fixture"), flat);
+    assert.deepEqual(flat, [1, align, 0]);
+
+    const ptr = 32;
+    codec.write(type, codec.stage(type, value, "fixture"), ptr);
+    const data = new DataView(core.memory.buffer);
+    assert.equal(data.getUint8(ptr), 1);
+    assert.equal(data.getUint32(ptr + type.payloadOffset, true), align);
+    assert.equal(data.getUint32(ptr + type.payloadOffset + 4, true), 0);
+  }
+  const withoutMemory = new Codec({ core: { ...core, memory: new WebAssembly.Memory({ initial: 0 }) } });
+  assert.throws(() => withoutMemory.allocate(0, 8), /out-of-bounds/);
+});
+
+test("repeated string transfers reuse the UTF-8 encoder and fatal BOM-preserving decoder", async () => {
+  const { TextEncoder: Encoder, TextDecoder: Decoder } = globalThis;
+  let encoders = 0;
+  let decoders = 0;
+  globalThis.TextEncoder = class extends Encoder {
+    constructor(...args) { super(...args); encoders++; }
+  };
+  globalThis.TextDecoder = class extends Decoder {
+    constructor(...args) { super(...args); decoders++; }
+  };
+  try {
+    const { Codec: FreshCodec } = await import("../../host/core/abi/codec.js?count-utf8-constructors");
+    const core = { memory: new WebAssembly.Memory({ initial: 1 }) };
+    const data = new Uint8Array(core.memory.buffer);
+    const type = layout("string");
+    for (const value of ["\ufeffé", "hello", "\ufeffworld"]) {
+      const codec = new FreshCodec({ core });
+      const encoded = codec.stage(type, value, "fixture");
+      data.set(encoded);
+      assert.equal(codec.liftFlat(type, [0, encoded.length]), value);
+    }
+    data[0] = 0xc0;
+    assert.throws(() => new FreshCodec({ core }).liftFlat(type, [0, 1]), TypeError);
+    assert.equal(encoders, 1);
+    assert.equal(decoders, 1);
+  } finally {
+    globalThis.TextEncoder = Encoder;
+    globalThis.TextDecoder = Decoder;
+  }
 });
 

@@ -30,7 +30,7 @@ export async function transpileComponent(componentPath, outDir, { minify = false
   if (result.imports.length !== 0) throw new Error(`component has imports: ${result.imports.join(", ")}`);
   if (name === "kernel" || name === "kernel-test") {
     const glue = Buffer.from(result.files[name + ".js"]).toString("utf8");
-    result.files[name + ".js"] = guardPromisingProbes(glue, { minify });
+    result.files[name + ".js"] = guardFinalizerTraps(guardPromisingProbes(glue, { minify }));
   }
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
@@ -68,6 +68,16 @@ export function guardPromisingProbes(source, { minify = false } = {}) {
     throw drift("expected every promising reference to be an optional call");
   }
   return source;
+}
+
+// The pinned generator enters the destructor shim directly from finalizers, outside task guards.
+function guardFinalizerTraps(source) {
+  const drift = () => new Error("jco finalizer trap guard drift in kernel.js");
+  const state = source.match(/([\w$]+\([\w$]+,\s*0\))\.markTrapped\(/)?.[1];
+  const finalizerDrop = /[\w$]+\.stopped\s*\|\|\s*[\w$]+\[[012]\]\([\w$]+\)/g;
+  if (!state || [...source.matchAll(finalizerDrop)].length !== 6) throw drift();
+  return source.replace(finalizerDrop, (drop) =>
+    `try { ${drop}; } catch (error) { if (!${state}.markTrapped(error)) throw error; }`);
 }
 
 /** Writes generated files under outDir; a name that resolves outside it is refused. */

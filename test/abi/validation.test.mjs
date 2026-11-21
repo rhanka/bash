@@ -54,6 +54,8 @@ test("invalid lowering leaves allocation and call counts at zero and the store u
     }))],
     [TypeError, "unknown flag name", () => engine.Shell.create(vfs, testConfig({ grants: { 7: true } }))],
     [TypeError, "nonboolean grant", () => engine.Shell.create(vfs, testConfig({ grants: { customCommands: 1 } }))],
+    ...[new Map([["hostFs", true]]), new Set(), new Date(0), new ArrayBuffer(8), vfs]
+      .map((grants) => [TypeError, "non-record grants", () => engine.Shell.create(vfs, testConfig({ grants }))]),
     [TypeError, "wrong-kind receiver", () => engine.Vfs.prototype.op.call(sh, { tag: "all-paths" })],
     [TypeError, "numeric receiver", () => engine.Vfs.prototype.usedBytes.call(1)],
     [TypeError, "forged receiver", () => engine.Shell.prototype.env.call(Object.create(engine.Shell.prototype))],
@@ -173,6 +175,55 @@ for (const [category, ref, indirectResult, malformedReturn, detail] of malformed
   });
 }
 
+test("aggregate lifts use the accepted ceiling and count repeated pointers separately", () => {
+  const create = () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const data = new DataView(memory.buffer);
+    data.setUint32(64, 80, true);
+    data.setUint32(68, 2, true);
+    for (const offset of [80, 88]) {
+      data.setUint32(offset, 128, true);
+      data.setUint32(offset + 4, 512, true);
+    }
+    let ceiling = 0n;
+    const changeCeiling = (value, errorCode) => {
+      data.setUint8(32, errorCode === undefined ? 0 : 1);
+      if (errorCode === undefined) ceiling = value;
+      else data.setUint8(32 + configure.result.payloadOffset, layout("kernel-error-code").labels.indexOf(errorCode));
+      return 32;
+    };
+    const posts = [];
+    const store = linkEngine(() => ({
+      memory,
+      [coreName("configure")](value) { return changeCeiling(value, ceiling === 0n ? undefined : "already-configured"); },
+      [coreName("raise-ceiling")](value) { return changeCeiling(value, value >= ceiling ? undefined : "invalid-config"); },
+      [postName("configure")]() {},
+      [postName("raise-ceiling")]() {},
+      [coreName("coverage-features")]() { return 64; },
+      [postName("coverage-features")](ptr) { posts.push(ptr); },
+    }));
+    return { ...store, posts };
+  };
+
+  const budget = 1040n; // Two 8-byte string descriptors and two 512-byte copies.
+  const small = create();
+  small.engine.configure(budget - 1n);
+  assert.throws(() => small.engine.configure(budget), { code: "already-configured" });
+  assert.throws(() => small.engine.coverageFeatures(), /result exceeds the transfer budget/);
+  assert.deepEqual(small.posts, []);
+
+  const raised = create();
+  try {
+    raised.engine.configure(budget - 1n);
+    raised.engine.raiseCeiling(budget);
+    assert.throws(() => raised.engine.raiseCeiling(budget - 1n), { code: "invalid-config" });
+    assert.deepEqual(raised.engine.coverageFeatures(), ["\0".repeat(512), "\0".repeat(512)]);
+    assert.deepEqual(raised.posts, [64]);
+  } finally {
+    raised._util.stop();
+  }
+});
+
 test("oneshot lifting uses the portion of the profile's transfer budget left after lowering", () => {
   const mib = 1 << 20;
   const memory = new WebAssembly.Memory({ initial: 65 });
@@ -181,7 +232,8 @@ test("oneshot lifting uses the portion of the profile's transfer budget left aft
   const stdout = span + result.payloadOffset + result.cases[0].type.fields.find(({ key }) => key === "stdout").offset;
   const data = new DataView(memory.buffer);
   data.setUint32(stdout, 4096, true);
-  data.setUint32(stdout + 4, 4 * mib - fn.params.size, true);
+  const fileBytes = 20 + 2 + 3; // oneshot-file record, path and contents
+  data.setUint32(stdout + 4, 4 * mib - fn.params.size - fileBytes, true);
   const notifications = [];
   const actions = [];
   let next = 256;
@@ -195,10 +247,46 @@ test("oneshot lifting uses the portion of the profile's transfer budget left aft
     [fn.exportName]() { actions.push("enter"); return span; },
     [fn.postName]() { actions.push("post"); },
   }), { onTrap: (error) => notifications.push(error) });
-  const request = { files: [], config: testConfig(), opts: opts(""), stdin: new Uint8Array(), fuel: 1n };
-  assert.equal(engine.execOneshot(request).stdout.length, 4 * mib - fn.params.size);
+  const request = { files: [{ path: bytes("/f"), data: bytes("abc"), mode: 0o644 }],
+    config: testConfig(), opts: opts(""), stdin: new Uint8Array(), fuel: 1n };
+  assert.equal(engine.execOneshot(request).stdout.length, 4 * mib - fn.params.size - fileBytes);
   assert.throws(() => engine.execOneshot({ ...request, stdin: Uint8Array.of(1) }), /result exceeds the transfer budget/);
   assert.deepEqual(actions, ["enter", "post", "enter"]);
   assert.equal(notifications.length, 1);
+});
+
+test("oneshot stages files and config in WIT order before entering the guest", async () => {
+  const { module } = await adapterPair("kernel");
+  const { engine, _util, events } = instrumentCore(module);
+  try {
+    engine.configure(64n << 20n);
+    events.length = 0;
+    const seen = [];
+    const request = {
+      get files() {
+        seen.push("files");
+        return [{ path: bytes("/f"), get data() { seen.push("data"); return bytes("original"); }, mode: 0o644 }];
+      },
+      get config() {
+        seen.push("config");
+        return testConfig({ limits: { get profile() { seen.push("profile"); return "micro"; }, overrides: [] } });
+      },
+      get opts() { seen.push("opts"); return opts("echo ok"); },
+      get stdin() { seen.push("stdin"); return new Uint8Array(); },
+      get fuel() { seen.push("fuel"); return 100n; },
+    };
+    const output = engine.execOneshot(request);
+    assert.deepEqual(seen, ["files", "data", "config", "profile", "opts", "stdin", "fuel"]);
+    assert.deepEqual(output.stdout, bytes("ok\n"));
+
+    events.length = 0;
+    assert.throws(() => engine.execOneshot({
+      files: [{ path: bytes("/f"), data: new Uint8Array(4 << 20), mode: 0o644 }],
+      config: { limits: { profile: "micro", get overrides() { assert.fail("profile cap was not checked"); } } },
+    }), RangeError);
+    assert.deepEqual(events, []);
+  } finally {
+    _util.stop();
+  }
 });
 
