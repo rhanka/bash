@@ -14,7 +14,7 @@
 //! level lower; the tree owns every node and entry.
 use super::budget::Budget;
 use super::error::{MemError, MemResult};
-use alloc::alloc::{alloc, dealloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, Layout};
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
