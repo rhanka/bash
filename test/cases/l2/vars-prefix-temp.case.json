@@ -1,0 +1,9 @@
+{
+  "id": "l2/vars-prefix-temp",
+  "steps": [
+    {
+      "script": "X=outer\nX=inner Y=$X echo $X $Y\necho $X $Y"
+    }
+  ],
+  "title": "Vars prefix temp"
+}

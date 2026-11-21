@@ -1,0 +1,9 @@
+{
+  "id": "l2/echo-flags",
+  "steps": [
+    {
+      "script": "echo -n alpha; echo -n beta; echo\necho -ne 'x\\ty\\n'\necho -en 'p\\tq'\necho\necho -e -E 'a\\nb'\necho -- hi\necho -nE 'a\\nb'\necho -z test"
+    }
+  ],
+  "title": "Echo flags"
+}

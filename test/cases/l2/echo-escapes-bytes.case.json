@@ -1,0 +1,12 @@
+{
+  "id": "l2/echo-escapes-bytes",
+  "steps": [
+    {
+      "script": "echo -e '\\0303\\0251|\\xc3\\xa9|\\0101'"
+    },
+    {
+      "script": "echo -e '\\0377'"
+    }
+  ],
+  "title": "Echo escapes bytes"
+}

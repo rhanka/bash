@@ -1,0 +1,9 @@
+{
+  "id": "l2/pipeline-subshell-scope",
+  "steps": [
+    {
+      "script": "P=before\nP=changed | P=other\necho P=$P"
+    }
+  ],
+  "title": "Pipeline subshell scope"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "l2/param-brace-edge",
+  "steps": [
+    {
+      "script": "echo a${}b\necho ${ x}\necho q=$?"
+    }
+  ],
+  "title": "Param brace edge"
+}

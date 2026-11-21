@@ -1,0 +1,23 @@
+{
+  "env": {
+    "BASE": "1"
+  },
+  "id": "l2/exec-isolation-and-options",
+  "steps": [
+    {
+      "args": [
+        "arg one",
+        "arg2"
+      ],
+      "cwd": "/tmp",
+      "env": {
+        "STEP": "2"
+      },
+      "script": "MUT=leak\necho $BASE $STEP $PWD"
+    },
+    {
+      "script": "echo $BASE $STEP $MUT $PWD"
+    }
+  ],
+  "title": "Exec isolation and options"
+}
