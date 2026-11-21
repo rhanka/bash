@@ -1,4 +1,4 @@
-// Node entry: the facade and the pipeline probe.
+// Node entry: the shell facade.
 import { nodeLoader } from "./node/load.js";
 import { createFacade, defineCommand, getCommandNames, getJavaScriptCommandNames, getNetworkCommandNames, getPythonCommandNames } from "./core/facade.js";
 import { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError } from "./core/errors.js";
@@ -9,12 +9,3 @@ const { Bash, InMemoryFs } = createFacade(nodeLoader);
 export { Bash, InMemoryFs, defineCommand, getCommandNames, getNetworkCommandNames, getPythonCommandNames, getJavaScriptCommandNames };
 export { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError };
 export const { EMPTY_BYTES, bytesOutput, decodeBytesToUtf8, encodeUtf8ToBytes, latin1FromBytes, stdoutAsBytes, stdoutKind, textOutput, unsafeBytesFromLatin1 } = bytes;
-
-/** Loads and instantiates the pipeline probe on demand. */
-export async function pipelineProbe() {
-  const [{ pipelineProbe: instantiateProbe }, { compileProbeCore }] = await Promise.all([
-    import("./browser-probe.js"),
-    import("./node/probe.js"),
-  ]);
-  return instantiateProbe(compileProbeCore());
-}

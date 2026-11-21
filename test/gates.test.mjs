@@ -18,7 +18,8 @@ test("the real tree passes G1, G2, G4, G5, G6, G7, G8", () => {
 
 test("G1 fails on a component with an import", () => {
   const out = scratch("g1");
-  run(toolBin("wasm-tools", toolsDir()), ["parse", join(fx("g1-import"), "import.wat"), "-o", join(out, "probe.component.wasm")]);
+  mkdirSync(join(out, "test"));
+  run(toolBin("wasm-tools", toolsDir()), ["parse", join(fx("g1-import"), "import.wat"), "-o", join(out, "test", "probe.component.wasm")]);
   assert.match(gates.g1ZeroImport({ ...real(), out }), /has an import/);
 });
 
@@ -153,7 +154,7 @@ test("G1, G4 and G5 fail when a declared component is missing from dist", () => 
 
 test("G4 fails when the component exports more than the committed world", () => {
   const root = tree("g4-world", {
-    "tools/components.json": JSON.stringify({ components: { probe: { crate: "x", witDir: "probe/wit", world: "probe" } } }),
+    "tools/components.json": JSON.stringify({ components: { probe: { crate: "x", witDir: "probe/wit", world: "probe", test: true } } }),
     "probe/wit/probe.wit": "package sentropic:bash-probe@0.0.0;\nworld probe { export ping: func(x: u32) -> u32; }\n",
   });
   // The built probe also exports echo-bytes and grow: width subtyping lets it target the smaller world.
@@ -180,9 +181,9 @@ test("G4 compares functions inside exported interfaces", () => {
 });
 
 test("G5 fails on two .wasm files and on an embedded base64 literal", () => {
-  const two = tree("g5-two", { "js/probe/a.wasm": "x", "js/probe/b.wasm": "y" });
+  const two = tree("g5-two", { "test/js/probe/a.wasm": "x", "test/js/probe/b.wasm": "y" });
   assert.match(gates.g5OneCoreModule({ ...real(), out: two }), /expected exactly one .wasm, found 2/);
-  const b64 = tree("g5-b64", { "js/probe/a.wasm": "x", "js/probe/a.js": "const d = '" + "A".repeat(1200) + "';" });
+  const b64 = tree("g5-b64", { "test/js/probe/a.wasm": "x", "test/js/probe/a.js": "const d = '" + "A".repeat(1200) + "';" });
   assert.match(gates.g5OneCoreModule({ ...real(), out: b64 }), /base64 literal/);
 });
 
@@ -246,7 +247,7 @@ test("G6 fails on a Cargo.lock package with a source", () => {
 test("G3 fails when dist/ differs from the reproducible build", { timeout: 300000 }, () => {
   const out = scratch("g3-dist");
   cpSync(join(repoRoot, "dist"), out, { recursive: true, filter: (s) => !s.includes("/target") });
-  appendFileSync(join(out, "js", "probe", "probe.js"), "\n// tampered\n");
+  appendFileSync(join(out, "test", "js", "probe", "probe.js"), "\n// tampered\n");
   assert.match(gates.g3TwoBuildIdentity({ ...real(), quick: false, out }), /differs from the reproducible build/);
 });
 

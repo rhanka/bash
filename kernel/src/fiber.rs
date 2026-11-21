@@ -1,11 +1,22 @@
-//! The `fiber` resource: one exec, run by the bootstrap interpreter (spec section 5) until L2 replaces it.
-//! A fiber is a resumable state machine: `run` executes commands until the fuel is out, a host call is
-//! needed or the script ends; `resume` answers a host call.
-use crate::limits::{self, I_INPUT_BYTES, I_LIVE_BYTES, I_OUTPUT_SIZE, I_SOURCE_BYTES};
-use crate::mem::{reserve_scope, Budget, KBytes, KRc, KString, KVec, LimitId, MemError, MemResult, TryClone};
+//! One exec: a resumable VM, its pipe streams and the epoch-checked resource boundary.
+use crate::cmd::{CmdCtx, CmdFrame, CmdPoll};
+use crate::limits::{
+    self, I_ARRAY_ELEMENTS, I_CALL_DEPTH, I_COMMAND_COUNT, I_EXEC_DEPTH, I_FS_BYTES, I_INPUT_BYTES,
+    I_LIVE_BYTES, I_OUTPUT_SIZE, I_SOURCE_BYTES, I_STRING_LENGTH, I_WORK_UNITS,
+};
+use crate::mem::{
+    reserve_scope, Budget, KBox, KBytes, KChunks, KRc, KString, KVec, LimitId, MemError, MemResult,
+    TryClone,
+};
 use crate::shell::{Shell, G_CUSTOM};
 use crate::util::{bytes_in, fmt_in, str_in, Env};
-use core::fmt::Write;
+use core::{cell::Cell, fmt::Write};
+
+mod expand;
+mod syntax;
+mod vm;
+use syntax::{utf16_len, Ast};
+use vm::Vm;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -19,22 +30,39 @@ pub struct ExecResult {
     pub exit: i32,
     pub status: Status,
     pub limit_name: Option<KString>,
-    pub env: Env,
+    pub env: KRc<Env>,
     pub stdout_bytes: bool,
 }
 
 impl TryClone for ExecResult {
     fn try_clone(&self) -> MemResult<Self> {
-        Ok(ExecResult { exit: self.exit, status: self.status, limit_name: self.limit_name.try_clone()?, env: self.env.try_clone()?, stdout_bytes: self.stdout_bytes })
+        Ok(ExecResult {
+            exit: self.exit,
+            status: self.status,
+            limit_name: self.limit_name.try_clone()?,
+            env: self.env.try_clone()?,
+            stdout_bytes: self.stdout_bytes,
+        })
     }
 }
 
 /// A host request, owned (it leaves the kernel through the adapter).
 pub enum HostReq {
-    FsStat { mount_id: u32, path: KBytes },
+    FsStat {
+        mount_id: u32,
+        path: KBytes,
+    },
     LazyFile(KBytes),
-    Custom { name: KBytes, args: KVec<KBytes>, cwd: KBytes, env: Env, input_len: u64 },
-    Fetch { url: KBytes },
+    Custom {
+        name: KBytes,
+        args: KVec<KBytes>,
+        cwd: KBytes,
+        env: Env,
+        input_len: u64,
+    },
+    Fetch {
+        url: KBytes,
+    },
     Sleep(u64),
     Clock,
     Entropy(u32),
@@ -84,18 +112,33 @@ pub enum CallError {
     BadState,
     Denied,
 }
-
-/// Why an exec ends with a limit result.
-pub(crate) enum Fail {
+/// Terminal limits and recoverable expansion errors.
+#[derive(Debug)]
+pub enum Fail {
     Output,
     Input,
+    StringLength,
+    Elements,
+    Arguments,
+    CommandCount,
+    CallDepth(KBytes),
+    ExecDepth,
+    Work,
+    BadSubstitution(KBytes),
+    Readonly(KBytes),
     Mem(MemError),
+}
+
+impl From<MemError> for Fail {
+    fn from(error: MemError) -> Self {
+        Self::Mem(error)
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum Pending {
     Custom,
-    /// A test-only command waiting for its answer: command code and one value.
+    Kernel,
     #[allow(dead_code)]
     Test(u8, u64),
 }
@@ -104,55 +147,52 @@ pub(crate) enum Pending {
 pub(crate) enum Flow {
     Next,
     Spin,
+    Yield,
     Exit,
     Host(Pending, HostReq),
     Fail(Fail),
 }
 
-enum St {
+enum State {
     Ready,
     Spin,
     Pending(Pending),
     Done,
 }
 
-/// A drainable byte queue charged to the output budget.
-struct Out {
-    buf: KBytes,
-    head: usize,
-}
-
-impl Out {
-    fn new(b: &Budget) -> Out {
-        Out { buf: KBytes::new_in(b), head: 0 }
-    }
-    fn chunk(&self, max: usize) -> &[u8] {
-        let end = self.buf.len().min(self.head.saturating_add(max));
-        &self.buf[self.head..end]
-    }
-    fn consume(&mut self, n: usize) {
-        self.head = (self.head + n).min(self.buf.len());
-        if self.head == self.buf.len() {
-            self.buf.clear();
-            self.buf.shrink_to_fit();
-            self.head = 0;
-        }
-    }
-}
-
-// Terminal messages are bounded by the fixed text, a 128-byte limit name or a decimal number.
+/// Small formatting buffer for fixed diagnostics and decimal values.
 struct Diagnostic {
     bytes: [u8; 256],
     len: usize,
 }
 
+impl Diagnostic {
+    fn new() -> Self {
+        Self {
+            bytes: [0; 256],
+            len: 0,
+        }
+    }
+    fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 impl Write for Diagnostic {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let end = self.len + s.len();
-        self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?.copy_from_slice(s.as_bytes());
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(core::fmt::Error)?
+            .copy_from_slice(s.as_bytes());
         self.len = end;
         Ok(())
     }
+}
+
+struct Program {
+    source: KBytes,
+    ast: Ast,
 }
 
 pub struct Fiber {
@@ -163,252 +203,336 @@ pub struct Fiber {
     out_cap: u64,
     out_total: u64,
     in_cap: u64,
-    stdout: Out,
+    stdout: KChunks,
     stdout_bytes: bool,
-    stderr: Out,
-    stderr_tail: Out,
-    script: KBytes,
-    pos: usize,
-    checked: bool,
+    stderr: KChunks,
+    stderr_tail: KBytes,
+    script: Option<KBytes>,
+    program: Option<Program>,
+    vm: Vm,
+    active: Option<KBox<dyn CmdFrame>>,
     overflow: Option<(u64, u64)>,
-    pub(crate) stdin: KBytes,
-    pub(crate) stdin_pos: usize,
+    raw_script: bool,
+    pub(crate) stdin: KChunks,
+    input_window: KBytes,
     stdin_total: u64,
-    stdin_fail: Option<Fail>,
+    failed: Option<Fail>,
     pub(crate) env: Env,
+    overlay: Env,
     pub(crate) cwd: KBytes,
     pub(crate) last_exit: i32,
-    st: St,
+    last_arg: KBytes,
+    params: KVec<KBytes>,
+    args: KVec<KBytes>,
     epoch: u64,
-    pub(crate) body: KBytes,
+    state: State,
+    pub(crate) body: KChunks,
     call_env: Option<Env>,
     fuel: u64,
-    result: Option<ExecResult>,
+    exec_depth: u64,
+    work: KRc<Cell<u64>>,
+    result: ExecResult,
     pub(crate) kept: KVec<KBytes>,
     bypass: Option<KString>,
+    coverage: KVec<u16>,
 }
 
-/// What `spawn` needs from the caller, borrowed.
+/// Inputs borrowed while creating a fiber.
+#[derive(Default)]
 pub struct Opts<'a> {
     pub script: &'a [u8],
     pub overflow: Option<(u64, u64)>,
+    pub args: &'a [&'a [u8]],
     pub env: &'a [(&'a [u8], &'a [u8], bool)],
     pub replace_env: bool,
     pub cwd: Option<&'a [u8]>,
+    pub raw_script: bool,
     pub bypass_custom: Option<&'a str>,
 }
 
 impl Fiber {
-    /// Creates a fiber on `shell`. `parent_live` is the live budget of the parent fiber, if any.
-    pub fn spawn(shell: KRc<Shell>, parent_live: Option<&Budget>, o: &Opts<'_>) -> MemResult<Fiber> {
-        let live_cap = shell.lim.vals[I_LIVE_BYTES];
-        let live_id = limits::id_of_index(I_LIVE_BYTES);
-        let live = match parent_live {
-            Some(p) => p.child(live_id, live_cap)?,
-            None => shell.live.child(live_id, live_cap)?,
-        };
+    pub fn spawn(shell: KRc<Shell>, parent: Option<&Fiber>, o: &Opts<'_>) -> MemResult<Fiber> {
+        let cap = shell.lim.vals[I_LIVE_BYTES];
+        let live = parent
+            .map_or(&shell.live, |p| &p.live)
+            .child(limits::id_of_index(I_LIVE_BYTES), cap)?;
         let out_cap = shell.lim.vals[I_OUTPUT_SIZE];
-        // A little slack above the cap holds the diagnostic of the limit itself.
-        let out_budget = Budget::root(limits::id_of_index(I_OUTPUT_SIZE), out_cap.saturating_add(4096))?;
+        let out_budget = Budget::root(limits::id_of_index(I_OUTPUT_SIZE), u64::MAX)?;
         let scratch = Budget::root(LimitId::HEADROOM, u64::MAX)?;
-        let mut env = Env::new_in(&live);
-        let mut early: Option<Fail> = None;
-        if !o.replace_env {
-            for e in shell.env.v.iter() {
-                if let Err(x) = env.set(&e.name, &e.value, e.exported) {
-                    early.get_or_insert(Fail::Mem(x));
-                }
-            }
-        }
-        for (n, v, x) in o.env {
-            if let Err(e) = env.set(n, v, *x) {
-                early.get_or_insert(Fail::Mem(e));
-            }
-        }
-        let cwd = match bytes_in(o.cwd.unwrap_or(shell.cwd.as_slice()), &live) {
-            Ok(c) => c,
-            Err(e) => {
-                early.get_or_insert(Fail::Mem(e));
-                KBytes::new_in(&live)
-            }
-        };
-        let script = match bytes_in(o.script, &live) {
-            Ok(s) => s,
-            Err(e) => {
-                early.get_or_insert(Fail::Mem(e));
-                KBytes::new_in(&live)
-            }
-        };
-        let bypass = match o.bypass_custom {
-            Some(b) => str_in(b, &scratch).ok(),
-            None => None,
-        };
-        Ok(Fiber {
-            in_cap: shell.lim.vals[I_INPUT_BYTES],
-            stdout: Out::new(&out_budget),
+        let result = ExecResult {
+            exit: 0,
+            status: Status::Completed,
+            limit_name: None,
             stdout_bytes: false,
-            stderr: Out::new(&out_budget),
-            stderr_tail: Out::new(&scratch),
-            stdin: KBytes::new_in(&live),
-            body: KBytes::new_in(&live),
+            env: KRc::try_new_in(Env::new_in(&scratch), &scratch).map_err(|(_, e)| e)?,
+        };
+        let mut overlay = Env::new_in(&scratch);
+        for &(name, value, _) in o.env {
+            overlay.set(name, value, syntax::identifier(name))?;
+        }
+        let exec_depth = parent.map_or(0, |p| p.exec_depth.saturating_add(1));
+        let work = match parent {
+            Some(p) => p.work.clone(),
+            None => KRc::try_new_in(Cell::new(0), &scratch).map_err(|(_, e)| e)?,
+        };
+        let mut failed = (exec_depth > shell.lim.vals[I_EXEC_DEPTH]).then_some(Fail::ExecDepth);
+        let mut env = Env::new_in(&live);
+        let mut cwd = KBytes::new_in(&live);
+        let mut args = KVec::new_in(&live);
+        let mut script = KBytes::new_in(&live);
+        if failed.is_none() {
+            let prepare = (|| -> MemResult<()> {
+                if !o.replace_env {
+                    env.copy_from(&shell.env)?;
+                }
+                env.copy_from(&overlay)?;
+                let opt_cwd = o.cwd.filter(|p| !p.is_empty());
+                let resolved = opt_cwd
+                    .filter(|_| !o.env.is_empty() && overlay.get(b"PWD").is_none())
+                    .and_then(|path| shell.root.resolve(&shell.cwd, path).ok())
+                    .filter(|path| shell.root.stat_normalized(path).is_ok());
+                let path = resolved.as_deref().or(opt_cwd).unwrap_or(&shell.cwd);
+                cwd = bytes_in(path, &live)?;
+                if opt_cwd.is_some() {
+                    env.set(
+                        b"PWD",
+                        overlay.get(b"PWD").map_or(path, |pwd| &pwd.value),
+                        true,
+                    )?;
+                }
+                args.try_reserve_exact(o.args.len())?;
+                for arg in o.args {
+                    args.try_push(bytes_in(arg, &live)?)?;
+                }
+                if o.overflow.is_none() && o.script.len() as u64 <= shell.lim.vals[I_SOURCE_BYTES] {
+                    script = bytes_in(o.script, &live)?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = prepare {
+                failed = Some(Fail::Mem(e));
+            }
+        }
+        let overflow = o.overflow.or_else(|| {
+            (o.script.len() as u64 > shell.lim.vals[I_SOURCE_BYTES])
+                .then(|| (utf16_len(o.script), o.script.len() as u64))
+        });
+        let bypass = o.bypass_custom.map(|b| str_in(b, &scratch)).transpose()?;
+        Ok(Self {
+            in_cap: shell.lim.vals[I_INPUT_BYTES].min(shell.lim.vals[I_STRING_LENGTH]),
+            stdout: KChunks::new_in(&out_budget),
+            stderr: KChunks::new_in(&out_budget),
+            stderr_tail: KBytes::new_in(&scratch),
+            stdin: KChunks::new_in(&live),
+            input_window: KBytes::new_in(&live),
+            body: KChunks::new_in(&live),
             kept: KVec::new_in(&live),
+            vm: Vm::new(&live),
+            params: KVec::new_in(&live),
+            last_arg: KBytes::new_in(&live),
+            coverage: KVec::new_in(&live),
             shell,
             live,
             scratch,
             out_budget,
             out_cap,
-            out_total: 0,
-            script,
-            pos: 0,
-            checked: false,
-            overflow: o.overflow,
-            stdin_pos: 0,
-            stdin_total: 0,
-            stdin_fail: early,
+            overflow,
             env,
+            overlay,
             cwd,
-            last_exit: 0,
-            st: St::Ready,
-            epoch: 0,
-            call_env: None,
-            fuel: 100_000,
-            result: None,
             bypass,
+            args,
+            raw_script: o.raw_script,
+            script: Some(script),
+            program: None,
+            active: None,
+            failed,
+            stdout_bytes: false,
+            stdin_total: 0,
+            out_total: 0,
+            last_exit: 0,
+            epoch: 0,
+            state: State::Ready,
+            call_env: None,
+            fuel: 0,
+            exec_depth,
+            work,
+            result,
         })
     }
 
-    // ---------------------------------------------------------------- output
+    pub(crate) fn charge_work(&self, units: u64) -> Result<(), Fail> {
+        let next = self.work.get().checked_add(units).ok_or(Fail::Work)?;
+        if next > self.shell.lim.vals[I_WORK_UNITS] {
+            return Err(Fail::Work);
+        }
+        self.work.set(next);
+        Ok(())
+    }
 
     pub(crate) fn out_len_ok(&self, n: u64) -> bool {
-        self.out_total.checked_add(n).is_some_and(|t| t <= self.out_cap)
+        self.out_total
+            .checked_add(n)
+            .is_some_and(|total| total <= self.out_cap)
     }
 
-    fn map_out(&self, e: MemError) -> Fail {
-        match e {
-            MemError::Limit(id) if id == self.out_budget.limit() => Fail::Output,
-            e => Fail::Mem(e),
+    fn target(&mut self, channel: Chan) -> (&mut KChunks, bool) {
+        let index = usize::from(channel == Chan::Stderr);
+        if let Some(pipe) = self.vm.targets[index] {
+            (&mut self.vm.pipes.as_mut_slice()[pipe], true)
+        } else if index == 1 {
+            (&mut self.stderr, false)
+        } else {
+            (&mut self.stdout, false)
         }
     }
 
-    fn chan(&mut self, c: Chan) -> &mut Out {
-        match c {
-            Chan::Stderr => &mut self.stderr,
-            _ => &mut self.stdout,
-        }
-    }
-
-    /// Appends to stdout or stderr through the output cap.
-    pub(crate) fn write_out(&mut self, c: Chan, s: &[u8]) -> Result<(), Fail> {
-        if !self.out_len_ok(s.len() as u64) {
+    pub(crate) fn write_out(&mut self, channel: Chan, data: &[u8]) -> Result<(), Fail> {
+        if !self.out_len_ok(data.len() as u64) {
             return Err(Fail::Output);
         }
-        match self.chan(c).buf.try_extend_from_slice(s) {
-            Ok(()) => {}
-            Err(e) => return Err(self.map_out(e)),
-        }
-        self.out_total += s.len() as u64;
-        self.stdout_bytes |= c == Chan::StdoutBytes;
+        let (target, piped) = self.target(channel);
+        target.try_append(data)?;
+        self.out_total += data.len() as u64;
+        self.stdout_bytes |= !piped && channel == Chan::StdoutBytes;
         Ok(())
     }
 
-    /// Appends `n` copies of `byte`.
-    #[allow(dead_code)]
-    pub(crate) fn fill_out(&mut self, c: Chan, byte: u8, n: u64) -> Result<(), Fail> {
-        if !self.out_len_ok(n) {
+    #[cfg(feature = "test-commands")]
+    pub(crate) fn fill_out(&mut self, channel: Chan, byte: u8, len: u64) -> Result<(), Fail> {
+        if !self.out_len_ok(len) {
             return Err(Fail::Output);
         }
-        let n_us = usize::try_from(n).map_err(|_| Fail::Output)?;
-        let out = self.chan(c);
-        let target = out.buf.len() + n_us;
-        match out.buf.try_resize(target, byte) {
-            Ok(()) => {}
-            Err(e) => return Err(self.map_out(e)),
+        let block = [byte; 4096];
+        let mut left = len;
+        while left > 0 {
+            let n = left.min(block.len() as u64);
+            self.write_out(channel, &block[..n as usize])?;
+            left -= n;
         }
-        self.out_total += n;
         Ok(())
     }
 
-    /// Appends formatted text.
-    pub(crate) fn say(&mut self, c: Chan, f: impl FnOnce(&mut KString) -> core::fmt::Result) -> Result<(), Fail> {
-        let s = fmt_in(&self.scratch, f).map_err(Fail::Mem)?;
-        self.write_out(c, s.as_str().as_bytes())
+    #[cfg(feature = "test-commands")]
+    pub(crate) fn say(
+        &mut self,
+        channel: Chan,
+        format: impl FnOnce(&mut KString) -> core::fmt::Result,
+    ) -> Result<(), Fail> {
+        let text = fmt_in(&self.live, format)?;
+        self.write_out(channel, text.as_str().as_bytes())
     }
 
+    #[cfg(test)]
     pub fn stdout_chunk(&self, max: usize) -> &[u8] {
-        self.stdout.chunk(max)
+        first_chunk(&self.stdout, max)
     }
+    #[cfg(test)]
     pub fn stdout_consume(&mut self, n: usize) {
-        self.stdout.consume(n)
+        self.drain_output(false, n, |_| {});
     }
+    #[cfg(test)]
     pub fn stderr_chunk(&self, max: usize) -> &[u8] {
-        let [pending, tail] = self.stderr_chunks();
-        let bytes = if pending.is_empty() { tail } else { pending };
-        &bytes[..bytes.len().min(max)]
-    }
-    pub fn stderr_consume(&mut self, n: usize) {
-        let pending = self.stderr.chunk(n).len();
-        self.stderr.consume(pending);
-        if n > pending {
-            let tail = self.stderr_tail.chunk(n - pending).len();
-            self.stderr_tail.consume(tail);
+        if self.stderr.is_empty() {
+            &self.stderr_tail[..self.stderr_tail.len().min(max)]
+        } else {
+            first_chunk(&self.stderr, max)
         }
     }
-    pub(crate) fn stderr_chunks(&self) -> [&[u8]; 2] {
-        [self.stderr.chunk(usize::MAX), self.stderr_tail.chunk(usize::MAX)]
+    #[cfg(test)]
+    pub fn stderr_consume(&mut self, n: usize) {
+        self.drain_output(true, n, |_| {});
     }
 
-    // ---------------------------------------------------------------- stateful calls
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn output_segment_len(&self, stderr: bool) -> usize {
+        if stderr && !self.stderr.is_empty() {
+            self.stderr.len() as usize
+        } else {
+            self.output_len(stderr)
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn output_len(&self, stderr: bool) -> usize {
+        if stderr {
+            self.stderr.len() as usize + self.stderr_tail.len()
+        } else {
+            self.stdout.len() as usize
+        }
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn drain_output(&mut self, stderr: bool, n: usize, mut sink: impl FnMut(&[u8])) {
+        if !stderr {
+            self.stdout.drain_front(n, sink);
+            return;
+        }
+        let drained = self.stderr.drain_front(n, &mut sink);
+        let tail = (n - drained).min(self.stderr_tail.len());
+        sink(&self.stderr_tail[..tail]);
+        if tail == self.stderr_tail.len() {
+            self.stderr_tail = KBytes::new_in(&self.scratch);
+        } else if tail != 0 {
+            let remain = self.stderr_tail.len() - tail;
+            self.stderr_tail.as_mut_slice().copy_within(tail.., 0);
+            self.stderr_tail.truncate(remain);
+        }
+    }
 
     pub fn write_stdin(&mut self, chunk: &[u8], _last: bool) -> Result<(), CallError> {
-        if matches!(self.st, St::Done) {
+        if self.is_done() {
             return Err(CallError::BadState);
         }
         self.stdin_total = self.stdin_total.saturating_add(chunk.len() as u64);
-        if self.stdin_fail.is_some() {
-            return Ok(());
-        }
         if self.stdin_total > self.in_cap {
-            self.stdin_fail = Some(Fail::Input);
+            self.failed = Some(Fail::Input);
             self.stdin.clear();
-            self.stdin.shrink_to_fit();
-        } else if let Err(e) = self.stdin.try_extend_from_slice(chunk) {
-            self.stdin_fail = Some(Fail::Mem(e));
+        } else if self.failed.is_none() {
+            if let Err(e) = self.stdin.try_append(chunk) {
+                self.failed = Some(Fail::Mem(e));
+            }
         }
         Ok(())
     }
 
     fn check_call(&self, epoch: u64) -> Result<Pending, CallError> {
-        match self.st {
-            St::Done => Err(CallError::BadState),
-            St::Pending(p) if epoch == self.epoch => Ok(p),
+        match self.state {
+            State::Done => Err(CallError::BadState),
+            State::Pending(p) if epoch == self.epoch => Ok(p),
             _ => Err(CallError::StaleEpoch),
         }
     }
 
     pub fn read_call_input(&mut self, epoch: u64, fd: u32, max: usize) -> Result<&[u8], CallError> {
-        let len = self.call_input_chunk(epoch, fd, max)?.len();
-        let start = self.stdin_pos.min(self.stdin.len());
-        self.consume_call_input(len);
-        Ok(&self.stdin[start..start + len])
+        let data = self.call_input_chunk(epoch, fd, max)?;
+        self.input_window = bytes_in(data, &self.live).map_err(|_| CallError::Denied)?;
+        self.stdin.drain_front(self.input_window.len(), |_| {});
+        Ok(&self.input_window)
     }
 
-    pub(crate) fn call_input_chunk(&self, epoch: u64, fd: u32, max: usize) -> Result<&[u8], CallError> {
+    pub(crate) fn call_input_chunk(
+        &self,
+        epoch: u64,
+        fd: u32,
+        max: usize,
+    ) -> Result<&[u8], CallError> {
         self.check_call(epoch)?;
-        if fd != 0 {
-            return Ok(&[]);
-        }
-        let start = self.stdin_pos.min(self.stdin.len());
-        let end = self.stdin.len().min(start.saturating_add(max));
-        Ok(&self.stdin[start..end])
+        Ok(if fd == 0 {
+            first_chunk(&self.stdin, max)
+        } else {
+            &[]
+        })
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn consume_call_input(&mut self, len: usize) {
-        self.stdin_pos += len;
+        self.stdin.drain_front(len, |_| {});
     }
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn fail_abi_transfer(&mut self) {
-        self.finish(126, Status::LimitExceeded, Some("memory-ceiling"), None);
+        self.end_fail(Fail::Mem(MemError::Ceiling));
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -416,41 +540,69 @@ impl Fiber {
         self.stdout_bytes
     }
 
-    pub fn push_call_data(&mut self, epoch: u64, c: Chan, chunk: &[u8]) -> Result<(), CallError> {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn coverage_hits(&self, max: usize) -> &[u16] {
+        &self.coverage[..self.coverage.len().min(max)]
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn consume_coverage(&mut self, n: usize) {
+        let remain = self.coverage.len() - n;
+        self.coverage.as_mut_slice().copy_within(n.., 0);
+        self.coverage.truncate(remain);
+    }
+
+    pub fn push_call_data(
+        &mut self,
+        epoch: u64,
+        channel: Chan,
+        chunk: &[u8],
+    ) -> Result<(), CallError> {
         self.check_call(epoch)?;
-        let r = match c {
-            Chan::Body => self.body.try_extend_from_slice(chunk).map_err(Fail::Mem),
-            c => self.write_out(c, chunk),
-        };
-        if let Err(f) = r {
-            // The limit is reported when the call is resumed.
-            self.stdin_fail.get_or_insert(f);
+        if self.failed.is_none() {
+            let written = match channel {
+                Chan::Body => self.body.try_append(chunk).map_err(Fail::Mem),
+                c => self.write_out(c, chunk),
+            };
+            if let Err(f) = written {
+                self.failed = Some(f);
+            }
         }
         Ok(())
     }
 
-    pub fn assign_variable(&mut self, epoch: u64, name: &[u8], value: &[u8], subscript: Option<&[u8]>) -> Result<(), CallError> {
+    pub fn assign_variable(
+        &mut self,
+        epoch: u64,
+        name: &[u8],
+        value: &[u8],
+        subscript: Option<&[u8]>,
+    ) -> Result<(), CallError> {
         self.check_call(epoch)?;
-        if subscript.is_some() || name.is_empty() || name.contains(&b'=') {
+        if subscript.is_some() || name.is_empty() || name.contains(&b'=') || readonly(name) {
             return Err(CallError::Denied);
         }
         let exported = self.env.get(name).is_some_and(|e| e.exported);
-        if let Err(e) = self.env.set(name, value, exported) {
-            self.stdin_fail.get_or_insert(Fail::Mem(e));
+        if let Err(error) = self.env.set(name, value, exported) {
+            self.failed.get_or_insert(Fail::Mem(error));
         }
         Ok(())
     }
 
-    pub fn set_call_env(&mut self, epoch: u64, env: &[(&[u8], &[u8], bool)]) -> Result<(), CallError> {
+    pub fn set_call_env(
+        &mut self,
+        epoch: u64,
+        env: &[(&[u8], &[u8], bool)],
+    ) -> Result<(), CallError> {
         self.check_call(epoch)?;
-        let mut e = Env::new_in(&self.live);
-        for (n, v, x) in env {
-            if let Err(m) = e.set(n, v, *x) {
-                self.stdin_fail.get_or_insert(Fail::Mem(m));
+        let mut next = Env::new_in(&self.live);
+        for &(name, value, exported) in env {
+            if let Err(error) = next.set(name, value, exported) {
+                self.failed.get_or_insert(Fail::Mem(error));
                 return Ok(());
             }
         }
-        self.call_env = Some(e);
+        self.call_env = Some(next);
         Ok(())
     }
 
@@ -458,192 +610,239 @@ impl Fiber {
         &self.live
     }
 
-    // ---------------------------------------------------------------- running
-
     pub fn run(&mut self, fuel: u64) -> Step {
         self.fuel = fuel;
         self.advance()
     }
 
-    pub fn resume(&mut self, epoch: u64, o: Outcome<'_>) -> Result<Step, CallError> {
-        let p = self.check_call(epoch)?;
-        self.st = St::Ready;
-        if let Some(f) = self.stdin_fail.take() {
-            return Ok(self.end_fail(f));
+    pub fn resume(&mut self, epoch: u64, outcome: Outcome<'_>) -> Result<Step, CallError> {
+        let pending = self.check_call(epoch)?;
+        self.state = State::Ready;
+        if let Some(fail) = self.failed.take() {
+            return Ok(self.end_fail(fail));
         }
-        if let Outcome::LimitExceeded(name) = o {
+        if let Outcome::LimitExceeded(name) = outcome {
             let name = &name[..name.floor_char_boundary(128)];
-            self.finish(
-                126, Status::LimitExceeded, Some(name),
+            self.finish_early(
+                126,
+                Status::LimitExceeded,
+                Some(name),
                 Some(format_args!("bash: {name} exceeded\n")),
             );
             return Ok(self.done_step());
         }
-        match self.complete(p, o) {
+        if matches!(pending, Pending::Kernel) {
+            return Ok(match self.resume_command(Some(outcome)) {
+                Ok(Some(step)) => step,
+                Ok(None) => self.advance(),
+                Err(fail) => self.end_fail(fail),
+            });
+        }
+        match self.complete(pending, outcome) {
             Ok(()) => {}
             Err(CompleteError::BadOutcome) => {
-                self.st = St::Pending(p);
+                self.state = State::Pending(pending);
                 return Err(CallError::BadState);
             }
             Err(CompleteError::Fail(f)) => return Ok(self.end_fail(f)),
         }
         self.body.clear();
-        self.body.shrink_to_fit();
-        if let Some(e) = self.call_env.take() {
-            self.env = e;
+        self.input_window = KBytes::new_in(&self.live);
+        if let Some(env) = self.call_env.take() {
+            self.env = env;
         }
         Ok(self.advance())
     }
 
     fn done_step(&self) -> Step {
-        match &self.result {
-            Some(r) => match r.try_clone() {
-                Ok(c) => Step::Done(c),
-                Err(_) => Step::Done(ExecResult {
-                    exit: r.exit,
-                    status: r.status,
-                    limit_name: r.limit_name.try_clone()
-                        .or_else(|_| reserve_scope(|| r.limit_name.try_clone()))
-                        .ok().flatten(),
-                    env: Env::new_in(&self.scratch),
-                    stdout_bytes: r.stdout_bytes,
-                }),
-            },
-            None => Step::OutOfFuel,
-        }
+        let r = &self.result;
+        let result = r
+            .try_clone()
+            .or_else(|_| reserve_scope(|| r.try_clone()))
+            .unwrap_or_else(|_| ExecResult {
+                exit: r.exit,
+                status: r.status,
+                limit_name: reserve_scope(|| r.limit_name.try_clone()).ok().flatten(),
+                env: r.env.clone(),
+                stdout_bytes: r.stdout_bytes,
+            });
+        Step::Done(result)
     }
 
     pub fn is_done(&self) -> bool {
-        matches!(self.st, St::Done)
+        matches!(self.state, State::Done)
     }
 
     fn advance(&mut self) -> Step {
-        loop {
-            match self.st {
-                St::Done => return self.done_step(),
-                St::Pending(_) | St::Spin => return Step::OutOfFuel,
-                St::Ready => {}
+        match self.state {
+            State::Done => return self.done_step(),
+            State::Pending(_) | State::Spin => return Step::OutOfFuel,
+            State::Ready => {}
+        }
+        if let Some(source) = self.script.take() {
+            if let Some(step) = self.prepare(source) {
+                return step;
             }
-            if !self.checked {
-                self.checked = true;
-                if let Some(step) = self.precheck() {
-                    return step;
-                }
-            }
-            if let Some(f) = self.stdin_fail.take() {
-                return self.end_fail(f);
-            }
-            let Some((a, b)) = self.next_line() else {
-                let exit = self.last_exit;
-                self.finish(exit, Status::Completed, None, None);
-                return self.done_step();
-            };
+        }
+        if let Some(fail) = self.failed.take() {
+            return self.end_fail(fail);
+        }
+        if self.active.is_some() {
             if self.fuel == 0 {
-                // Not started: put the line back.
-                self.pos = a;
                 return Step::OutOfFuel;
             }
             self.fuel -= 1;
-            let script = core::mem::replace(&mut self.script, KBytes::new_in(&self.scratch));
-            let flow = self.exec_line(&script[a..b]);
-            self.script = script;
-            match flow {
-                Flow::Next => {}
-                Flow::Spin => {
-                    self.st = St::Spin;
-                    return Step::OutOfFuel;
-                }
-                Flow::Exit => {
-                    let exit = self.last_exit;
-                    self.finish(exit, Status::Completed, None, None);
-                    return self.done_step();
-                }
-                Flow::Fail(f) => return self.end_fail(f),
-                Flow::Host(p, req) => {
-                    self.epoch += 1;
-                    self.st = St::Pending(p);
-                    self.body.clear();
-                    self.call_env = None;
-                    return Step::Host { epoch: self.epoch, req };
-                }
+            match self.resume_command(None) {
+                Ok(Some(step)) => return step,
+                Ok(None) => {}
+                Err(fail) => return self.end_fail(fail),
+            }
+        }
+        let program = self.program.take().expect("ready fiber has a program");
+        match self.run_vm(&program) {
+            Ok(Some(step)) => {
+                self.program = Some(program);
+                step
+            }
+            Ok(None) => {
+                drop(program);
+                self.finish(self.last_exit, Status::Completed, None, false, None);
+                self.done_step()
+            }
+            Err(fail) => {
+                drop(program);
+                self.end_fail(fail)
             }
         }
     }
 
-    /// Next non-empty trimmed line as a range of the script.
-    fn next_line(&mut self) -> Option<(usize, usize)> {
-        while self.pos < self.script.len() {
-            let start = self.pos;
-            let rest = &self.script[start..];
-            let len = rest.iter().position(|&c| c == b'\n').unwrap_or(rest.len());
-            self.pos = start + len + 1;
-            let line = &rest[..len];
-            let a = line.iter().position(|&c| c != b' ' && c != b'\t');
-            if let Some(a) = a {
-                let b = line.iter().rposition(|&c| c != b' ' && c != b'\t').map_or(a, |x| x + 1);
-                return Some((start + a, start + b));
-            }
+    fn prepare(&mut self, mut source: KBytes) -> Option<Step> {
+        let cap = self.shell.lim.vals[I_SOURCE_BYTES];
+        let (units, bytes) = self
+            .overflow
+            .unwrap_or_else(|| (utf16_len(&source), source.len() as u64));
+        if units > cap || bytes > cap {
+            drop(source);
+            self.finish_early(
+                126,
+                Status::LimitExceeded,
+                Some("maxSourceBytes"),
+                Some(format_args!(
+                    "bash: script input size limit exceeded ({cap} bytes)\n"
+                )),
+            );
+            return Some(self.done_step());
         }
+        if self.overflow.is_none()
+            && !source
+                .utf8_chunks()
+                .any(|c| !c.invalid().is_empty() || c.valid().chars().any(|c| !syntax::space(c)))
+            && !matches!(self.failed, Some(Fail::ExecDepth | Fail::Mem(_)))
+        {
+            drop(source);
+            self.finish_early(0, Status::Completed, None, None);
+            return Some(self.done_step());
+        }
+        if let Some(fail) = self.failed.take() {
+            drop(source);
+            return Some(self.end_fail(fail));
+        }
+        let units = if self.overflow.is_none() && !self.raw_script {
+            match syntax::normalize(&source, &self.live) {
+                Ok(normalized) => source = normalized,
+                Err(e) => {
+                    drop(source);
+                    return Some(self.end_fail(Fail::Mem(e)));
+                }
+            }
+            utf16_len(&source)
+        } else {
+            units
+        };
+        if self.overflow.is_some() || units > 1_000_000 {
+            drop(source);
+            self.finish_early(2, Status::Completed, None,
+                Some(format_args!("bash: syntax error: Parse error at 1:1: Input too large: {units} bytes exceeds limit of 1000000\n")));
+            return Some(self.done_step());
+        }
+        let ast = match Ast::parse(&source, &self.live) {
+            Ok(ast) => ast,
+            Err(syntax::Error::Memory(e)) => {
+                drop(source);
+                return Some(self.end_fail(Fail::Mem(e)));
+            }
+            Err(error) => {
+                drop(source);
+                self.finish_early(2, Status::Completed, None, Some(format_args!("{error}")));
+                return Some(self.done_step());
+            }
+        };
+        if let Err(e) = self.start_vm(ast.entry) {
+            drop(ast);
+            drop(source);
+            return Some(self.end_fail(e));
+        }
+        self.program = Some(Program { source, ast });
         None
     }
 
-    fn exec_line(&mut self, line: &[u8]) -> Flow {
-        let mut words: KVec<&[u8]> = KVec::new_in(&self.scratch);
-        for w in line.split(|&c| c == b' ' || c == b'\t').filter(|w| !w.is_empty()) {
-            if let Err(e) = words.try_push(w) {
-                return Flow::Fail(Fail::Mem(e));
-            }
-        }
-        let Some((name, args)) = words.split_first() else { return Flow::Next };
-        if self.shell.is_custom(name) && self.bypass.as_ref().map(|b| b.as_str().as_bytes()) != Some(*name) {
-            return self.custom_call(name, args);
-        }
-        if let Some(f) = self.exec_test(name, args) {
-            return f;
-        }
-        self.last_exit = 127;
-        let n = *name;
-        match self.say(Chan::Stderr, |s| {
-            s.try_push_str("bash: ").map_err(|_| core::fmt::Error)?;
-            for ch in n.utf8_chunks() {
-                s.try_push_str(ch.valid()).map_err(|_| core::fmt::Error)?;
-                if !ch.invalid().is_empty() {
-                    s.try_push('\u{FFFD}').map_err(|_| core::fmt::Error)?;
-                }
-            }
-            s.try_push_str(": command not found\n").map_err(|_| core::fmt::Error)
-        }) {
-            Ok(()) => Flow::Next,
-            Err(f) => Flow::Fail(f),
+    fn host(&mut self, pending: Pending, req: HostReq) -> Step {
+        self.epoch += 1;
+        self.state = State::Pending(pending);
+        self.body.clear();
+        self.call_env = None;
+        Step::Host {
+            epoch: self.epoch,
+            req,
         }
     }
 
-    fn custom_call(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+    fn command_poll(&mut self, poll: CmdPoll) -> Option<Step> {
+        match poll {
+            CmdPoll::Done(code) => {
+                self.last_exit = code;
+                None
+            }
+            CmdPoll::Yield(frame) => {
+                self.active = Some(frame);
+                Some(Step::OutOfFuel)
+            }
+            CmdPoll::Host { frame, req } => {
+                self.active = Some(frame);
+                Some(self.host(Pending::Kernel, req))
+            }
+        }
+    }
+
+    fn resume_command(&mut self, outcome: Option<Outcome<'_>>) -> Result<Option<Step>, Fail> {
+        let mut frame = self.active.take().expect("resumable command has a frame");
+        let poll = frame.resume(
+            &mut CmdCtx {
+                fiber: self,
+                xpg_echo: false,
+            },
+            outcome,
+        )?;
+        Ok(self.command_poll(poll))
+    }
+
+    fn custom_call(&mut self, name: &[u8], args: KVec<KBytes>) -> Result<Flow, Fail> {
         if !self.shell.granted(G_CUSTOM) {
             self.last_exit = 126;
-            let _ = self.write_out(Chan::Stderr, b"bash: permission denied\n");
-            return Flow::Next;
+            self.write_out(Chan::Stderr, b"bash: permission denied\n")?;
+            return Ok(Flow::Next);
         }
-        let r = (|| -> MemResult<HostReq> {
-            let mut a = KVec::new_in(&self.scratch);
-            for w in args {
-                a.try_push(bytes_in(w, &self.scratch)?)?;
-            }
-            Ok(HostReq::Custom {
-                name: bytes_in(name, &self.scratch)?,
-                args: a,
-                cwd: bytes_in(&self.cwd, &self.scratch)?,
+        Ok(Flow::Host(
+            Pending::Custom,
+            HostReq::Custom {
+                name: bytes_in(name, &self.live)?,
+                args,
+                cwd: bytes_in(&self.cwd, &self.live)?,
                 env: self.env.try_clone()?,
-                input_len: (self.stdin.len() - self.stdin_pos.min(self.stdin.len())) as u64,
-            })
-        })();
-        match r {
-            Ok(req) => Flow::Host(Pending::Custom, req),
-            Err(e) => Flow::Fail(Fail::Mem(e)),
-        }
+                input_len: self.stdin.len(),
+            },
+        ))
     }
-
-    // ---------------------------------------------------------------- answers
 
     fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<(), CompleteError> {
         match p {
@@ -651,135 +850,226 @@ impl Fiber {
                 Outcome::CommandExit(n) => self.last_exit = n,
                 Outcome::Denied => {
                     self.last_exit = 126;
-                    self.write_out(Chan::Stderr, b"bash: permission denied\n").map_err(CompleteError::Fail)?;
+                    self.write_out(Chan::Stderr, b"bash: permission denied\n")
+                        .map_err(CompleteError::Fail)?;
                 }
                 Outcome::Failed(msg) => {
                     self.last_exit = 1;
-                    self.write_out(Chan::Stderr, msg).map_err(CompleteError::Fail)?;
+                    self.write_out(Chan::Stderr, msg)
+                        .map_err(CompleteError::Fail)?;
                 }
                 _ => return Err(CompleteError::BadOutcome),
             },
+            Pending::Kernel => return Err(CompleteError::BadOutcome),
             Pending::Test(code, aux) => self.complete_test(code, aux, o)?,
         }
         Ok(())
     }
 
-    // ---------------------------------------------------------------- ending
-
-    fn precheck(&mut self) -> Option<Step> {
-        let cap = self.shell.lim.vals[I_SOURCE_BYTES];
-        let (units, bytes) = match self.overflow {
-            Some(x) => x,
-            None => {
-                let b = self.script.len() as u64;
-                let s = self.script.as_slice();
-                let u = s.iter().filter(|&&c| c & 0xC0 != 0x80).count() as u64 + s.iter().filter(|&&c| c >= 0xF0).count() as u64;
-                (u, b)
-            }
-        };
-        if self.overflow.is_some() || bytes > cap || units > cap {
-            self.finish(
-                126, Status::LimitExceeded, Some("maxSourceBytes"),
-                Some(format_args!("bash: script input size limit exceeded ({cap} bytes)\n")),
-            );
-            return Some(self.done_step());
-        }
-        if units > 1_000_000 {
-            self.finish(
-                2, Status::Completed, None,
-                Some(format_args!("bash: syntax error: Parse error at 1:1: Input too large: {units} bytes exceeds limit of 1000000\n")),
-            );
-            return Some(self.done_step());
-        }
-        None
-    }
-
-    fn end_fail(&mut self, f: Fail) -> Step {
-        match f {
+    fn end_fail(&mut self, fail: Fail) -> Step {
+        let lim = self.shell.lim.vals;
+        let mut text = Diagnostic::new();
+        let label = match fail {
             Fail::Output => {
-                let cap = self.out_cap;
-                self.finish(
-                    126, Status::LimitExceeded, Some("maxOutputSize"),
-                    Some(format_args!("bash: pipeline: total output size exceeded (>{cap} bytes), increase executionLimits.maxOutputSize\n")),
+                let _ = writeln!(text, "bash: pipeline: total output size exceeded (>{} bytes), increase executionLimits.maxOutputSize", self.out_cap);
+                "maxOutputSize"
+            }
+            Fail::Input => {
+                let _ = writeln!(
+                    text,
+                    "bash: stdin size limit exceeded ({} bytes)",
+                    self.in_cap
                 );
+                if lim[I_INPUT_BYTES] <= lim[I_STRING_LENGTH] {
+                    "maxInputBytes"
+                } else {
+                    "maxStringLength"
+                }
             }
-            Fail::Input => self.finish(
-                126, Status::LimitExceeded, Some("maxInputBytes"),
-                Some(format_args!("bash: maxInputBytes exceeded\n")),
-            ),
-            Fail::Mem(e) => {
-                let name = match e {
-                    MemError::Limit(id) => limits::name_of(id),
-                    _ => "memory-ceiling",
+            Fail::StringLength => {
+                let _ = writeln!(
+                    text,
+                    "bash: word expansion: string length limit exceeded ({} bytes)",
+                    lim[I_STRING_LENGTH]
+                );
+                "maxStringLength"
+            }
+            Fail::Elements | Fail::Arguments => {
+                let kind = if matches!(fail, Fail::Elements) {
+                    "array"
+                } else {
+                    "expanded argument"
                 };
-                self.finish(126, Status::LimitExceeded, Some(name), Some(format_args!("bash: {name} exceeded\n")));
+                let _ = writeln!(
+                    text,
+                    "bash: {kind} element limit exceeded ({})",
+                    lim[I_ARRAY_ELEMENTS]
+                );
+                "maxArrayElements"
             }
+            Fail::CommandCount => {
+                let _ = writeln!(text, "bash: too many commands executed (>{}), increase executionLimits.maxCommandCount", lim[I_COMMAND_COUNT]);
+                "maxCommandCount"
+            }
+            Fail::CallDepth(func) => {
+                let cap = lim[I_CALL_DEPTH];
+                let func = core::str::from_utf8(&func).unwrap_or("?");
+                self.finish_early(126, Status::LimitExceeded, Some("maxCallDepth"),
+                    Some(format_args!("bash: {func}: maximum recursion depth ({cap}) exceeded, increase executionLimits.maxCallDepth\n")));
+                return self.done_step();
+            }
+            Fail::ExecDepth => {
+                let _ = writeln!(
+                    text,
+                    "bash: maximum nested execution depth ({}) exceeded",
+                    lim[I_EXEC_DEPTH]
+                );
+                "maxExecDepth"
+            }
+            Fail::Work => {
+                let _ = writeln!(
+                    text,
+                    "bash: execution: aggregate work limit exceeded ({})",
+                    lim[I_WORK_UNITS]
+                );
+                "maxWorkUnits"
+            }
+            Fail::Mem(MemError::Limit(id)) if id == limits::id_of_index(I_LIVE_BYTES) => {
+                let _ = writeln!(
+                    text,
+                    "bash: execution: live byte limit exceeded ({} bytes)",
+                    lim[I_LIVE_BYTES]
+                );
+                "maxLiveBytes"
+            }
+            Fail::Mem(MemError::Limit(id)) if id == limits::id_of_index(I_FS_BYTES) => {
+                let _ = writeln!(
+                    text,
+                    "bash: filesystem size limit exceeded ({} bytes)",
+                    lim[I_FS_BYTES]
+                );
+                "maxFileSystemBytes"
+            }
+            Fail::Readonly(var) => {
+                let var = core::str::from_utf8(&var).unwrap_or("?");
+                self.finish_early(
+                    1,
+                    Status::Completed,
+                    None,
+                    Some(format_args!("bash: {var}: readonly variable\n")),
+                );
+                return self.done_step();
+            }
+            Fail::Mem(MemError::Limit(id)) => limits::name_of(id),
+            _ => "memory-ceiling",
+        };
+        if text.len == 0 {
+            let _ = writeln!(text, "bash: {label} exceeded");
         }
+        let message = core::str::from_utf8(text.bytes()).expect("formatted diagnostic is UTF-8");
+        self.finish_early(
+            126,
+            Status::LimitExceeded,
+            Some(label),
+            Some(format_args!("{message}")),
+        );
         self.done_step()
     }
 
-    /// Formats and appends without the output cap (diagnostics of a limit that was just hit).
-    fn say_unchecked(&mut self, message: core::fmt::Arguments<'_>) {
-        let mut text = Diagnostic { bytes: [0; 256], len: 0 };
-        if text.write_fmt(message).is_err() {
-            return;
-        }
-        let bytes = &text.bytes[..text.len];
-        let stderr = &mut self.stderr.buf;
-        if stderr.try_reserve_exact(bytes.len()).and_then(|_| stderr.try_extend_from_slice(bytes)).is_err() {
-            // Keep the ordinary stderr buffer in its arena. Only the exact diagnostic can use the reserve.
-            let tail = bytes_in(bytes, &self.scratch)
-                .or_else(|_| reserve_scope(|| bytes_in(bytes, &self.scratch)));
-            if let Ok(tail) = tail {
-                self.stderr_tail.buf = tail;
-            }
-        }
+    fn finish_early(
+        &mut self,
+        exit: i32,
+        status: Status,
+        limit: Option<&str>,
+        diagnostic: Option<core::fmt::Arguments<'_>>,
+    ) {
+        self.finish(exit, status, limit, true, diagnostic);
     }
 
-    fn finish(&mut self, exit: i32, status: Status, limit: Option<&str>, diagnostic: Option<core::fmt::Arguments<'_>>) {
-        // Release execution buffers before allocating diagnostics and result fields.
-        self.script = KBytes::new_in(&self.scratch);
-        self.stdin = KBytes::new_in(&self.scratch);
-        self.body = KBytes::new_in(&self.scratch);
-        self.kept = KVec::new_in(&self.scratch);
+    fn finish(
+        &mut self,
+        exit: i32,
+        status: Status,
+        limit: Option<&str>,
+        early: bool,
+        diagnostic: Option<core::fmt::Arguments<'_>>,
+    ) {
+        self.vm = Vm::new(&self.live);
+        self.script = None;
+        self.program = None;
+        self.active = None;
+        self.stdin.clear();
+        self.body.clear();
+        self.input_window = KBytes::new_in(&self.live);
+        self.last_arg = KBytes::new_in(&self.live);
+        self.params = KVec::new_in(&self.live);
+        self.args = KVec::new_in(&self.live);
+        self.kept = KVec::new_in(&self.live);
         self.call_env = None;
-        self.stdin_fail = None;
-        if let Some(message) = diagnostic {
-            self.say_unchecked(message);
+        self.failed = None;
+        let mut env = core::mem::replace(&mut self.env, Env::new_in(&self.scratch));
+        if early {
+            drop(env);
+            env = reserve_scope(|| {
+                let mut env = Env::new_in(&self.scratch);
+                let _ = env.copy_from(&self.shell.env);
+                let _ = env.copy_from(&self.overlay);
+                env
+            });
         }
-        let limit_name = limit.and_then(|name| {
-            str_in(name, &self.scratch).or_else(|_| reserve_scope(|| str_in(name, &self.scratch))).ok()
+        self.overlay = Env::new_in(&self.scratch);
+        let limit_name = reserve_scope(|| {
+            if let Some(message) = diagnostic {
+                let mut text = Diagnostic::new();
+                self.stderr_tail = if text.write_fmt(message).is_ok() {
+                    bytes_in(text.bytes(), &self.scratch)
+                        .unwrap_or_else(|_| KBytes::new_in(&self.scratch))
+                } else {
+                    fmt_in(&self.scratch, |buffer| buffer.write_fmt(message))
+                        .map(|s| s.into_bytes())
+                        .unwrap_or_else(|_| KBytes::new_in(&self.scratch))
+                };
+            }
+            limit.and_then(|name| str_in(name, &self.scratch).ok())
         });
         self.last_exit = exit;
-        let mut env = match self.env.try_clone() {
-            Ok(e) => e,
-            Err(_) => Env::new_in(&self.scratch),
-        };
-        let mut code = KString::new_in(&self.scratch);
-        let _ = write!(code, "{exit}");
-        let _ = env.set(b"?", code.as_str().as_bytes(), false);
-        self.result = Some(ExecResult { exit, status, limit_name, env, stdout_bytes: self.stdout_bytes });
-        self.st = St::Done;
+        // The result handle stays private until the fiber is terminal.
+        *KRc::get_mut(&mut self.result.env).expect("result is uniquely held while finishing") = env;
+        self.result.exit = exit;
+        self.result.status = status;
+        self.result.limit_name = limit_name;
+        self.result.stdout_bytes = self.stdout_bytes;
+        self.state = State::Done;
     }
 
     pub fn cancel(&mut self, reason: CancelReason) -> ExecResult {
-        if !matches!(self.st, St::Done) {
-            self.cancel_inner(reason);
+        if !self.is_done() {
+            let (status, exit, name) = match reason {
+                CancelReason::Aborted => (Status::Aborted, 124, None),
+                CancelReason::Deadline => (Status::Deadline, 124, None),
+                CancelReason::Limit => (Status::LimitExceeded, 126, Some("limit")),
+            };
+            self.finish_early(
+                exit,
+                status,
+                name,
+                Some(format_args!("bash: execution aborted\n")),
+            );
         }
-        match self.done_step() {
-            Step::Done(r) => r,
-            _ => ExecResult { exit: 1, status: Status::Completed, limit_name: None, env: Env::new_in(&self.scratch), stdout_bytes: self.stdout_bytes },
-        }
-    }
-
-    fn cancel_inner(&mut self, reason: CancelReason) {
-        let (status, exit, name) = match reason {
-            CancelReason::Aborted => (Status::Aborted, 124, None),
-            CancelReason::Deadline => (Status::Deadline, 124, None),
-            CancelReason::Limit => (Status::LimitExceeded, 126, Some("limit")),
+        let Step::Done(result) = self.done_step() else {
+            unreachable!()
         };
-        self.finish(exit, status, name, Some(format_args!("bash: execution aborted\n")));
+        result
     }
+}
+
+fn first_chunk(buf: &KChunks, max: usize) -> &[u8] {
+    let first = buf.chunks().next().unwrap_or_default();
+    &first[..first.len().min(max)]
+}
+
+fn readonly(name: &[u8]) -> bool {
+    matches!(name, b"SHELLOPTS" | b"BASHOPTS")
 }
 
 pub(crate) enum CompleteError {
@@ -792,10 +1082,12 @@ mod testcmd;
 
 #[cfg(not(feature = "test-commands"))]
 impl Fiber {
-    fn exec_test(&mut self, _name: &[u8], _args: &[&[u8]]) -> Option<Flow> {
-        None
-    }
-    fn complete_test(&mut self, _code: u8, _aux: u64, _o: Outcome<'_>) -> Result<(), CompleteError> {
+    fn complete_test(
+        &mut self,
+        _code: u8,
+        _aux: u64,
+        _o: Outcome<'_>,
+    ) -> Result<(), CompleteError> {
         Err(CompleteError::BadOutcome)
     }
 }

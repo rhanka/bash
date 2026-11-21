@@ -6,7 +6,7 @@ use crate::shell::{G_ENTROPY, G_HOST_FS, G_NETWORK, G_REAL_CLOCK, G_REAL_SLEEP};
 use crate::util::parse_u64;
 
 /// The names of the test-only commands, matched by index so that they exist as data in this build only.
-const CMDS: [&[u8]; 16] = [b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write", b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap"];
+const CMDS: [&[u8]; 18] = [b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write", b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap", b"__fsalloc", b"__work"];
 const C_OUT: usize = 0;
 const C_ERR: usize = 1;
 const C_STDIN: usize = 2;
@@ -23,6 +23,8 @@ const C_SLEEP: usize = 12;
 const C_CLOCK: usize = 13;
 const C_ENTROPY: usize = 14;
 const C_TRAP: usize = 15;
+const C_FSALLOC: usize = 16;
+const C_WORK: usize = 17;
 
 const T_HOSTFS: u8 = 1;
 const T_LAZY: u8 = 2;
@@ -32,6 +34,12 @@ const T_CLOCK: u8 = 5;
 const T_ENTROPY: u8 = 6;
 
 impl Fiber {
+    fn write_chunks(&mut self, chunks: &KChunks) -> Result<(), Fail> {
+        if !self.out_len_ok(chunks.len()) { return Err(Fail::Output); }
+        for chunk in chunks.chunks() { self.write_out(Chan::Stdout, chunk)?; }
+        Ok(())
+    }
+
     fn t_bad(&mut self, name: &[u8]) -> Flow {
         self.last_exit = 2;
         let n = core::str::from_utf8(name).unwrap_or("?");
@@ -68,11 +76,8 @@ impl Fiber {
                 self.t_ok(r)
             }
             C_STDIN => {
-                let start = self.stdin_pos.min(self.stdin.len());
-                self.stdin_pos = self.stdin.len();
-                let data = core::mem::replace(&mut self.stdin, KBytes::new_in(&self.scratch));
-                let r = self.write_out(Chan::Stdout, &data[start..]);
-                self.stdin = data;
+                let data = core::mem::replace(&mut self.stdin, KChunks::new_in(&self.live));
+                let r = self.write_chunks(&data);
                 self.last_exit = 0;
                 self.t_ok(r)
             }
@@ -86,6 +91,16 @@ impl Fiber {
                     }
                     Err(e) => Flow::Fail(Fail::Mem(e)),
                 }
+            }
+            C_FSALLOC => {
+                let (Some(path), Some(n)) = (args.first(), num(1)) else { return Some(self.t_bad(name)) };
+                self.last_exit = 0;
+                self.t_ok(self.shell.root.allocate_file(path, n).map_err(Fail::Mem))
+            }
+            C_WORK => {
+                let Some(n) = num(0) else { return Some(self.t_bad(name)) };
+                self.last_exit = 0;
+                self.t_ok(self.charge_work(n))
             }
             C_SPIN => Flow::Spin,
             C_EXIT => {
@@ -247,15 +262,15 @@ impl Fiber {
                 self.say(Chan::Stdout, |s| write!(s, "{t}\n")).map_err(fail)
             }
             (T_LAZY, Outcome::Completed) => {
-                let body = core::mem::replace(&mut self.body, KBytes::new_in(&self.scratch));
-                let r = self.write_out(Chan::Stdout, &body);
+                let body = core::mem::replace(&mut self.body, KChunks::new_in(&self.live));
+                let r = self.write_chunks(&body);
                 self.body = body;
                 r.map_err(fail)
             }
             (T_FETCH, Outcome::Fetched(status)) => {
                 self.say(Chan::Stdout, |s| write!(s, "{status}\n")).map_err(fail)?;
-                let body = core::mem::replace(&mut self.body, KBytes::new_in(&self.scratch));
-                let r = self.write_out(Chan::Stdout, &body);
+                let body = core::mem::replace(&mut self.body, KChunks::new_in(&self.live));
+                let r = self.write_chunks(&body);
                 self.body = body;
                 r.map_err(fail)
             }
