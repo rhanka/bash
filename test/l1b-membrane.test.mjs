@@ -113,6 +113,30 @@ test("gate 11: a command that ignores abort cannot delay the exec nor write afte
   assert.equal(await b.fs.exists("/late"), false);
 });
 
+test("abort and deadline report a diagnostic when the kernel has no stderr to drain", async () => {
+  const pending = defineCommand("pending", () => new Promise(() => {}));
+  const reasons = [];
+  const b = bash({ customCommands: [pending], executionLimits: { maxExecutionTimeMs: 20 } }, {
+    onEngine(engine) {
+      const proto = engine.Fiber.prototype;
+      const cancel = proto.cancel;
+      proto.cancel = function (reason) {
+        reasons.push(reason);
+        return cancel.call(this, reason);
+      };
+      // Model a kernel that has no room to allocate the cancellation diagnostic.
+      proto.takeStderr = () => new Uint8Array(0);
+    },
+  });
+  const aborted = await b.exec("pending", { signal: AbortSignal.abort() });
+  const deadline = await b.exec("pending");
+  assert.deepEqual(reasons, ["aborted", "deadline"]);
+  for (const r of [aborted, deadline]) {
+    assert.equal(r.exitCode, 124);
+    assert.equal(r.stderr, "bash: execution aborted\n");
+  }
+});
+
 test("gate 12: trust decides whether a command's environment change is visible", async () => {
   const set = (trusted) => defineCommand("setx", async (_a, ctx) => {
     try {
@@ -142,17 +166,19 @@ test("shell assignments compose with trusted env writes and are absent for untru
     await ctx.assignShellVariable("OLD", "assigned");
     await ctx.assignShellVariable("NEW", "new");
     assert.equal(ctx.env.get("OLD"), "assigned");
+    assert.equal(ctx.exportedEnv.OLD, "assigned");
+    assert.equal(Object.hasOwn(ctx.exportedEnv, "NEW"), false);
   });
   const untrusted = defineCommand("untrusted", async (_args, ctx) => {
     if (ctx.assignShellVariable) await ctx.assignShellVariable("LEAK", "injected");
   }, { trusted: false });
   const show = defineCommand("show", async (_args, ctx) => out(JSON.stringify([
     ctx.env.get("MAP_WRITE"), ctx.env.get("OLD"), ctx.env.get("NEW"), ctx.env.get("LEAK"),
-    Object.hasOwn(ctx.exportedEnv, "OLD"),
+    ctx.exportedEnv.OLD, Object.hasOwn(ctx.exportedEnv, "NEW"),
   ])));
   const b = bash({ env: { OLD: "exported" }, customCommands: [trusted, untrusted, show] }, hooks);
   const r = await b.exec("trusted\nuntrusted\nshow");
-  assert.equal(r.stdout, '["map","assigned","new",null,false]');
+  assert.equal(r.stdout, '["map","assigned","new",null,"assigned",false]');
   assert.deepEqual([r.env.MAP_WRITE, r.env.OLD, r.env.NEW, r.env.LEAK], ["map", "assigned", "new", undefined]);
   assert.equal(state.names.filter((name) => name === "Fiber.assignVariable").length, 2);
 });

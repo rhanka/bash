@@ -408,7 +408,8 @@ impl Fiber {
         if subscript.is_some() || name.is_empty() || name.contains(&b'=') {
             return Err(CallError::Denied);
         }
-        if let Err(e) = self.env.set(name, value, false) {
+        let exported = self.env.get(name).is_some_and(|e| e.exported);
+        if let Err(e) = self.env.set(name, value, exported) {
             self.stdin_fail.get_or_insert(Fail::Mem(e));
         }
         Ok(())

@@ -356,7 +356,12 @@ fn status_out(s: Status) -> T::ExecStatus {
 
 fn result_out(r: &fiber::ExecResult, other_records: usize) -> Result<T::ExecResult, MemError> {
     let env = env_out(&r.env)?;
-    let limit_name = r.limit_name.as_ref().map(|n| copy_text(n.as_str())).transpose()?;
+    let limit_name = match &r.limit_name {
+        Some(name) => Some(copy_text(name.as_str())?),
+        // Ordinary memory exhaustion can prevent the fiber from saving the limit name.
+        None if matches!(r.status, Status::LimitExceeded) => Some(copy_text("memory-ceiling")?),
+        None => None,
+    };
     rt::check_lowering(env.len() * 20 + other_records, 4)?;
     Ok(T::ExecResult {
         exit_code: r.exit, status: status_out(r.status),

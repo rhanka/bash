@@ -211,11 +211,14 @@ function finish(x, er) {
   drain(x);
   const env = envToObject(er.env);
   env["?"] ??= String(er.exitCode);
+  let stderr = decodeUtf8(concat(x.err));
+  if (x.err.length === 0) {
+    if (er.status === "limit-exceeded" && er.limitName) stderr = `bash: ${er.limitName} exceeded\n`;
+    if (er.status === "aborted" || er.status === "deadline") stderr = "bash: execution aborted\n";
+  }
   const r = {
     stdout: (er.stdoutKind === "bytes" ? latin1FromBytes : decodeUtf8)(concat(x.out)),
-    stderr: x.err.length === 0 && er.status === "limit-exceeded" && er.limitName
-      ? `bash: ${er.limitName} exceeded\n`
-      : decodeUtf8(concat(x.err)),
+    stderr,
     exitCode: er.exitCode,
     env,
   };
@@ -451,7 +454,8 @@ function* serveCustom(x, epoch, call) {
           throw new Error(`cannot assign ${n}: ${e?.code ?? "refused"}`);
         }
         env.set(n, v);
-        envFlags.set(n, false);
+        if (!envFlags.has(n)) envFlags.set(n, false);
+        if (envFlags.get(n)) ctx.exportedEnv[n] = v;
       };
       ctx.exec = scope.guard((command, options) => B.runChild(command, options, scope, x));
       ctx.origCommand = scope.guard((args) => B.runChild([name, ...args].map(shellQuote).join(" "), { cwd: ctx.cwd, bypass: name }, scope, x));

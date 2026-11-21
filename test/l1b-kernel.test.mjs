@@ -63,6 +63,23 @@ test("epochs: numbering from 1 and re-use of a resumed epoch", () => {
   assert.equal(f.resume(2n, { tag: "command-exit", val: 4 }).tag, "done");
 });
 
+test("kernel assignments preserve existing exports and leave new variables unexported", () => {
+  const { engine } = withEngine();
+  const vfs = engine.Vfs.create(1000000n);
+  const c = config(["foo"]);
+  c.env = [{ name: enc("OLD"), value: enc("before"), exported: true }];
+  const shell = engine.Shell.create(vfs, c);
+  const f = engine.Fiber.spawn(shell, undefined, opts("foo"));
+  const { epoch } = f.run(100n).val;
+  f.assignVariable(epoch, enc("OLD"), enc("after"), undefined);
+  f.assignVariable(epoch, enc("NEW"), enc("new"), undefined);
+  const { env } = f.resume(epoch, { tag: "command-exit", val: 0 }).val;
+  assert.deepEqual(env.filter(({ name }) => ["OLD", "NEW"].includes(dec(name))), [
+    { name: enc("OLD"), value: enc("after"), exported: true },
+    { name: enc("NEW"), value: enc("new"), exported: false },
+  ]);
+});
+
 test("a host call uses up its slice and resume cannot reset the fuel", () => {
   const { engine } = withEngine();
   const vfs = engine.Vfs.create(1000000n);
@@ -169,6 +186,48 @@ test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () 
     chunks.push(bytes);
   }
   assert.equal(Buffer.concat(chunks).toString(), "a".repeat(200_000));
+});
+
+test("a limit result keeps its name when the ordinary Wasm allocation space is exhausted", () => {
+  const ceiling = 10 << 20;
+  function fillBody(size) {
+    const { engine } = new Instance(module, internal());
+    engine.configure(BigInt(ceiling));
+    const vfs = engine.Vfs.create(BigInt(ceiling));
+    const c = config(["foo"]);
+    c.limits = {
+      profile: "micro",
+      overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 500_000n })),
+    };
+    const shell = engine.Shell.create(vfs, c);
+    const fiber = engine.Fiber.spawn(shell, undefined, opts("foo"));
+    const { epoch } = fiber.run(5n).val;
+    // Pre-fill memory without staging the file contents across the ABI.
+    const val = { path: enc("/fill"), data: new Uint8Array(0), offset: BigInt(ceiling - 350_000), truncate: true };
+    assert.equal(vfs.op({ tag: "write-file", val }).tag, "ok");
+    const before = engine.usage().used;
+    fiber.pushCallData(epoch, "body", new Uint8Array(size));
+    return { fiber, epoch, fits: engine.usage().used - before === BigInt(size) };
+  }
+
+  // Find the largest body that fits with its ABI input copy, accounting for allocator layout.
+  let lo = 0;
+  let hi = 175_000;
+  while (hi - lo > 1) {
+    const size = Math.floor((lo + hi) / 2);
+    if (fillBody(size).fits) lo = size;
+    else hi = size;
+  }
+  const { fiber, epoch, fits } = fillBody(lo - 4);
+  assert.ok(fits);
+  // The one-byte input fits, but the body cannot grow. Diagnostics run before the body is released.
+  fiber.pushCallData(epoch, "body", enc("x"));
+  const result = fiber.resume(epoch, { tag: "command-exit", val: 0 });
+  assert.equal(result.tag, "done");
+  assert.equal(result.val.status, "limit-exceeded");
+  assert.equal(result.val.exitCode, 126);
+  assert.equal(fiber.takeStderr(100).length, 0);
+  assert.equal(result.val.limitName, "memory-ceiling");
 });
 
 test("gate 18: InMemoryFs methods, and ENOSYS for the ones not backed yet", async () => {
