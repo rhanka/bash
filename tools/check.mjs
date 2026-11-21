@@ -48,7 +48,7 @@ if (!only) {
 if (failed) process.exit(1);
 if (!only) {
   // Native unit and integration tests of the Rust workspace, then the node tests.
-  const cargo = spawnSync("cargo", ["test", "--workspace", "--offline", "--quiet"], {
+  const cargo = spawnSync("cargo", ["test", "--workspace", "--locked", "--offline", "--quiet"], {
     cwd: repoRoot,
     stdio: "inherit",
     env: { ...process.env, CARGO_TARGET_DIR: join(repoRoot, "dist", "target") },
