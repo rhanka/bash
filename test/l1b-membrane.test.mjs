@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { Bash, InMemoryFs, T, bash, countKernelCalls, internal } from "./kt.mjs";
 import { bytesOutput, defineCommand, stdoutAsBytes } from "@sentropic/bash";
 import { repoRoot } from "./helpers.mjs";
+import { assertUnderTime } from "./timing.mjs";
 
 const out = (stdout, exitCode = 0, stderr = "") => ({ stdout, stderr, exitCode });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -50,7 +51,7 @@ test("gate 10: default deny, with a recording driver that sees no host call", as
   assert.deepEqual(seen, []);
   const t0 = performance.now();
   const r = await b.exec("__sleep 5000\n__clock");
-  assert.ok(performance.now() - t0 < 1000);
+  assertUnderTime("Virtual 5 s sleep", performance.now() - t0, 1000);
   assert.equal(r.stdout, "5000\n");
   assert.deepEqual(seen, []);
   const entropy = bash({}, { onHostCall: (r) => seen.push(r.tag) });
@@ -105,7 +106,8 @@ test("gate 11: a command that ignores abort cannot delay the exec nor write afte
   const took = performance.now() - t0;
   assert.equal(r.exitCode, 124);
   assert.equal(r.stdout, "aa");
-  assert.ok(took < 30 + 100 + 50 + 30, `took ${took}`);
+  // Double the CI limit here so it stays below the command's 500 ms sleep.
+  assertUnderTime("Abort while a command ignores cancellation", took, 30 + 100 + 50 + 30, 2);
   const calls = state.calls;
   await sleep(600);
   assert.equal(afterWrite, "ExecutionAbortedError");

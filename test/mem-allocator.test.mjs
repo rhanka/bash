@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { repoRoot } from "./helpers.mjs";
+import { assertUnderTime } from "./timing.mjs";
 import { buildMemModule, instantiate } from "./memwasm.mjs";
 import { walk } from "../tools/lib.mjs";
 
@@ -226,9 +227,8 @@ test("gate 9: speed", () => {
   };
   const w1 = best((x) => assert.equal(x.t_run(1, 0), 0));
   const pairs = best((x) => x.t_pairs(1_000_000, 64));
-  console.log(`# speed: W1 ${w1.toFixed(1)} ms (limit 50), 1 000 000 alloc/free pairs of 64 B ${pairs.toFixed(1)} ms (limit 100)`);
-  assert.ok(w1 < 50, `W1 took ${w1} ms`);
-  assert.ok(pairs < 100, `pairs took ${pairs} ms`);
+  assertUnderTime("W1 uniform", w1, 50);
+  assertUnderTime("1 000 000 alloc/free pairs of 64 B", pairs, 100);
 });
 
 test("gate 14: memory.grow appears only in the allocator file", () => {
