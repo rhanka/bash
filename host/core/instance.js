@@ -34,7 +34,9 @@ export class Instance {
     this.hooks = hooks;
     this.poisoned = false;
     this.waiters = new Set();
-    this.engine = instantiate(coreModules(mainModule, shims), {}).engine;
+    const { engine, _util } = instantiate(coreModules(mainModule, shims), {});
+    this.engine = engine;
+    this.util = _util;
     hooks?.onEngine?.(this.engine);
   }
 
@@ -55,6 +57,11 @@ export class Instance {
   poison() {
     if (this.poisoned) return;
     this.poisoned = true;
+    try {
+      this.util?.stop();
+    } catch {
+      // The store is marked stopped before jco attempts cleanup.
+    }
     for (const w of this.waiters) w();
     this.waiters.clear();
   }

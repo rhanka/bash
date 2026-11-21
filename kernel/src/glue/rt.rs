@@ -2,6 +2,24 @@
 //! written here so that no crate is needed. Everything goes through the global allocator, which is
 //! `kernel::mem`.
 use crate::mem::abi::{alloc, dealloc, handle_alloc_error, Layout};
+use crate::mem::{MemError, MemResult};
+
+/// Tests a generated lowering layout after the adapter has built its return value. The single-threaded
+/// bump allocator reuses this last block immediately, at the same or a smaller alignment.
+pub fn check_lowering(size: usize, align: usize) -> MemResult<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    let layout = Layout::from_size_align(size, align).map_err(|_| MemError::Overflow)?;
+    // SAFETY: the layout has a non-zero size.
+    let ptr = unsafe { alloc(layout) };
+    if ptr.is_null() {
+        return Err(MemError::Ceiling);
+    }
+    // SAFETY: ptr is the block just allocated with this layout and was never exposed.
+    unsafe { dealloc(ptr, layout) };
+    Ok(())
+}
 
 /// A resource implemented by this component. `Rep` is how the value is stored behind the handle.
 pub trait Resource: Sized + 'static {

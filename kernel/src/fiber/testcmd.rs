@@ -183,13 +183,23 @@ impl Fiber {
                 if self.shell.granted(G_ENTROPY) {
                     Flow::Host(Pending::Test(T_ENTROPY, 0), HostReq::Entropy(n as u32))
                 } else {
-                    // Fixed-seed generator: advance it by the words that would have been produced.
-                    for _ in 0..n.min(1 << 16).div_ceil(8) {
-                        self.shell.next_random();
+                    if n > 1 << 16 {
+                        return Some(self.t_bad(name));
+                    }
+                    if !self.out_len_ok(n) {
+                        return Some(Flow::Fail(Fail::Output));
+                    }
+                    let mut left = n as usize;
+                    while left != 0 {
+                        let bytes = self.shell.next_random().to_le_bytes();
+                        let len = left.min(bytes.len());
+                        if let Err(f) = self.write_out(Chan::StdoutBytes, &bytes[..len]) {
+                            return Some(Flow::Fail(f));
+                        }
+                        left -= len;
                     }
                     self.last_exit = 0;
-                    let r = self.say(Chan::Stdout, |s| write!(s, "{n}\n"));
-                    self.t_ok(r)
+                    Flow::Next
                 }
             }
             C_TRAP => {

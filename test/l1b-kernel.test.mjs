@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Bash, InMemoryFs, T, bash, dec, enc, internal } from "./kt.mjs";
+import { Bash, InMemoryFs, T, bash, countKernelCalls, dec, enc, internal, module } from "./kt.mjs";
+import { Instance } from "../host/core/instance.js";
 import { repoRoot } from "./helpers.mjs";
 import { join } from "node:path";
 
@@ -62,6 +63,19 @@ test("epochs: numbering from 1 and re-use of a resumed epoch", () => {
   assert.equal(f.resume(2n, { tag: "command-exit", val: 4 }).tag, "done");
 });
 
+test("a host call uses up its slice and resume cannot reset the fuel", () => {
+  const { engine } = withEngine();
+  const vfs = engine.Vfs.create(1000000n);
+  const shell = engine.Shell.create(vfs, config(["foo"]));
+  const f = engine.Fiber.spawn(shell, undefined, opts("foo\nfoo\n__out 1"));
+  assert.equal(f.run(2n).val.epoch, 1n);
+  assert.equal(f.resume(1n, { tag: "command-exit", val: 0 }).val.epoch, 2n);
+  assert.equal(f.resume(2n, { tag: "command-exit", val: 0 }).tag, "out-of-fuel");
+  assert.equal(f.takeStdout(2).length, 0);
+  assert.equal(f.run(1n).tag, "done");
+  assert.equal(dec(f.takeStdout(2)), "a");
+});
+
 test("gate 18: every operation of the filesystem slice", () => {
   const { engine } = withEngine();
   const v = engine.Vfs.create(2000n);
@@ -104,6 +118,57 @@ test("gate 18: every operation of the filesystem slice", () => {
   assert.equal(thrown(() => v.mountHost(p("/m"), 1)).code, "unsupported");
   assert.equal(thrown(() => v.unmount(p("/m"))).code, "unsupported");
   assert.deepEqual(v.takeDirty(), []);
+});
+
+test("oversized filesystem paths are rejected before the kernel call", async () => {
+  const { hooks, state } = countKernelCalls();
+  const b = bash({ executionLimits: { maxStringLength: 64 } }, hooks);
+  const before = state.calls;
+  const path = "/" + "é".repeat(32);
+  assert.throws(() => b.fs.writeFileSync(path, "x"), { code: "EFBIG" });
+  assert.throws(() => b.fs.mkdirSync(path), { code: "EFBIG" });
+  await assert.rejects(b.fs.readFile(path), { code: "EFBIG" });
+  await assert.rejects(b.fs.rm(path), { code: "EFBIG" });
+  assert.equal(state.calls, before);
+  const standalone = new InMemoryFs(undefined, { hooks: internal(), profile: "micro", maxStringLength: 8 << 20 });
+  await assert.rejects(standalone.stat("/" + "x".repeat(4 << 20)), { code: "EFBIG" });
+});
+
+test("filesystem return copies near the Wasm ceiling report no-space without trapping", () => {
+  const { engine } = new Instance(module, internal());
+  engine.configure(8n * 65_536n);
+  const vfs = engine.Vfs.create(400_000n);
+  const path = enc("/data");
+  const bytes = new Uint8Array(150_000).fill(97);
+  assert.equal(vfs.op({ tag: "write-file", val: { path, data: bytes, offset: 0n, truncate: true } }).tag, "ok");
+  const full = vfs.op({ tag: "read-file", val: { path, offset: 0n, len: 120_000 } });
+  assert.deepEqual(full, { tag: "err", val: { code: "no-space", path } });
+  const small = vfs.op({ tag: "read-file", val: { path, offset: 0n, len: 64 } });
+  assert.deepEqual(small, { tag: "ok", val: { tag: "data", val: bytes.subarray(0, 64) } });
+});
+
+test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () => {
+  const { engine } = new Instance(module, internal());
+  engine.configure(10n << 20n);
+  const vfs = engine.Vfs.create(5n << 20n);
+  const fill = new Uint8Array((5 << 20) - 170_000);
+  const val = { path: enc("/fill"), data: fill, offset: 0n, truncate: true };
+  assert.equal(vfs.op({ tag: "write-file", val }).tag, "ok");
+  const c = config();
+  c.limits = {
+    profile: "micro",
+    overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 256_000n })),
+  };
+  const shell = engine.Shell.create(vfs, c);
+  const fiber = engine.Fiber.spawn(shell, undefined, opts("__out 200000"));
+  assert.equal(fiber.run(5n).val.exitCode, 0);
+  const chunks = [];
+  for (;;) {
+    const bytes = fiber.takeStdout(1 << 20);
+    if (bytes.length === 0) break;
+    chunks.push(bytes);
+  }
+  assert.equal(Buffer.concat(chunks).toString(), "a".repeat(200_000));
 });
 
 test("gate 18: InMemoryFs methods, and ENOSYS for the ones not backed yet", async () => {

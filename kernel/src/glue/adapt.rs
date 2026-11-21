@@ -9,8 +9,7 @@ use crate::limits::{self, Resolved};
 use crate::mem::{self, Budget, KRc, LimitId, MemError};
 use crate::shell::{Config, CreateError, Shell};
 use crate::util::Env;
-use crate::mem::abi::String;
-use crate::mem::abi::Vec;
+use crate::mem::abi::{self, Layout, String, Vec};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -18,8 +17,57 @@ static CONFIGURED: AtomicBool = AtomicBool::new(false);
 
 pub struct Kernel;
 
+fn copy<T: Copy>(items: &[T]) -> Result<Vec<T>, MemError> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(items.len()).map_err(|_| MemError::Ceiling)?;
+    out.extend_from_slice(items);
+    Ok(out)
+}
+
+fn copy_text(s: &str) -> Result<String, MemError> {
+    let mut out = String::new();
+    out.try_reserve_exact(s.len()).map_err(|_| MemError::Ceiling)?;
+    out.push_str(s);
+    Ok(out)
+}
+
+fn lossy_text(bytes: &[u8]) -> Result<String, MemError> {
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        return copy_text(s);
+    }
+    let len = bytes.utf8_chunks().map(|c| c.valid().len() + 3 * usize::from(!c.invalid().is_empty())).sum();
+    let mut out = String::new();
+    out.try_reserve_exact(len).map_err(|_| MemError::Ceiling)?;
+    for c in bytes.utf8_chunks() {
+        out.push_str(c.valid());
+        if !c.invalid().is_empty() {
+            out.push('\u{fffd}');
+        }
+    }
+    Ok(out)
+}
+
+fn collect<I, T, U>(items: I, mut convert: impl FnMut(T) -> Result<U, MemError>) -> Result<Vec<U>, MemError>
+where
+    I: ExactSizeIterator<Item = T>,
+{
+    let mut out = Vec::new();
+    out.try_reserve_exact(items.len()).map_err(|_| MemError::Ceiling)?;
+    for item in items {
+        out.push(convert(item)?);
+    }
+    Ok(out)
+}
+
+// After a refusal, return a smaller bounded chunk from the reserve. Each chunk is lifted and
+// released before the next call.
+fn drain_copy(bytes: &[u8]) -> Result<Vec<u8>, MemError> {
+    let bytes = &bytes[..bytes.len().min(1 << 20)];
+    copy(bytes).or_else(|_| abi::with_reserve(|| copy(&bytes[..bytes.len().min(16 << 10)])))
+}
+
 fn kerr(code: T::KernelErrorCode, detail: &str) -> T::KernelError {
-    T::KernelError { code, detail: String::from(detail) }
+    T::KernelError { code, detail: abi::with_reserve(|| copy_text(detail)).unwrap_or_default() }
 }
 
 fn mem_err(e: MemError) -> T::KernelError {
@@ -52,6 +100,12 @@ fn meta() -> Result<Budget, T::KernelError> {
 fn rc<V>(v: V) -> Result<KRc<V>, T::KernelError> {
     let m = meta()?;
     KRc::try_new_in(v, &m).map_err(|(_, e)| mem_err(e))
+}
+
+fn resource<Rep, R>(rep: Rep, new: impl FnOnce(Rep) -> R) -> Result<R, T::KernelError> {
+    let layout = Layout::new::<Rep>();
+    rt::check_lowering(layout.size(), layout.align()).map_err(mem_err)?;
+    Ok(new(rep))
 }
 
 impl E::Guest for Kernel {
@@ -134,10 +188,6 @@ fn fs_code_name(c: &T::FsErrorCode) -> &'static str {
     }
 }
 
-fn fs_err(c: Code, path: &[u8]) -> T::FsError {
-    T::FsError { code: fs_code(c), path: path.to_vec() }
-}
-
 fn kind_out(k: fs::Kind) -> T::NodeKind {
     match k {
         fs::Kind::File => T::NodeKind::File,
@@ -145,14 +195,14 @@ fn kind_out(k: fs::Kind) -> T::NodeKind {
     }
 }
 
-fn op_path(op: &T::FsOp) -> &[u8] {
+fn op_path(op: T::FsOp) -> Vec<u8> {
     match op {
         T::FsOp::Stat(p) | T::FsOp::Lstat(p) | T::FsOp::Exists(p) | T::FsOp::ReadDir(p) | T::FsOp::ReadLink(p) | T::FsOp::RealPath(p) | T::FsOp::ReadDirPlus(p) => p,
-        T::FsOp::ReadFile(r) => &r.path,
-        T::FsOp::WriteFile(w) => &w.path,
-        T::FsOp::Mkdir(m) => &m.path,
-        T::FsOp::Remove(r) => &r.path,
-        _ => &[],
+        T::FsOp::ReadFile(r) => r.path,
+        T::FsOp::WriteFile(w) => w.path,
+        T::FsOp::Mkdir(m) => m.path,
+        T::FsOp::Remove(r) => r.path,
+        _ => Vec::new(),
     }
 }
 
@@ -171,41 +221,47 @@ fn to_op(op: &T::FsOp) -> Op<'_> {
     }
 }
 
-fn fs_ok(o: Ok_) -> T::FsOk {
-    match o {
+fn fs_ok(o: Ok_) -> Result<T::FsOk, MemError> {
+    Ok(match o {
         Ok_::None => T::FsOk::None,
         Ok_::Flag(b) => T::FsOk::Flag(b),
         Ok_::Info(s) => T::FsOk::Info(T::Stat { kind: kind_out(s.kind), size: s.size, mode: s.mode, mtime_ms: s.mtime_ms, dev: 0, ino: s.ino }),
-        Ok_::Data(d) => T::FsOk::Data(d.to_vec()),
-        Ok_::Paths(p) => T::FsOk::Paths(p.iter().map(|x| x.to_vec()).collect()),
-        Ok_::Entries(e) => T::FsOk::Entries(e.iter().map(|(n, k)| T::DirEntry { name: n.to_vec(), kind: kind_out(*k) }).collect()),
-    }
+        Ok_::Data(d) => T::FsOk::Data(copy(&d)?),
+        Ok_::Paths(p) => {
+            let paths = collect(p.iter(), |x| copy(x))?;
+            rt::check_lowering(paths.len() * 8, 4)?;
+            T::FsOk::Paths(paths)
+        }
+        Ok_::Entries(e) => {
+            let entries = collect(e.iter(), |(n, k)| Ok(T::DirEntry { name: copy(n)?, kind: kind_out(*k) }))?;
+            rt::check_lowering(entries.len() * 12, 4)?;
+            T::FsOk::Entries(entries)
+        }
+    })
 }
 
 impl E::GuestVfs for VfsRes {
     fn create(max_bytes: u64) -> Result<E::Vfs, T::KernelError> {
         configured()?;
         let v = Vfs::create(max_bytes, limits::id_of_index(limits::I_FS_BYTES)).map_err(mem_err)?;
-        Ok(E::Vfs::new(VfsRes(rc(v)?)))
+        resource(VfsRes(rc(v)?), E::Vfs::new)
     }
 
     fn op(&self, req: T::FsOp) -> T::FsResult {
-        match self.0.op(to_op(&req)) {
-            Ok(o) => Ok(fs_ok(o)),
-            Err(c) => Err(fs_err(c, op_path(&req))),
-        }
+        self.0.op(to_op(&req)).and_then(|o| fs_ok(o).map_err(|_| Code::NoSpace))
+            .map_err(|c| T::FsError { code: fs_code(c), path: op_path(req) })
     }
 
     fn mount_vfs(&self, path: Vec<u8>, _source: E::VfsBorrow<'_>) -> Result<(), T::FsError> {
-        Err(fs_err(Code::Unsupported, &path))
+        Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
     }
 
     fn mount_host(&self, path: Vec<u8>, _mount_id: u32) -> Result<(), T::FsError> {
-        Err(fs_err(Code::Unsupported, &path))
+        Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
     }
 
     fn unmount(&self, path: Vec<u8>) -> Result<(), T::FsError> {
-        Err(fs_err(Code::Unsupported, &path))
+        Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
     }
 
     fn take_dirty(&self) -> Vec<T::ChangedFile> {
@@ -225,12 +281,12 @@ impl rt::Resource for ShellRes {
     type Rep = ShellRes;
 }
 
-fn env_out(e: &Env) -> Vec<T::EnvVar> {
-    e.v.iter().map(|x| T::EnvVar { name: x.name.to_vec(), value: x.value.to_vec(), exported: x.exported }).collect()
+fn env_out(e: &Env) -> Result<Vec<T::EnvVar>, MemError> {
+    collect(e.v.iter(), |x| Ok(T::EnvVar { name: copy(&x.name)?, value: copy(&x.value)?, exported: x.exported }))
 }
 
-fn env_in(e: &[T::EnvVar]) -> Vec<(&[u8], &[u8], bool)> {
-    e.iter().map(|x| (x.name.as_slice(), x.value.as_slice(), x.exported)).collect()
+fn env_in(e: &[T::EnvVar]) -> Result<Vec<(&[u8], &[u8], bool)>, T::KernelError> {
+    collect(e.iter(), |x| Ok((x.name.as_slice(), x.value.as_slice(), x.exported))).map_err(mem_err)
 }
 
 fn create_err(e: CreateError) -> T::KernelError {
@@ -240,17 +296,17 @@ fn create_err(e: CreateError) -> T::KernelError {
     }
 }
 
-fn overrides_of(l: &T::Limits) -> Vec<(&str, u64)> {
-    l.overrides.iter().map(|o| (o.name.as_str(), o.value)).collect()
+fn overrides_of(l: &T::Limits) -> Result<Vec<(&str, u64)>, T::KernelError> {
+    collect(l.overrides.iter(), |o| Ok((o.name.as_str(), o.value))).map_err(mem_err)
 }
 
 impl E::GuestShell for ShellRes {
     fn create(root: E::VfsBorrow<'_>, config: T::ShellConfig) -> Result<E::Shell, T::KernelError> {
         configured()?;
         let vfs = root.get::<VfsRes>().0.clone();
-        let overrides = overrides_of(&config.limits);
-        let env = env_in(&config.env);
-        let custom: Vec<&str> = config.custom_commands.iter().map(|s| s.as_str()).collect();
+        let overrides = overrides_of(&config.limits)?;
+        let env = env_in(&config.env)?;
+        let custom = collect(config.custom_commands.iter(), |s| Ok(s.as_str())).map_err(mem_err)?;
         let cfg = Config {
             profile: config.limits.profile as usize,
             overrides: &overrides,
@@ -260,7 +316,7 @@ impl E::GuestShell for ShellRes {
             cwd: config.cwd.as_deref(),
         };
         let sh = Shell::create(vfs, &cfg, mem::usage().ceiling).map_err(create_err)?;
-        Ok(E::Shell::new(ShellRes(rc(sh)?)))
+        resource(ShellRes(rc(sh)?), E::Shell::new)
     }
 
     fn register_command(&self, name: String) -> Result<(), T::KernelError> {
@@ -268,11 +324,16 @@ impl E::GuestShell for ShellRes {
     }
 
     fn env(&self) -> Vec<T::EnvVar> {
-        env_out(&self.0.env)
+        let encode = || {
+            let env = env_out(&self.0.env)?;
+            rt::check_lowering(env.len() * 20, 4)?;
+            Ok::<_, MemError>(env)
+        };
+        encode().unwrap_or_default()
     }
 
     fn cwd(&self) -> Vec<u8> {
-        self.0.cwd.to_vec()
+        copy(&self.0.cwd).or_else(|_| abi::with_reserve(|| copy(&self.0.cwd))).unwrap_or_default()
     }
 }
 
@@ -293,26 +354,52 @@ fn status_out(s: Status) -> T::ExecStatus {
     }
 }
 
-fn result_out(r: &fiber::ExecResult) -> T::ExecResult {
-    T::ExecResult { exit_code: r.exit, status: status_out(r.status), limit_name: r.limit_name.as_ref().map(|n| String::from(n.as_str())), env: env_out(&r.env) }
+fn result_out(r: &fiber::ExecResult, other_records: usize) -> Result<T::ExecResult, MemError> {
+    let env = env_out(&r.env)?;
+    let limit_name = r.limit_name.as_ref().map(|n| copy_text(n.as_str())).transpose()?;
+    rt::check_lowering(env.len() * 20 + other_records, 4)?;
+    Ok(T::ExecResult {
+        exit_code: r.exit, status: status_out(r.status),
+        limit_name, env,
+        stdout_kind: if r.stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
+    })
 }
 
-fn req_out(r: &HostReq) -> T::HostReq {
-    match r {
-        HostReq::FsStat { mount_id, path } => T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops: crate::mem::abi::vec![T::FsOp::Stat(path.to_vec())] }),
-        HostReq::LazyFile(p) => T::HostReq::LazyFile(p.to_vec()),
-        HostReq::Custom { name, args, cwd, env, input_len } => T::HostReq::CustomCommand(T::CommandCall {
-            name: String::from_utf8_lossy(name).into_owned(),
-            args: args.iter().map(|a| a.to_vec()).collect(),
-            cwd: cwd.to_vec(),
-            env: env_out(env),
-            fds: Vec::new(),
-            input_len: *input_len,
-            xpg_echo: false,
-        }),
+fn transfer_limit(stdout_bytes: bool) -> T::ExecResult {
+    T::ExecResult {
+        exit_code: 126,
+        status: T::ExecStatus::LimitExceeded,
+        limit_name: abi::with_reserve(|| copy_text("memory-ceiling")).ok(),
+        env: Vec::new(),
+        stdout_kind: if stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
+    }
+}
+
+fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
+    Ok(match r {
+        HostReq::FsStat { mount_id, path } => {
+            let ops = collect(core::iter::once(path), |p| Ok(T::FsOp::Stat(copy(p)?)))?;
+            // fs-op contains a discriminant and its largest arm (the write-file record).
+            rt::check_lowering(72, 8)?;
+            T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops })
+        }
+        HostReq::LazyFile(p) => T::HostReq::LazyFile(copy(p)?),
+        HostReq::Custom { name, args, cwd, env, input_len } => {
+            let call = T::CommandCall {
+                name: lossy_text(name)?,
+                args: collect(args.iter(), |a| copy(a))?,
+                cwd: copy(cwd)?,
+                env: env_out(env)?,
+                fds: Vec::new(),
+                input_len: *input_len,
+                xpg_echo: false,
+            };
+            rt::check_lowering(call.args.len() * 8 + call.env.len() * 20, 4)?;
+            T::HostReq::CustomCommand(call)
+        }
         HostReq::Fetch { url } => T::HostReq::Fetch(T::FetchReq {
-            method: String::from("GET"),
-            url: String::from_utf8_lossy(url).into_owned(),
+            method: copy_text("GET")?,
+            url: lossy_text(url)?,
             headers: Vec::new(),
             input_len: 0,
             follow_redirects: true,
@@ -323,15 +410,19 @@ fn req_out(r: &HostReq) -> T::HostReq {
         HostReq::Sleep(ms) => T::HostReq::Sleep(*ms),
         HostReq::Clock => T::HostReq::Clock,
         HostReq::Entropy(n) => T::HostReq::Entropy(*n),
-    }
+    })
 }
 
-fn step_out(s: Step) -> T::Step {
-    match s {
-        Step::Done(r) => T::Step::Done(result_out(&r)),
-        Step::OutOfFuel => T::Step::OutOfFuel,
-        Step::Host { epoch, req } => T::Step::HostCall(T::PendingCall { epoch, req: req_out(&req) }),
-    }
+fn step_out(f: &mut Fiber, s: Step) -> T::Step {
+    let result = match s {
+        Step::Done(r) => result_out(&r, 0).map(T::Step::Done),
+        Step::OutOfFuel => return T::Step::OutOfFuel,
+        Step::Host { epoch, req } => req_out(&req).map(|req| T::Step::HostCall(T::PendingCall { epoch, req })),
+    };
+    result.unwrap_or_else(|_| {
+        f.fail_abi_transfer();
+        T::Step::Done(transfer_limit(f.stdout_bytes()))
+    })
 }
 
 fn net_code_name(c: &T::NetErrorCode) -> &'static str {
@@ -368,13 +459,14 @@ fn outcome_in(o: &T::HostOutcome) -> Outcome<'_> {
 fn chan_in(c: &T::OutChannel) -> Chan {
     match c {
         T::OutChannel::Stdout => Chan::Stdout,
+        T::OutChannel::StdoutBytes => Chan::StdoutBytes,
         T::OutChannel::Stderr => Chan::Stderr,
         T::OutChannel::Body => Chan::Body,
     }
 }
 
 fn spawn_fiber(shell: KRc<Shell>, parent: Option<&Budget>, o: &T::ExecOpts) -> Result<Fiber, T::KernelError> {
-    let env = env_in(&o.env);
+    let env = env_in(&o.env)?;
     let opts = fiber::Opts {
         script: &o.script,
         overflow: o.script_overflow.as_ref().map(|s| (s.utf16_units, s.utf8_bytes)),
@@ -392,7 +484,7 @@ impl E::GuestFiber for FiberRes {
         let shell = owner.get::<ShellRes>().0.clone();
         let parent_live = parent.as_ref().map(|p| p.get::<FiberRes>().0.borrow().live_budget().clone());
         let f = spawn_fiber(shell, parent_live.as_ref(), &opts)?;
-        Ok(E::Fiber::new(FiberRes(RefCell::new(f))))
+        resource(FiberRes(RefCell::new(f)), E::Fiber::new)
     }
 
     fn write_stdin(&self, chunk: Vec<u8>, last: bool) -> Result<(), T::KernelError> {
@@ -400,18 +492,23 @@ impl E::GuestFiber for FiberRes {
     }
 
     fn run(&self, fuel: u64) -> T::Step {
-        step_out(self.0.borrow_mut().run(fuel))
+        let mut f = self.0.borrow_mut();
+        let step = f.run(fuel);
+        step_out(&mut f, step)
     }
 
     fn resume(&self, epoch: u64, outcome: T::HostOutcome) -> Result<T::Step, T::KernelError> {
-        let step = self.0.borrow_mut().resume(epoch, outcome_in(&outcome)).map_err(call_err)?;
-        Ok(step_out(step))
+        let mut f = self.0.borrow_mut();
+        let step = f.resume(epoch, outcome_in(&outcome)).map_err(call_err)?;
+        Ok(step_out(&mut f, step))
     }
 
     fn read_call_input(&self, epoch: u64, fd: u32, max: u32) -> Result<Vec<u8>, T::KernelError> {
         let mut f = self.0.borrow_mut();
-        let d = f.read_call_input(epoch, fd, max as usize).map_err(call_err)?;
-        Ok(d.to_vec())
+        let d = f.call_input_chunk(epoch, fd, max as usize).map_err(call_err)?;
+        let bytes = drain_copy(d).map_err(mem_err)?;
+        f.consume_call_input(bytes.len());
+        Ok(bytes)
     }
 
     fn push_call_data(&self, epoch: u64, channel: T::OutChannel, chunk: Vec<u8>) -> Result<(), T::KernelError> {
@@ -423,7 +520,7 @@ impl E::GuestFiber for FiberRes {
     }
 
     fn set_call_env(&self, epoch: u64, env: Vec<T::EnvVar>) -> Result<(), T::KernelError> {
-        let e = env_in(&env);
+        let e = env_in(&env)?;
         self.0.borrow_mut().set_call_env(epoch, &e).map_err(call_err)
     }
 
@@ -433,19 +530,20 @@ impl E::GuestFiber for FiberRes {
             T::CancelReason::Deadline => fiber::CancelReason::Deadline,
             T::CancelReason::Limit => fiber::CancelReason::Limit,
         };
-        result_out(&self.0.borrow_mut().cancel(r))
+        let result = self.0.borrow_mut().cancel(r);
+        result_out(&result, 0).unwrap_or_else(|_| transfer_limit(result.stdout_bytes))
     }
 
     fn take_stdout(&self, max: u32) -> Vec<u8> {
         let mut f = self.0.borrow_mut();
-        let v = f.stdout_chunk(max as usize).to_vec();
+        let v = drain_copy(f.stdout_chunk(max as usize)).unwrap_or_default();
         f.stdout_consume(v.len());
         v
     }
 
     fn take_stderr(&self, max: u32) -> Vec<u8> {
         let mut f = self.0.borrow_mut();
-        let v = f.stderr_chunk(max as usize).to_vec();
+        let v = drain_copy(f.stderr_chunk(max as usize)).unwrap_or_default();
         f.stderr_consume(v.len());
         v
     }
@@ -468,7 +566,7 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
     if req.config.trace || req.config.coverage {
         return Err(kerr(T::KernelErrorCode::InvalidConfig, "trace and coverage have no channel in exec-oneshot"));
     }
-    let overrides = overrides_of(&req.config.limits);
+    let overrides = overrides_of(&req.config.limits)?;
     let mut lim = Resolved::of_profile(req.config.limits.profile as usize);
     for (n, v) in &overrides {
         if !lim.set(n, *v) {
@@ -480,8 +578,8 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
         let w = Op::WriteFile { path: &f.path, data: &f.data, offset: Some(0), truncate: true, mode: Some(f.mode), mtime_ms: None };
         vfs.op(w).map_err(|_| kerr(T::KernelErrorCode::InvalidConfig, "cannot place an input file"))?;
     }
-    let env = env_in(&req.config.env);
-    let custom: Vec<&str> = req.config.custom_commands.iter().map(|s| s.as_str()).collect();
+    let env = env_in(&req.config.env)?;
+    let custom = collect(req.config.custom_commands.iter(), |s| Ok(s.as_str())).map_err(mem_err)?;
     let cfg = Config { profile: req.config.limits.profile as usize, overrides: &overrides, grants: req.config.grants.bits(), custom_commands: &custom, env: &env, cwd: req.config.cwd.as_deref() };
     let sh = rc(Shell::create(vfs.clone(), &cfg, mem::usage().ceiling).map_err(create_err)?)?;
     let mut f = spawn_fiber(sh, None, &req.opts)?;
@@ -504,26 +602,8 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
             Step::Host { .. } => return Err(kerr(T::KernelErrorCode::BadState, "the script needs a host call")),
         }
     };
-    let mut stdout = Vec::new();
-    loop {
-        let c = f.stdout_chunk(1 << 20);
-        if c.is_empty() {
-            break;
-        }
-        stdout.extend_from_slice(c);
-        let n = c.len();
-        f.stdout_consume(n);
-    }
-    let mut stderr = Vec::new();
-    loop {
-        let c = f.stderr_chunk(1 << 20);
-        if c.is_empty() {
-            break;
-        }
-        stderr.extend_from_slice(c);
-        let n = c.len();
-        f.stderr_consume(n);
-    }
+    let stdout = copy(f.stdout_chunk(usize::MAX)).map_err(mem_err)?;
+    let stderr = copy(f.stderr_chunk(usize::MAX)).map_err(mem_err)?;
     let mut changed = Vec::new();
     let mut removed: Vec<Vec<u8>> = Vec::new();
     if let Ok(Ok_::Paths(paths)) = vfs.op(Op::AllPaths) {
@@ -535,18 +615,21 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
                 if let Ok(Ok_::Data(d)) = vfs.op(Op::ReadFile { path: p, offset: 0, len: u32::MAX }) {
                     let same = req.files.iter().any(|x| x.path.as_slice() == p.as_slice() && x.data.as_slice() == d.as_slice());
                     if !same {
-                        changed.push(T::OneshotFile { path: p.to_vec(), data: d.to_vec(), mode: s.mode });
+                        changed.try_reserve(1).map_err(|_| mem_err(MemError::Ceiling))?;
+                        changed.push(T::OneshotFile { path: copy(p).map_err(mem_err)?, data: copy(&d).map_err(mem_err)?, mode: s.mode });
                     }
                 }
             }
         }
         for x in &req.files {
             if !paths.iter().any(|p| p.as_slice() == x.path.as_slice()) {
-                removed.push(x.path.clone());
+                removed.try_reserve(1).map_err(|_| mem_err(MemError::Ceiling))?;
+                removed.push(copy(&x.path).map_err(mem_err)?);
             }
         }
     }
-    Ok(T::OneshotResult { outcome: result_out(&result), stdout, stderr, changed, removed })
+    let outcome = result_out(&result, changed.len() * 20 + removed.len() * 8).map_err(mem_err)?;
+    Ok(T::OneshotResult { outcome, stdout, stderr, changed, removed })
 }
 
 super::kernel::export!(Kernel with_types_in super::kernel);

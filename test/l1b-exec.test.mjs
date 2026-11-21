@@ -1,9 +1,18 @@
 // Gates 2-7, 15 and 19 of lot L1b: results, environment, chunking, pre-checks, limits, fuel and cancel.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import { Bash, T, bash, countKernelCalls, INTERNAL, internal } from "./kt.mjs";
 
 const EXIT_ABORTED = "bash: execution aborted\n";
+
+test("branch exception IDs comply with the scope profile", () => {
+  const branch = new URL("../BRANCH.md", import.meta.url);
+  if (!existsSync(branch)) return;
+  const profile = JSON.parse(readFileSync(new URL("../harness.profile.json", import.meta.url), "utf8"));
+  const ids = readFileSync(branch, "utf8").matchAll(/^\s*- \*\*(BR\S+-EX\d+)\*\*/gm);
+  for (const [, id] of ids) assert.match(id, new RegExp(profile.exceptionIdPattern));
+});
 
 /** The six cases of gate 2 as [name, run(options) => result]. */
 const SIX = [
@@ -48,6 +57,8 @@ test("gate 19: execSync throws AsyncCapabilityError with an asynchronous capabil
   assert.throws(() => bash({ customCommands: [cmd] }).execSync(""), { name: "AsyncCapabilityError" });
   assert.throws(() => bash({ sleep: async () => {} }).execSync(""), { name: "AsyncCapabilityError" });
   assert.throws(() => bash({ fetch: async () => ({}) }).execSync(""), { name: "AsyncCapabilityError" });
+  assert.throws(() => bash({ network: {} }).execSync(""), { name: "AsyncCapabilityError" });
+  assert.throws(() => bash({ fs: {} }).execSync(""), { name: "AsyncCapabilityError" });
   const b = bash();
   b.registerCommand(cmd);
   assert.throws(() => b.execSync(""), { name: "AsyncCapabilityError" });
@@ -104,6 +115,10 @@ test("gate 5: pre-checks produce the limit result without any kernel call", asyn
   const r = await b.exec("__out 1", { env: { BIG: "x".repeat(101) } });
   assert.equal(r.exitCode, 126);
   assert.match(r.stderr, /maxStringLength exceeded/);
+  assert.equal(r.env["?"], "126");
+  const longName = await b.exec("", { env: { ["é".repeat(51)]: "x" } });
+  assert.equal(longName.exitCode, 126);
+  assert.match(longName.stderr, /maxStringLength exceeded/);
   assert.equal(state.calls, base);
   const c = countKernelCalls();
   const d = bash({}, c.hooks);
@@ -112,6 +127,31 @@ test("gate 5: pre-checks produce the limit result without any kernel call", asyn
   const r2 = await d.exec("__out 1", { args: [mib10, mib10] });
   assert.equal(r2.exitCode, 126);
   assert.equal(c.state.calls, calls);
+});
+
+test("option records refuse arrays and shell configuration rejects oversized inputs before lowering", async () => {
+  for (const options of [[], { env: [] }, { files: [] }, { network: [] }, { fs: [] }, { executionLimits: [] }, { processInfo: [] }]) {
+    assert.throws(() => new Bash(options), TypeError);
+  }
+  await assert.rejects(bash().exec("", []), TypeError);
+  const { hooks, state } = countKernelCalls();
+  const executionLimits = { maxStringLength: 100 };
+  for (const options of [
+    { env: { ["é".repeat(51)]: "v" } },
+    { cwd: "/" + "é".repeat(50) },
+    { customCommands: [{ name: "é".repeat(51), execute() {} }] },
+  ]) {
+    assert.throws(() => bash({ ...options, executionLimits }, hooks), /maxStringLength exceeded/);
+  }
+  assert.deepEqual(state.names, []);
+  const b = bash({ executionLimitProfile: "micro", executionLimits: { maxStringLength: 64 << 20 } }, hooks);
+  const before = state.calls;
+  const overHalf = "x".repeat((4 << 20) + 1);
+  const result = await b.exec("", { env: { [overHalf]: "" } });
+  assert.match(result.stderr, /headroom exceeded/);
+  assert.equal(state.calls, before);
+  assert.throws(() => bash({ executionLimitProfile: "micro", env: { KEY: overHalf }, executionLimits: { maxStringLength: 64 << 20 } }, hooks), /headroom exceeded/);
+  assert.equal(state.calls, before);
 });
 
 test("gate 6: limits are results, and the instance stays usable", async () => {

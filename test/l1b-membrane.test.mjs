@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Bash, InMemoryFs, T, bash, countKernelCalls, internal } from "./kt.mjs";
-import { defineCommand } from "@sentropic/bash";
+import { bytesOutput, defineCommand, stdoutAsBytes } from "@sentropic/bash";
 import { repoRoot } from "./helpers.mjs";
 
 const out = (stdout, exitCode = 0, stderr = "") => ({ stdout, stderr, exitCode });
@@ -53,10 +53,13 @@ test("gate 10: default deny, with a recording driver that sees no host call", as
   assert.ok(performance.now() - t0 < 1000);
   assert.equal(r.stdout, "5000\n");
   assert.deepEqual(seen, []);
-  const e1 = await bash().exec("__entropy 16");
-  const e2 = await bash().exec("__entropy 16");
-  assert.equal(e1.stdout, "16\n");
-  assert.equal(e1.stdout, e2.stdout);
+  const entropy = bash({}, { onHostCall: (r) => seen.push(r.tag) });
+  const first = await entropy.exec("__entropy 16");
+  assert.equal(first.stdoutKind, "bytes");
+  assert.equal(Buffer.from(first.stdout, "latin1").toString("hex"), "ad4df30bae771bdc76606e02b9eef064");
+  assert.equal((await bash().exec("__entropy 16")).stdout, first.stdout);
+  assert.notEqual((await entropy.exec("__entropy 16")).stdout, first.stdout);
+  assert.deepEqual(seen, []);
 });
 
 test("gate 10: a granted host call reaches the driver and is served through the membrane", async () => {
@@ -129,9 +132,148 @@ test("gate 12: trust decides whether a command's environment change is visible",
   });
   const r = await bash({ customCommands: [boom] }).exec("boom");
   assert.equal(r.exitCode, 1);
-  assert.ok(!r.stderr.includes(repoRoot), r.stderr);
-  assert.ok(!r.stderr.includes("/Users/someone"), r.stderr);
-  assert.match(r.stderr, /<path>/);
+  assert.equal(r.stderr, "failed at <path> and <path>\n");
+});
+
+test("shell assignments compose with trusted env writes and are absent for untrusted commands", async () => {
+  const { state, hooks } = countKernelCalls();
+  const trusted = defineCommand("trusted", async (_args, ctx) => {
+    ctx.env.set("MAP_WRITE", "map");
+    await ctx.assignShellVariable("OLD", "assigned");
+    await ctx.assignShellVariable("NEW", "new");
+    assert.equal(ctx.env.get("OLD"), "assigned");
+  });
+  const untrusted = defineCommand("untrusted", async (_args, ctx) => {
+    if (ctx.assignShellVariable) await ctx.assignShellVariable("LEAK", "injected");
+  }, { trusted: false });
+  const show = defineCommand("show", async (_args, ctx) => out(JSON.stringify([
+    ctx.env.get("MAP_WRITE"), ctx.env.get("OLD"), ctx.env.get("NEW"), ctx.env.get("LEAK"),
+    Object.hasOwn(ctx.exportedEnv, "OLD"),
+  ])));
+  const b = bash({ env: { OLD: "exported" }, customCommands: [trusted, untrusted, show] }, hooks);
+  const r = await b.exec("trusted\nuntrusted\nshow");
+  assert.equal(r.stdout, '["map","assigned","new",null,false]');
+  assert.deepEqual([r.env.MAP_WRITE, r.env.OLD, r.env.NEW, r.env.LEAK], ["map", "assigned", "new", undefined]);
+  assert.equal(state.names.filter((name) => name === "Fiber.assignVariable").length, 2);
+});
+
+test("oversized host env and assignment data complete with a limit before the kernel operation", async () => {
+  const cases = [
+    ["setCallEnv", "maxStringLength", async (ctx) => ctx.env.set("é".repeat(51), "v")],
+    ["assignVariable", "maxStringLength", async (ctx) => ctx.assignShellVariable("KEY", "é".repeat(51))],
+    ["assignVariable", "maxStringLength", async (ctx) => ctx.assignShellVariable("KEY", "v", "é".repeat(51))],
+    ["assignVariable", "headroom", async (ctx) => ctx.assignShellVariable("KEY", "x".repeat(4 << 20))],
+    ["setCallEnv", "headroom", async (ctx) => ctx.env.set("KEY", "x".repeat(4 << 20))],
+  ];
+  for (const [method, limit, update] of cases) {
+    const { state, hooks } = countKernelCalls();
+    const cmd = defineCommand("change", async (_args, ctx) => { await update(ctx); });
+    const b = bash({ executionLimitProfile: "micro", executionLimits: { maxStringLength: limit === "headroom" ? 8 << 20 : 100 }, customCommands: [cmd] }, hooks);
+    const r = await b.exec("change\n__out 1");
+    assert.equal(r.exitCode, 126);
+    assert.match(r.stderr, new RegExp(limit));
+    assert.equal(r.stdout, "");
+    assert.ok(!state.names.includes(`Fiber.${method}`));
+    assert.equal((await b.exec("__out 1")).stdout, "a");
+  }
+});
+
+test("lazy command failures redact complete paths from all host roots", async () => {
+  const paths = ["C:/private/file", "D:\\work\\file", "file:///C:/users/key", "/etc/a", "/workspace/a", "/app/a", "/nix/a", "/proc/a", "/run/a", `${repoRoot}/build/inner/file`];
+  const b = bash({ customCommands: [{ name: "lazy", async load() { throw new Error(`load failed: ${paths.join(" ")}`); } }] });
+  const r = await b.exec("lazy");
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.stderr, `load failed: ${paths.map(() => "<path>").join(" ")}\n`);
+});
+
+test("byte stdout survives mixed fiber output and rows returned from ctx.exec", async () => {
+  const binary = Uint8Array.of(0xc3, 0xa9, 0x80, 0xff);
+  const bytes = defineCommand("bytes", async () => bytesOutput(binary, "é"));
+  const child = defineCommand("child", async (_args, ctx) => ctx.exec("__out 1\nbytes"));
+  const b = bash({ customCommands: [bytes, child] });
+  const r = await b.exec("__out 1\nchild\n__out 1");
+  assert.equal(r.stdoutKind, "bytes");
+  assert.deepEqual([...Buffer.from(stdoutAsBytes(r), "latin1")], [97, 97, ...binary, 97]);
+  assert.equal(r.stderr, "é");
+  assert.equal((await b.exec("__out 1")).stdoutKind, undefined);
+});
+
+test("coverage and command listings are revoked, and ctx.signal preserves the caller abort reason", async () => {
+  const ac = new AbortController();
+  const reason = new Error("caller cancelled");
+  const hits = [];
+  const coverage = { hit(feature) { assert.equal(this, coverage); hits.push(feature); } };
+  let ctx;
+  let cancelled;
+  const command = defineCommand("observe", async (_args, context) => {
+    ctx = context;
+    ctx.coverage.hit("live");
+    assert.deepEqual(ctx.getRegisteredCommands(), ["observe"]);
+    cancelled = new Promise((resolve) => ctx.signal.addEventListener("abort", () => resolve(ctx.signal.reason), { once: true }));
+    ac.abort(reason);
+    return out("");
+  });
+  const result = await bash({ customCommands: [command], coverage }).exec("observe", { signal: ac.signal });
+  assert.equal(result.exitCode, 124);
+  assert.equal(await cancelled, reason);
+  assert.notEqual(ctx.coverage, coverage);
+  assert.throws(() => ctx.coverage.hit("late"), { name: "ExecutionAbortedError" });
+  assert.throws(() => ctx.getRegisteredCommands(), { name: "ExecutionAbortedError" });
+  assert.deepEqual(hits, ["live"]);
+});
+
+test("fast host calls yield for a timer abort and check elapsed time on promise resolution", async () => {
+  const ac = new AbortController();
+  const fast = defineCommand("fast", async () => out(""));
+  const b = bash({ customCommands: [fast] });
+  setTimeout(() => ac.abort(), 0);
+  assert.equal((await b.exec("fast\n".repeat(1500), { signal: ac.signal })).exitCode, 124);
+
+  const late = defineCommand("late", async () => {
+    const until = performance.now() + 35;
+    while (performance.now() < until) { /* finish in this turn, after the deadline */ }
+    return out("too late");
+  });
+  const timed = await bash({ customCommands: [late], executionLimits: { maxExecutionTimeMs: 20 } }).exec("late");
+  assert.equal(timed.exitCode, 124);
+  assert.equal(timed.stdout, "");
+});
+
+test("a trap in spawn produces one fatal result and subsequent execs reject", async () => {
+  const b = bash({}, {
+    onEngine(engine) {
+      engine.Fiber.spawn = () => { throw new WebAssembly.RuntimeError("spawn trap"); };
+    },
+  });
+  const r = await b.exec("");
+  assert.equal(r.fatal, true);
+  assert.equal(r.exitCode, 1);
+  await assert.rejects(b.exec(""), { name: "KernelPoisonedError" });
+});
+
+test("poisoning stops the jco store before other calls can use it", async () => {
+  const base = internal().kernel;
+  let store;
+  let stopped = 0;
+  const kernel = {
+    ...base,
+    instantiate(...args) {
+      store = base.instantiate(...args);
+      store.engine.Fiber.prototype.run = () => { throw new WebAssembly.RuntimeError("run trap"); };
+      return {
+        engine: store.engine,
+        _util: { stop() { stopped++; store._util.stop(); throw new Error("cleanup failed"); } },
+      };
+    },
+  };
+  const b = bash({}, { kernel });
+  const r = await b.exec("");
+  assert.equal(r.fatal, true);
+  assert.equal(r.exitCode, 1);
+  assert.equal(stopped, 1);
+  assert.throws(() => store.engine.usage(), WebAssembly.RuntimeError);
+  await assert.rejects(b.exec(""), { name: "KernelPoisonedError" });
+  assert.equal(stopped, 1);
 });
 
 test("gate 13: prototype pollution names round-trip as data", async () => {
