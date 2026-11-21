@@ -17,7 +17,7 @@ pub mod rt;
 #[unsafe(export_name = "cabi_realloc")]
 pub unsafe extern "C" fn cabi_realloc(old_ptr: *mut u8, old_len: usize, align: usize, new_len: usize) -> *mut u8 {
     // SAFETY: the canonical ABI contract is exactly that of `mem::cabi_realloc`.
-    unsafe { crate::mem::cabi_realloc(old_ptr, old_len, align, new_len) }
+    unsafe { crate::mem::abi::cabi_realloc(old_ptr, old_len, align, new_len) }
 }
 
 /// `memcmp` for the core library: the wasm target links no C library, and `core` calls this for slice

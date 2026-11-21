@@ -397,14 +397,14 @@ mod tests {
 
     #[test]
     fn budget_gives_no_space() {
-        let v = vol(300);
+        let v = vol(4096);
         let contents = [42; 64];
         write(&v, b"/a", &contents).unwrap();
         let used = v.used_bytes();
-        assert!(matches!(write(&v, b"/b", &[0u8; 1000]), Err(Code::NoSpace)));
+        assert!(matches!(write(&v, b"/b", &[0u8; 4096]), Err(Code::NoSpace)));
         assert!(matches!(v.op(Op::Exists(b"/b")), Ok(Ok_::Flag(false))));
         assert!(matches!(v.op(Op::WriteFile {
-            path: b"/a", data: &[0; 1000], offset: Some(7), truncate: true, mode: Some(0o600), mtime_ms: Some(17),
+            path: b"/a", data: &[0; 4096], offset: Some(7), truncate: true, mode: Some(0o600), mtime_ms: Some(17),
         }), Err(Code::NoSpace)));
         assert_eq!(v.used_bytes(), used);
         assert_eq!(read(&v, b"/a").unwrap(), contents);

@@ -2,7 +2,7 @@
 //! A fiber is a resumable state machine: `run` executes commands until the fuel is out, a host call is
 //! needed or the script ends; `resume` answers a host call.
 use crate::limits::{self, I_INPUT_BYTES, I_LIVE_BYTES, I_OUTPUT_SIZE, I_SOURCE_BYTES};
-use crate::mem::{Budget, KBytes, KRc, KString, KVec, LimitId, MemError, MemResult, TryClone};
+use crate::mem::{reserve_scope, Budget, KBytes, KRc, KString, KVec, LimitId, MemError, MemResult, TryClone};
 use crate::shell::{Shell, G_CUSTOM};
 use crate::util::{bytes_in, fmt_in, str_in, Env};
 use core::fmt::Write;
@@ -462,7 +462,13 @@ impl Fiber {
         match &self.result {
             Some(r) => match r.try_clone() {
                 Ok(c) => Step::Done(c),
-                Err(_) => Step::Done(ExecResult { exit: r.exit, status: r.status, limit_name: None, env: Env::new_in(&self.scratch), stdout_bytes: r.stdout_bytes }),
+                Err(_) => Step::Done(ExecResult {
+                    exit: r.exit,
+                    status: r.status,
+                    limit_name: reserve_scope(|| r.limit_name.try_clone()).ok().flatten(),
+                    env: Env::new_in(&self.scratch),
+                    stdout_bytes: r.stdout_bytes,
+                }),
             },
             None => Step::OutOfFuel,
         }
@@ -684,12 +690,14 @@ impl Fiber {
 
     /// Formats and appends without the output cap (diagnostics of a limit that was just hit).
     fn say_unchecked(&mut self, f: impl FnOnce(&mut KString) -> core::fmt::Result) -> MemResult<()> {
-        let s = fmt_in(&self.scratch, f)?;
-        self.stderr.buf.try_extend_from_slice(s.as_str().as_bytes())
+        reserve_scope(|| {
+            let s = fmt_in(&self.scratch, f)?;
+            self.stderr.buf.try_extend_from_slice(s.as_str().as_bytes())
+        })
     }
 
     fn finish(&mut self, exit: i32, status: Status, limit: Option<&str>) {
-        let name = limit.and_then(|n| str_in(n, &self.scratch).ok());
+        let name = limit.and_then(|n| reserve_scope(|| str_in(n, &self.scratch)).ok());
         self.finish_named(exit, status, name);
     }
 

@@ -17,14 +17,30 @@ extern crate alloc;
 /// entry points). Only `kernel/src/glue/` reaches them, through this one door; everything else uses the
 /// fallible containers of this module.
 pub mod abi {
-    pub use super::alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+    pub use super::alloc::alloc::{alloc, dealloc, Layout};
     pub use super::alloc::string::String;
     pub use super::alloc::vec;
     pub use super::alloc::vec::Vec;
 
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn with_reserve<R>(f: impl FnOnce() -> R) -> R {
-        super::ceiling::with_abi_reserve(f)
+    /// The binding export of `mem::cabi_realloc`. Keep its transfer charge attached to the block
+    /// because generated bindings can adopt it into a `Vec` or free it directly after a lift.
+    ///
+    /// # Safety
+    /// The arguments must satisfy `mem::cabi_realloc`'s contract.
+    #[cfg(all(target_arch = "wasm32", not(feature = "mem-test-exports")))]
+    pub(crate) unsafe fn cabi_realloc(old: *mut u8, old_len: usize, align: usize, new_len: usize) -> *mut u8 {
+        use super::heap::WasmHeap;
+        if old_len != 0 {
+            // SAFETY: `old` is a live transfer block. The transfer hook accounts for its resize or free.
+            unsafe { WasmHeap::mark_transfer(old, false) };
+        }
+        // SAFETY: the arguments have the canonical ABI contract, forwarded unchanged.
+        let ptr = unsafe { super::cabi_realloc(old, old_len, align, new_len) };
+        if new_len != 0 {
+            // SAFETY: the hook just allocated or resized this nonempty block and charged its size.
+            unsafe { WasmHeap::mark_transfer(ptr, true) };
+        }
+        ptr
     }
 }
 

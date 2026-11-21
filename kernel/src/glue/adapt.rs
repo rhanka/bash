@@ -9,7 +9,7 @@ use crate::limits::{self, Resolved};
 use crate::mem::{self, Budget, KRc, LimitId, MemError};
 use crate::shell::{Config, CreateError, Shell};
 use crate::util::Env;
-use crate::mem::abi::{self, Layout, String, Vec};
+use crate::mem::abi::{String, Vec};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -63,11 +63,11 @@ where
 // released before the next call.
 fn drain_copy(bytes: &[u8]) -> Result<Vec<u8>, MemError> {
     let bytes = &bytes[..bytes.len().min(1 << 20)];
-    copy(bytes).or_else(|_| abi::with_reserve(|| copy(&bytes[..bytes.len().min(16 << 10)])))
+    copy(bytes).or_else(|_| mem::reserve_scope(|| copy(&bytes[..bytes.len().min(16 << 10)])))
 }
 
 fn kerr(code: T::KernelErrorCode, detail: &str) -> T::KernelError {
-    T::KernelError { code, detail: abi::with_reserve(|| copy_text(detail)).unwrap_or_default() }
+    T::KernelError { code, detail: mem::reserve_scope(|| copy_text(detail)).unwrap_or_default() }
 }
 
 fn mem_err(e: MemError) -> T::KernelError {
@@ -102,18 +102,15 @@ fn rc<V>(v: V) -> Result<KRc<V>, T::KernelError> {
     KRc::try_new_in(v, &m).map_err(|(_, e)| mem_err(e))
 }
 
-fn resource<Rep, R>(rep: Rep, new: impl FnOnce(Rep) -> R) -> Result<R, T::KernelError> {
-    let layout = Layout::new::<Rep>();
-    rt::check_lowering(layout.size(), layout.align()).map_err(mem_err)?;
-    Ok(new(rep))
-}
-
 impl E::Guest for Kernel {
     type Vfs = VfsRes;
     type Shell = ShellRes;
     type Fiber = FiberRes;
 
     fn configure(memory_ceiling_bytes: u64) -> Result<(), T::KernelError> {
+        if !CONFIGURED.load(Relaxed) && memory_ceiling_bytes < mem::footprint() {
+            return Err(kerr(T::KernelErrorCode::InvalidConfig, "ceiling below the allocator footprint"));
+        }
         match mem::configure(memory_ceiling_bytes) {
             Ok(()) => {
                 CONFIGURED.store(true, Relaxed);
@@ -229,12 +226,12 @@ fn fs_ok(o: Ok_) -> Result<T::FsOk, MemError> {
         Ok_::Data(d) => T::FsOk::Data(copy(&d)?),
         Ok_::Paths(p) => {
             let paths = collect(p.iter(), |x| copy(x))?;
-            rt::check_lowering(paths.len() * 8, 4)?;
+            rt::prepare_lowering(&[(paths.len(), 8, 4)])?;
             T::FsOk::Paths(paths)
         }
         Ok_::Entries(e) => {
             let entries = collect(e.iter(), |(n, k)| Ok(T::DirEntry { name: copy(n)?, kind: kind_out(*k) }))?;
-            rt::check_lowering(entries.len() * 12, 4)?;
+            rt::prepare_lowering(&[(entries.len(), 12, 4)])?;
             T::FsOk::Entries(entries)
         }
     })
@@ -244,7 +241,10 @@ impl E::GuestVfs for VfsRes {
     fn create(max_bytes: u64) -> Result<E::Vfs, T::KernelError> {
         configured()?;
         let v = Vfs::create(max_bytes, limits::id_of_index(limits::I_FS_BYTES)).map_err(mem_err)?;
-        resource(VfsRes(rc(v)?), E::Vfs::new)
+        rt::new_resource(VfsRes(rc(v)?), |ptr| {
+            // SAFETY: `ptr` is an owned VfsRes with the layout expected by the generated destructor.
+            unsafe { E::Vfs::from_handle(Self::_resource_new(ptr)) }
+        }).map_err(mem_err)
     }
 
     fn op(&self, req: T::FsOp) -> T::FsResult {
@@ -316,7 +316,10 @@ impl E::GuestShell for ShellRes {
             cwd: config.cwd.as_deref(),
         };
         let sh = Shell::create(vfs, &cfg, mem::usage().ceiling).map_err(create_err)?;
-        resource(ShellRes(rc(sh)?), E::Shell::new)
+        rt::new_resource(ShellRes(rc(sh)?), |ptr| {
+            // SAFETY: `ptr` is an owned ShellRes with the layout expected by the generated destructor.
+            unsafe { E::Shell::from_handle(Self::_resource_new(ptr)) }
+        }).map_err(mem_err)
     }
 
     fn register_command(&self, name: String) -> Result<(), T::KernelError> {
@@ -326,14 +329,14 @@ impl E::GuestShell for ShellRes {
     fn env(&self) -> Vec<T::EnvVar> {
         let encode = || {
             let env = env_out(&self.0.env)?;
-            rt::check_lowering(env.len() * 20, 4)?;
+            rt::prepare_lowering(&[(env.len(), 20, 4)])?;
             Ok::<_, MemError>(env)
         };
         encode().unwrap_or_default()
     }
 
     fn cwd(&self) -> Vec<u8> {
-        copy(&self.0.cwd).or_else(|_| abi::with_reserve(|| copy(&self.0.cwd))).unwrap_or_default()
+        copy(&self.0.cwd).or_else(|_| mem::reserve_scope(|| copy(&self.0.cwd))).unwrap_or_default()
     }
 }
 
@@ -354,27 +357,33 @@ fn status_out(s: Status) -> T::ExecStatus {
     }
 }
 
-fn result_out(r: &fiber::ExecResult, other_records: usize) -> Result<T::ExecResult, MemError> {
-    let env = env_out(&r.env)?;
-    let limit_name = match &r.limit_name {
-        Some(name) => Some(copy_text(name.as_str())?),
+fn result_header(r: &fiber::ExecResult) -> T::ExecResult {
+    let name = match &r.limit_name {
+        Some(name) => Some(name.as_str()),
         // Ordinary memory exhaustion can prevent the fiber from saving the limit name.
-        None if matches!(r.status, Status::LimitExceeded) => Some(copy_text("memory-ceiling")?),
+        None if matches!(r.status, Status::LimitExceeded) => Some("memory-ceiling"),
         None => None,
     };
-    rt::check_lowering(env.len() * 20 + other_records, 4)?;
-    Ok(T::ExecResult {
+    T::ExecResult {
         exit_code: r.exit, status: status_out(r.status),
-        limit_name, env,
+        limit_name: name.and_then(|name| mem::reserve_scope(|| copy_text(name)).ok()),
+        env: Vec::new(),
         stdout_kind: if r.stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
-    })
+    }
+}
+
+fn result_out(r: &fiber::ExecResult, changed: usize, removed: usize) -> Result<T::ExecResult, MemError> {
+    let mut result = result_header(r);
+    result.env = env_out(&r.env)?;
+    rt::prepare_lowering(&[(result.env.len(), 20, 4), (changed, 20, 4), (removed, 8, 4)])?;
+    Ok(result)
 }
 
 fn transfer_limit(stdout_bytes: bool) -> T::ExecResult {
     T::ExecResult {
         exit_code: 126,
         status: T::ExecStatus::LimitExceeded,
-        limit_name: abi::with_reserve(|| copy_text("memory-ceiling")).ok(),
+        limit_name: mem::reserve_scope(|| copy_text("memory-ceiling")).ok(),
         env: Vec::new(),
         stdout_kind: if stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
     }
@@ -385,7 +394,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
         HostReq::FsStat { mount_id, path } => {
             let ops = collect(core::iter::once(path), |p| Ok(T::FsOp::Stat(copy(p)?)))?;
             // fs-op contains a discriminant and its largest arm (the write-file record).
-            rt::check_lowering(72, 8)?;
+            rt::prepare_lowering(&[(ops.len(), 72, 8)])?;
             T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops })
         }
         HostReq::LazyFile(p) => T::HostReq::LazyFile(copy(p)?),
@@ -399,7 +408,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
                 input_len: *input_len,
                 xpg_echo: false,
             };
-            rt::check_lowering(call.args.len() * 8 + call.env.len() * 20, 4)?;
+            rt::prepare_lowering(&[(call.args.len(), 8, 4), (call.env.len(), 20, 4)])?;
             T::HostReq::CustomCommand(call)
         }
         HostReq::Fetch { url } => T::HostReq::Fetch(T::FetchReq {
@@ -420,7 +429,10 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
 
 fn step_out(f: &mut Fiber, s: Step) -> T::Step {
     let result = match s {
-        Step::Done(r) => result_out(&r, 0).map(T::Step::Done),
+        Step::Done(r) if r.status != Status::Completed => {
+            return T::Step::Done(result_out(&r, 0, 0).unwrap_or_else(|_| result_header(&r)));
+        }
+        Step::Done(r) => result_out(&r, 0, 0).map(T::Step::Done),
         Step::OutOfFuel => return T::Step::OutOfFuel,
         Step::Host { epoch, req } => req_out(&req).map(|req| T::Step::HostCall(T::PendingCall { epoch, req })),
     };
@@ -489,7 +501,10 @@ impl E::GuestFiber for FiberRes {
         let shell = owner.get::<ShellRes>().0.clone();
         let parent_live = parent.as_ref().map(|p| p.get::<FiberRes>().0.borrow().live_budget().clone());
         let f = spawn_fiber(shell, parent_live.as_ref(), &opts)?;
-        resource(FiberRes(RefCell::new(f)), E::Fiber::new)
+        rt::new_resource(FiberRes(RefCell::new(f)), |ptr| {
+            // SAFETY: `ptr` is an owned FiberRes with the layout expected by the generated destructor.
+            unsafe { E::Fiber::from_handle(Self::_resource_new(ptr)) }
+        }).map_err(mem_err)
     }
 
     fn write_stdin(&self, chunk: Vec<u8>, last: bool) -> Result<(), T::KernelError> {
@@ -536,7 +551,7 @@ impl E::GuestFiber for FiberRes {
             T::CancelReason::Limit => fiber::CancelReason::Limit,
         };
         let result = self.0.borrow_mut().cancel(r);
-        result_out(&result, 0).unwrap_or_else(|_| transfer_limit(result.stdout_bytes))
+        result_out(&result, 0, 0).unwrap_or_else(|_| result_header(&result))
     }
 
     fn take_stdout(&self, max: u32) -> Vec<u8> {
@@ -633,7 +648,7 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
             }
         }
     }
-    let outcome = result_out(&result, changed.len() * 20 + removed.len() * 8).map_err(mem_err)?;
+    let outcome = result_out(&result, changed.len(), removed.len()).map_err(mem_err)?;
     Ok(T::OneshotResult { outcome, stdout, stderr, changed, removed })
 }
 
