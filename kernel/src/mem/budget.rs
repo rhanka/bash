@@ -1,6 +1,6 @@
 //! Byte budgets (spec 5.3): a logical cap tied to a named limit, nestable.
 use super::error::{LimitId, MemError, MemResult};
-use alloc::alloc::{alloc, dealloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, Layout};
 use core::cell::Cell;
 use core::ptr::NonNull;
 

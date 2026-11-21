@@ -2,7 +2,7 @@
 //! reference cycles are a bug of the caller.
 use super::budget::Budget;
 use super::error::{MemError, MemResult};
-use alloc::alloc::{alloc, dealloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, Layout};
 use core::cell::Cell;
 use core::mem::{size_of, ManuallyDrop};
 use core::ops::Deref;

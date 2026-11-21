@@ -1,7 +1,7 @@
 //! `KVec`: a growable array whose every growth is fallible and charged to a budget (spec 5.4, 5.6).
 use super::budget::Budget;
 use super::error::{MemError, MemResult};
-use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, realloc, Layout};
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 use core::ops::{Deref, DerefMut};
