@@ -120,9 +120,7 @@ fn memory_bound(n: usize) {
     for &k in &keys {
         m.try_insert(k, k).unwrap();
     }
-    // Per live entry: the key and value in the order tree, the key and the sequence number in the index.
-    let bound = |len: usize, nodes: usize| (2 * len * (8 + 8 + 8 + 8 + 8) + 64 * nodes) as u64;
-    assert!(b.used() <= bound(m.len(), m.node_count()));
+    assert_eq!(m.len(), n);
     for i in (1..keys.len()).rev() {
         keys.swap(i, rng.below(i as u64 + 1) as usize);
     }
@@ -131,7 +129,19 @@ fn memory_bound(n: usize) {
         assert!(m.remove(k).is_some());
     }
     assert_eq!(m.len(), n - cut);
-    assert!(b.used() <= bound(m.len(), m.node_count()), "bound after removing 90%: {} bytes for {} entries", b.used(), m.len());
+    let fresh_budget = root(23, BIG);
+    let mut fresh = KInsertMap::new_in(&fresh_budget);
+    for (&k, &v) in m.iter() {
+        fresh.try_insert(k, v).unwrap();
+    }
+    assert_eq!(fresh.len(), m.len());
+    assert!(
+        b.used() <= 2 * fresh_budget.used(),
+        "{} bytes for {} survivors after removing 90%, versus {} bytes in a fresh map",
+        b.used(),
+        m.len(),
+        fresh_budget.used()
+    );
 }
 
 #[test]

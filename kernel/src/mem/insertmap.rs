@@ -8,7 +8,7 @@
 //! are O(log n); iteration is O(n). The key is stored twice (hence `K: TryClone`).
 use super::budget::Budget;
 use super::clone::TryClone;
-use super::error::MemResult;
+use super::error::{MemError, MemResult};
 use super::map::KMap;
 use core::borrow::Borrow;
 
@@ -26,14 +26,15 @@ impl<K: Ord + TryClone, V> KInsertMap<K, V> {
         KInsertMap { index: KMap::new_in(budget), order: KMap::new_in(budget), next: 0 }
     }
 
-    /// Returns the previous value. On failure (`Limit(id)` or `Ceiling`) the map is unchanged; key and value
-    /// are dropped. Replacing a value never allocates.
+    /// Returns the previous value. On failure the map is unchanged; key and value are dropped.
+    /// Replacing a value never allocates or consumes a sequence number.
     pub fn try_insert(&mut self, key: K, value: V) -> MemResult<Option<V>> {
         if let Some(&seq) = self.index.get(&key) {
             let entry = self.order.get_mut(&seq).expect("every indexed key has an entry");
             return Ok(Some(core::mem::replace(&mut entry.1, value)));
         }
         let seq = self.next;
+        let next = seq.checked_add(1).ok_or(MemError::Overflow)?;
         self.order.try_insert(seq, (key, value))?;
         let cloned = self.order.get(&seq).expect("just inserted").0.try_clone();
         let indexed = match cloned {
@@ -44,7 +45,7 @@ impl<K: Ord + TryClone, V> KInsertMap<K, V> {
             self.order.remove(&seq);
             return Err(e);
         }
-        self.next += 1;
+        self.next = next;
         Ok(None)
     }
 
@@ -148,5 +149,27 @@ impl<K: Ord + TryClone, V: TryClone> TryClone for KInsertMap<K, V> {
             out.try_insert(k.try_clone()?, v.try_clone()?)?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::LimitId;
+
+    #[test]
+    fn exhausted_sequence_rejects_new_keys_before_mutating_either_tree() {
+        let budget = Budget::root(LimitId(21), 4096).unwrap();
+        let mut map = KInsertMap::new_in(&budget);
+        map.next = u64::MAX - 1;
+        assert_eq!(map.try_insert(1u64, 2), Ok(None));
+        let used = budget.used();
+        assert_eq!(map.try_insert(3, 4), Err(MemError::Overflow));
+        assert_eq!(map.next, u64::MAX);
+        assert_eq!(map.len(), 1);
+        assert!(map.iter().eq([(&1, &2)]));
+        assert_eq!(budget.used(), used);
+        assert_eq!(map.try_insert(1, 5), Ok(Some(2)));
+        assert_eq!(map.remove(&1), Some(5));
     }
 }
