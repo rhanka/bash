@@ -8,21 +8,21 @@ import { repoRoot } from "./helpers.mjs";
 const MAX_MEMORY = 1 << 30;
 
 /** Builds (or reuses cargo's cache of) the test module and returns a compiled WebAssembly.Module. */
-export function buildMemModule() {
-  const target = join(repoRoot, "tmp", "memtest-target");
+export function buildMemModule({ addressSpaceProbe = false } = {}) {
+  const target = join(repoRoot, "tmp", addressSpaceProbe ? "memtest-address-space-target" : "memtest-target");
   mkdirSync(target, { recursive: true });
   const rustflags = [
     "-C link-self-contained=no",
     "-C link-arg=--no-entry",
     "-C link-arg=--skip-wit-component",
-    `-C link-arg=--max-memory=${MAX_MEMORY}`,
+    addressSpaceProbe ? "-C debug-assertions=yes" : `-C link-arg=--max-memory=${MAX_MEMORY}`,
     `--remap-path-prefix=${repoRoot}=.`,
   ].join(" ");
   const env = { ...process.env, RUSTFLAGS: rustflags, CARGO_TARGET_DIR: target };
   delete env.CARGO_ENCODED_RUSTFLAGS;
   const r = spawnSync(
     "cargo",
-    ["build", "--release", "--offline", "--target", "wasm32-wasip2", "-p", "sentropic-bash-kernel", "--features", "mem-test-exports"],
+    ["build", "--release", "--locked", "--offline", "--target", "wasm32-wasip2", "-p", "sentropic-bash-kernel", "--features", "mem-test-exports"],
     { cwd: repoRoot, env, encoding: "utf8" },
   );
   if (r.status !== 0) throw new Error(`cargo build failed:\n${r.stdout}\n${r.stderr}`);

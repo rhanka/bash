@@ -12,20 +12,22 @@
 //!   the request's own bin is also scanned for a block that fits before rounding the request up.
 //! * `dealloc` merges the block with free neighbours at once. `realloc` shrinks or grows in place when the
 //!   next block is free, or when the block ends the heap and the heap can grow; otherwise it moves.
-//! * Memory is obtained from the engine only when no free block fits, in steps of whole 64 KiB pages: the
-//!   pages the request is missing, or one eighth of the footprint (at least one page) when that is larger,
-//!   never above the ceiling. A region that follows the previous one is merged into it: the closing sentinel
-//!   header of the old region becomes the start of the new free block.
-//! * The reserve: ordinary requests may not take the last 64 KiB below the ceiling (the sum of in-use block
-//!   sizes stays at most the ceiling, rounded down to pages, minus the reserve). Requests inside
-//!   `reserve_scope` may. The footprint never exceeds the ceiling, and memory is never given back.
+//! * Memory is obtained in steps of whole 64 KiB pages: the pages the request is missing, or one eighth of
+//!   the ordinary footprint (at least one page) for amortized allocation growth when that is larger. An
+//!   in-place extension at the tail grows only by the missing pages. A contiguous region joins its
+//!   predecessor: the old closing sentinel becomes the start of the new free block.
+//! * Large reallocations try a rounded payload capacity to leave room for subsequent growth. If it cannot
+//!   be served, the exact request is retried.
+//! * The first page grown is a separate arena. Only requests inside `reserve_scope` can allocate from it,
+//!   even when the ordinary arena is fragmented or the engine refuses further growth. The ceiling covers
+//!   both arenas, and memory is never given back.
 //!
 //! The logic is target-independent so that native unit tests drive it with a fake page source; only
 //! `WasmHeap` touches `memory.grow`.
 use core::ptr;
 
 pub(crate) const PAGE: usize = 65_536;
-/// Bytes below the ceiling that ordinary requests cannot use.
+/// Size of the dedicated arena that ordinary requests cannot use.
 pub(crate) const RESERVE: usize = 65_536;
 
 const HDR: usize = 8;
@@ -97,12 +99,17 @@ fn block_size(size: usize) -> Option<usize> {
     (need <= MAX_BLOCK).then_some(need)
 }
 
-pub(crate) struct Heap {
+/// The closing header fits even when the exclusive end of the region does not fit in an address.
+fn region_end_header(addr: usize, bytes: u64) -> Option<usize> {
+    let offset = usize::try_from(bytes.checked_sub(HDR as u64)?).ok()?;
+    addr.checked_add(offset)
+}
+
+struct Arena {
     fl_bitmap: u32,
     sl_bitmap: [u32; FL_COUNT],
     heads: [usize; BINS],
-    footprint: usize,
-    footprint_hw: usize,
+    footprint: u64,
     /// Sum of the sizes of the in-use blocks.
     in_use: usize,
     /// Address of the sentinel header that closes the last region (0 before the first growth).
@@ -111,17 +118,9 @@ pub(crate) struct Heap {
     contiguous: bool,
 }
 
-impl Heap {
-    pub(crate) const fn new() -> Heap {
-        Heap { fl_bitmap: 0, sl_bitmap: [0; FL_COUNT], heads: [0; BINS], footprint: 0, footprint_hw: 0, in_use: 0, tail: 0, contiguous: true }
-    }
-
-    pub(crate) fn footprint(&self) -> usize {
-        self.footprint
-    }
-
-    pub(crate) fn footprint_high_water(&self) -> usize {
-        self.footprint_hw
+impl Arena {
+    const fn new() -> Self {
+        Self { fl_bitmap: 0, sl_bitmap: [0; FL_COUNT], heads: [0; BINS], footprint: 0, in_use: 0, tail: 0, contiguous: true }
     }
 
     // ---- free lists ----
@@ -239,28 +238,21 @@ impl Heap {
         blk + HDR
     }
 
-    /// May a request that raises the in-use bytes by `delta` proceed? Ordinary requests stay out of the reserve.
-    fn may_use(&self, delta: usize, ceiling: u64, reserve_open: bool) -> bool {
-        if reserve_open {
-            return true;
-        }
-        let cap = (ceiling / PAGE as u64 * PAGE as u64).saturating_sub(RESERVE as u64);
-        (self.in_use as u64).saturating_add(delta as u64) <= cap
-    }
-
     // ---- growth ----
 
     /// Makes a free block of at least `need` bytes appear at the end of the heap, growing memory.
-    fn grow<P: Pages>(&mut self, pages: &mut P, need: usize, ceiling: u64) -> bool {
-        let tail_free = if self.tail != 0 && self.contiguous && rd64(self.tail) & PREV_FREE != 0 { rd64(self.tail - HDR) as usize } else { 0 };
+    fn grow<P: Pages>(&mut self, pages: &mut P, need: usize, ceiling: u64, amortize: bool) -> bool {
+        let extends_tail = self.tail != 0 && self.contiguous;
+        let tail_free = if extends_tail && rd64(self.tail) & PREV_FREE != 0 { rd64(self.tail - HDR) as usize } else { 0 };
         let missing = need.saturating_sub(tail_free);
-        let min_pages = (missing + 2 * HDR).div_ceil(PAGE);
-        let room = (ceiling / PAGE as u64).saturating_sub((self.footprint / PAGE) as u64);
+        let padding = if extends_tail { 0 } else { 2 * HDR };
+        let min_pages = (missing + padding).div_ceil(PAGE).max(1);
+        let room = (ceiling / PAGE as u64).saturating_sub(self.footprint / PAGE as u64);
         let room = usize::try_from(room).unwrap_or(usize::MAX);
         if min_pages > room {
             return false;
         }
-        let floor = self.footprint / 8 / PAGE;
+        let floor = if amortize { (self.footprint / 8 / PAGE as u64) as usize } else { 1 };
         let mut want = min_pages.max(floor).max(1).min(room);
         let addr = loop {
             match pages.grow(want) {
@@ -269,20 +261,19 @@ impl Heap {
                 None => return false,
             }
         };
-        let Some(bytes) = want.checked_mul(PAGE) else { return false };
+        let bytes = want as u64 * PAGE as u64;
+        let Some(end_hdr) = region_end_header(addr, bytes) else { return false };
         self.footprint += bytes;
-        self.footprint_hw = self.footprint_hw.max(self.footprint);
-        self.add_region(addr, bytes);
+        self.add_region(addr, end_hdr);
         true
     }
 
-    fn add_region(&mut self, addr: usize, bytes: usize) {
-        let end = addr + bytes;
-        wr64(end - HDR, IN_USE);
-        if self.tail != 0 && addr == self.tail + HDR {
+    fn add_region(&mut self, addr: usize, end_hdr: usize) {
+        wr64(end_hdr, IN_USE);
+        if self.tail != 0 && self.tail.checked_add(HDR) == Some(addr) {
             // Contiguous with the previous region: the old closing sentinel becomes the start of the block.
             let mut start = self.tail;
-            let mut size = end - HDR - start;
+            let mut size = end_hdr - start;
             if rd64(start) & PREV_FREE != 0 {
                 let psz = rd64(start - HDR) as usize;
                 let prev = start - psz;
@@ -293,29 +284,21 @@ impl Heap {
             self.insert_free(start, size);
             self.contiguous = true;
         } else {
-            self.insert_free(addr + HDR, bytes - 2 * HDR);
-            self.contiguous = false;
+            self.insert_free(addr + HDR, end_hdr - (addr + HDR));
+            self.contiguous = self.tail == 0;
         }
-        self.tail = end - HDR;
+        self.tail = end_hdr;
     }
 
     // ---- interface ----
 
-    /// Allocates `size` bytes aligned to `align`; returns the address, or 0 on refusal.
-    pub(crate) fn alloc<P: Pages>(&mut self, pages: &mut P, size: usize, align: usize, ceiling: u64, reserve_open: bool) -> usize {
-        if align > ALIGN {
-            return 0;
-        }
-        let Some(need) = block_size(size) else { return 0 };
-        if !self.may_use(need, ceiling, reserve_open) {
-            return 0;
-        }
+    fn alloc<P: Pages>(&mut self, pages: &mut P, need: usize, ceiling: u64) -> usize {
         // A second growth is needed only when the engine placed the new pages away from the old region.
         for _ in 0..3 {
             if let Some(blk) = self.find(need) {
                 return self.take(blk, need);
             }
-            if !self.grow(pages, need, ceiling) {
+            if !self.grow(pages, need, ceiling, true) {
                 return 0;
             }
         }
@@ -323,20 +306,15 @@ impl Heap {
     }
 
     /// Frees the block at `addr`.
-    pub(crate) fn dealloc(&mut self, addr: usize) {
+    fn dealloc(&mut self, addr: usize) {
         let blk = addr - HDR;
         let size = (rd64(blk) & !FLAGS) as usize;
         self.in_use -= size;
         self.free_block(blk, size);
     }
 
-    /// Resizes the block at `addr` (`old_size` payload bytes were requested). Returns the new address (0 on
-    /// refusal, the block untouched).
-    pub(crate) fn realloc<P: Pages>(&mut self, pages: &mut P, addr: usize, old_size: usize, align: usize, new_size: usize, ceiling: u64, reserve_open: bool) -> usize {
-        if align > ALIGN {
-            return 0;
-        }
-        let Some(need) = block_size(new_size) else { return 0 };
+    /// Resizes a block using either of its neighbours or by growing the tail.
+    fn resize<P: Pages>(&mut self, pages: &mut P, addr: usize, old_size: usize, need: usize, ceiling: u64) -> Option<usize> {
         let blk = addr - HDR;
         let hdr = rd64(blk);
         let size = (hdr & !FLAGS) as usize;
@@ -348,31 +326,29 @@ impl Heap {
                 self.in_use -= rem;
                 self.free_block(blk + need, rem);
             }
-            return addr;
+            return Some(addr);
         }
-        if !self.may_use(need - size, ceiling, reserve_open) {
-            return 0;
+        if self.grow_in_place(blk, size, need) {
+            return Some(addr);
         }
-        if self.grow_in_place(pages, blk, size, need, ceiling) {
-            return addr;
+        if let Some(moved) = self.grow_backward(blk, size, old_size, need) {
+            return Some(moved);
         }
-        if let Some(moved) = self.grow_backward(blk, size, old_size, new_size, need) {
-            return moved;
+        let next = blk + size;
+        let nh = rd64(next);
+        let nsz = if nh & IN_USE == 0 { (nh & !FLAGS) as usize } else { 0 };
+        if next + nsz == self.tail
+            && self.grow(pages, need - size, ceiling, false)
+            && self.grow_in_place(blk, size, need)
+        {
+            return Some(addr);
         }
-        let moved = self.alloc(pages, new_size, align, ceiling, reserve_open);
-        if moved == 0 {
-            return 0;
-        }
-        // SAFETY: both blocks are live and distinct, so they do not overlap; each holds at least
-        // `min(old_size, new_size)` payload bytes.
-        unsafe { ptr::copy_nonoverlapping(addr as *const u8, moved as *mut u8, old_size.min(new_size)) };
-        self.dealloc(addr);
-        moved
+        None
     }
 
     /// Slides the in-use block (`blk`, `size`) down over the free block before it (and absorbs a free block
     /// after it) when together they hold `need` bytes: the payload moves, but no new space is taken.
-    fn grow_backward(&mut self, blk: usize, size: usize, old_size: usize, new_size: usize, need: usize) -> Option<usize> {
+    fn grow_backward(&mut self, blk: usize, size: usize, old_size: usize, need: usize) -> Option<usize> {
         if rd64(blk) & PREV_FREE == 0 {
             return None;
         }
@@ -390,8 +366,8 @@ impl Heap {
             self.remove_free(next, nsz);
         }
         // SAFETY: source and destination lie inside the merged block (all three parts are owned by this
-        // heap); `copy` handles the overlap, and `min(old_size, new_size)` payload bytes are live.
-        unsafe { ptr::copy((blk + HDR) as *const u8, (prev + HDR) as *mut u8, old_size.min(new_size)) };
+        // heap); `copy` handles the overlap, and this growth keeps all `old_size` live payload bytes.
+        unsafe { ptr::copy((blk + HDR) as *const u8, (prev + HDR) as *mut u8, old_size) };
         let rem = total - need;
         if rem >= MIN_BLOCK {
             wr64(prev, need as u64 | IN_USE);
@@ -406,37 +382,139 @@ impl Heap {
     }
 
     /// Tries to extend the in-use block (`blk`, `size`) to `need` bytes without moving it.
-    fn grow_in_place<P: Pages>(&mut self, pages: &mut P, blk: usize, size: usize, need: usize, ceiling: u64) -> bool {
-        let mut grown = false;
-        loop {
-            let next = blk + size;
-            let nh = rd64(next);
-            let nsz = if nh & IN_USE == 0 { (nh & !FLAGS) as usize } else { 0 };
-            if nsz != 0 && size + nsz >= need {
-                self.remove_free(next, nsz);
-                let total = size + nsz;
-                let rem = total - need;
-                let keep = rd64(blk) & PREV_FREE;
-                if rem >= MIN_BLOCK {
-                    wr64(blk, need as u64 | IN_USE | keep);
-                    self.insert_free(blk + need, rem);
-                    self.in_use += need - size;
-                } else {
-                    wr64(blk, total as u64 | IN_USE | keep);
-                    self.clear_prev_free(blk + total);
-                    self.in_use += total - size;
-                }
-                return true;
-            }
-            // Only the end of the heap can grow underneath the block.
-            if grown || next + nsz != self.tail {
-                return false;
-            }
-            if !self.grow(pages, need - size, ceiling) {
-                return false;
-            }
-            grown = true;
+    fn grow_in_place(&mut self, blk: usize, size: usize, need: usize) -> bool {
+        let next = blk + size;
+        let nh = rd64(next);
+        let nsz = if nh & IN_USE == 0 { (nh & !FLAGS) as usize } else { 0 };
+        if nsz == 0 || size + nsz < need {
+            return false;
         }
+        self.remove_free(next, nsz);
+        let total = size + nsz;
+        let rem = total - need;
+        let keep = rd64(blk) & PREV_FREE;
+        if rem >= MIN_BLOCK {
+            wr64(blk, need as u64 | IN_USE | keep);
+            self.insert_free(blk + need, rem);
+            self.in_use += need - size;
+        } else {
+            wr64(blk, total as u64 | IN_USE | keep);
+            self.clear_prev_free(blk + total);
+            self.in_use += total - size;
+        }
+        true
+    }
+}
+
+pub(crate) struct Heap {
+    ordinary: Arena,
+    reserve: Arena,
+}
+
+impl Heap {
+    pub(crate) const fn new() -> Self {
+        Self { ordinary: Arena::new(), reserve: Arena::new() }
+    }
+
+    pub(crate) fn footprint(&self) -> u64 {
+        self.ordinary.footprint + self.reserve.footprint
+    }
+
+    pub(crate) fn footprint_high_water(&self) -> u64 {
+        // Pages are never returned, so the current footprint is also the peak.
+        self.footprint()
+    }
+
+    fn in_reserve(&self, addr: usize) -> bool {
+        addr < self.reserve.tail && self.reserve.tail - addr < RESERVE
+    }
+
+    /// Allocates `size` bytes aligned to `align`; returns the address, or 0 on refusal.
+    pub(crate) fn alloc<P: Pages>(&mut self, pages: &mut P, size: usize, align: usize, ceiling: u64, reserve_open: bool) -> usize {
+        if align > ALIGN {
+            return 0;
+        }
+        let Some(need) = block_size(size) else { return 0 };
+        self.alloc_block(pages, need, ceiling, reserve_open)
+    }
+
+    fn alloc_block<P: Pages>(&mut self, pages: &mut P, need: usize, ceiling: u64, reserve_open: bool) -> usize {
+        if self.reserve.tail == 0 && !self.reserve.grow(pages, MIN_BLOCK, ceiling.min(RESERVE as u64), false) {
+            return 0;
+        }
+        if reserve_open {
+            if let Some(blk) = self.ordinary.find(need) {
+                return self.ordinary.take(blk, need);
+            }
+            if let Some(blk) = self.reserve.find(need) {
+                return self.reserve.take(blk, need);
+            }
+        }
+        self.ordinary.alloc(pages, need, ceiling.saturating_sub(RESERVE as u64))
+    }
+
+    pub(crate) fn dealloc(&mut self, addr: usize) {
+        if self.in_reserve(addr) {
+            self.reserve.dealloc(addr);
+        } else {
+            self.ordinary.dealloc(addr);
+        }
+    }
+
+    /// Resizes a live block. Refusal returns 0 and leaves that block intact.
+    pub(crate) fn realloc<P: Pages>(&mut self, pages: &mut P, addr: usize, old_size: usize, align: usize, new_size: usize, ceiling: u64, reserve_open: bool) -> usize {
+        if align > ALIGN {
+            return 0;
+        }
+        let Some(need) = block_size(new_size) else { return 0 };
+        let growing = new_size > old_size;
+        if growing && new_size >= PAGE {
+            // Leave up to one eighth of the size class for later growth. The old payload is untouched
+            // on refusal, so tight ceilings can still serve the exact size.
+            let log = usize::BITS - 1 - new_size.leading_zeros();
+            let step = 1 << (log - 3);
+            if let Some(rounded) = block_size(new_size.next_multiple_of(step)).filter(|&n| n > need) {
+                let adjacent = Self::adjacent_capacity(addr);
+                if need > adjacent || rounded <= adjacent {
+                    let p = self.resize(pages, addr, old_size, rounded, ceiling, reserve_open, true);
+                    if p != 0 {
+                        return p;
+                    }
+                }
+            }
+        }
+        self.resize(pages, addr, old_size, need, ceiling, reserve_open, growing)
+    }
+
+    fn adjacent_capacity(addr: usize) -> usize {
+        let blk = addr - HDR;
+        let size = (rd64(blk) & !FLAGS) as usize;
+        let next = rd64(blk + size);
+        size + if next & IN_USE == 0 { (next & !FLAGS) as usize } else { 0 }
+    }
+
+    fn resize<P: Pages>(&mut self, pages: &mut P, addr: usize, old_size: usize, need: usize, ceiling: u64, reserve_open: bool, growing: bool) -> usize {
+        let resized = if self.in_reserve(addr) {
+            if reserve_open || !growing {
+                self.reserve.resize(pages, addr, old_size, need, RESERVE as u64)
+            } else {
+                // A reserve allocation can outlive the scope, but can only grow in the ordinary arena.
+                None
+            }
+        } else {
+            self.ordinary.resize(pages, addr, old_size, need, ceiling.saturating_sub(RESERVE as u64))
+        };
+        if let Some(addr) = resized {
+            return addr;
+        }
+        let moved = self.alloc_block(pages, need, ceiling, reserve_open);
+        if moved == 0 {
+            return 0;
+        }
+        // SAFETY: both allocations are live and disjoint; each holds at least the number of bytes copied.
+        unsafe { ptr::copy_nonoverlapping(addr as *const u8, moved as *mut u8, old_size) };
+        self.dealloc(addr);
+        moved
     }
 }
 
@@ -457,7 +535,7 @@ mod wasm {
             if old == usize::MAX {
                 None
             } else {
-                Some(old * PAGE)
+                old.checked_mul(PAGE)
             }
         }
     }
@@ -481,11 +559,11 @@ mod wasm {
         }
 
         pub(crate) fn footprint(&self) -> u64 {
-            self.heap().footprint() as u64
+            self.heap().footprint()
         }
 
         pub(crate) fn footprint_high_water(&self) -> u64 {
-            self.heap().footprint_high_water() as u64
+            self.heap().footprint_high_water()
         }
     }
 
