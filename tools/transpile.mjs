@@ -6,7 +6,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { toolsDir } from "./lib.mjs";
 
-export async function transpileComponent(componentPath, outDir) {
+export async function transpileComponent(componentPath, outDir, { minify = false } = {}) {
   const entry = join(toolsDir(), "npm", "node_modules", "@bytecodealliance", "jco-transpile", "dist", "index.js");
   const { transpile } = await import(pathToFileURL(entry).href);
   const name = basename(componentPath).replace(/\.component\.wasm$/, "").replace(/\.wasm$/, "");
@@ -16,7 +16,7 @@ export async function transpileComponent(componentPath, outDir) {
     base64Cutoff: 0,
     validLiftingOptimization: true,
     tlaCompat: false,
-    minify: true,
+    minify,
     wasiShim: false,
     nodejsCompat: false,
     optimize: false,

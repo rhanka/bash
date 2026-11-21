@@ -71,10 +71,16 @@ pub const COUNT: usize = LIMITS.len();
 
 // Indices of the limits the kernel reads itself (checked by a unit test against the names).
 pub const I_SOURCE_BYTES: usize = 0;
+pub const I_EXEC_DEPTH: usize = 1;
+pub const I_CALL_DEPTH: usize = 2;
+pub const I_COMMAND_COUNT: usize = 5;
+pub const I_WORK_UNITS: usize = 10;
+pub const I_ARRAY_ELEMENTS: usize = 23;
 pub const I_LIVE_BYTES: usize = 26;
 pub const I_INPUT_BYTES: usize = 27;
 pub const I_FS_BYTES: usize = 28;
 pub const I_OUTPUT_SIZE: usize = 29;
+pub const I_STRING_LENGTH: usize = 30;
 
 /// Per-profile constants: headroom, ceiling and `exec-oneshot` cap, in bytes. Order of `Profile`:
 /// `micro`, `contain`, `hardened`, `normal` (the WIT enum order).

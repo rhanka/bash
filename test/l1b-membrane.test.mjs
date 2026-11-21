@@ -22,7 +22,7 @@ test("gate 9: overlapping execs each get their own output", async () => {
 test("gate 9: ctx.exec runs a child fiber charged to the parent's budget", async () => {
   const child = defineCommand("child", async (args, ctx) => {
     const r = await ctx.exec(args.join(" "), { cwd: ctx.cwd });
-    return out(`${r.exitCode}:${r.stdout}:${/maxLiveBytes/.test(r.stderr)}\n`);
+    return out(`${r.exitCode}:${r.stdout}:${/live byte limit exceeded/.test(r.stderr)}\n`);
   });
   const b = bash({ customCommands: [child], executionLimits: { maxLiveBytes: 1_000_000 } });
   assert.equal((await b.exec("child __out 3")).stdout, "0:aaa:false\n");
@@ -312,7 +312,7 @@ test("gate 13: prototype pollution names round-trip as data", async () => {
   const e = b.getEnv();
   for (const [i, n] of names.entries()) assert.equal(Object.getOwnPropertyDescriptor(e, n)?.value, `v${i}`, n);
   for (const [i, n] of names.entries()) assert.equal(await b.readFile(`/${n}`), `f${i}`);
-  assert.deepEqual(await b.fs.readdir("/"), [...names].sort());
+  assert.deepEqual(await b.fs.readdir("/"), [...names, "bin", "dev", "proc", "usr"].sort());
   const r = await b.exec(names.map((n) => `${n} ${names.join(" ")}`).join("\n"), { env: JSON.parse('{"__proto__":"x"}') });
   assert.equal(r.exitCode, 0);
   assert.equal(r.stdout, names.map((n) => `${n}:${names.join(",")}\n`).join(""));
