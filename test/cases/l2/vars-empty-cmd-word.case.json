@@ -1,0 +1,12 @@
+{
+  "id": "l2/vars-empty-cmd-word",
+  "steps": [
+    {
+      "script": "E=''\n$E echo shifted\n$E"
+    },
+    {
+      "script": "\"\" arg"
+    }
+  ],
+  "title": "Vars empty cmd word"
+}
