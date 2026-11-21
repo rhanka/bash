@@ -24,8 +24,12 @@ export function measureWarm(entry, node) {
     const source = [
       'const { Bash, defineCommand } = await import(' + entry + ');',
       setup,
-      'for (let i = 0; i < 20; i++) { ' + op + '; }',
+      'await (async function warmup() {',
+      '  for (let i = 0; i < 20; i++) { ' + op + '; }',
+      '})();',
       'globalThis.gc();',
+      // Let V8 run the finalizers queued by the warmup collection before timing.
+      'await new Promise(setImmediate);',
       'const samples = [];',
       'const start = performance.now();',
       'while (samples.length < 1000 || performance.now() - start < 2000) {',
@@ -102,12 +106,21 @@ function size(tree, path) {
   return { raw: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length };
 }
 
-export function packedJsFiles(tree, env) {
+function packageFiles(tree, env) {
   const pack = execFileSync("npm", ["pack", "--offline", "--dry-run", "--json", "--ignore-scripts"], {
     cwd: tree, env, encoding: "utf8",
   });
-  return JSON.parse(pack)[0].files.map(({ path }) => path)
-    .filter((path) => path.endsWith(".js"));
+  return JSON.parse(pack)[0].files.map(({ path }) => path);
+}
+
+export function packedJsFiles(tree, env) {
+  return packageFiles(tree, env).filter((path) => path.endsWith(".js"));
+}
+
+export function stagePackage(source, tree, env) {
+  for (const path of packageFiles(source, env)) {
+    cpSync(join(source, path), join(tree, path));
+  }
 }
 
 function sizes(tree, env) {
@@ -183,14 +196,12 @@ async function main(args) {
   let tree = repoRoot;
   if (variant !== "committed") {
     tree = join(dest, "tree");
+    const generated = join(dest, "generated");
     rmSync(tree, { recursive: true, force: true });
-    mkdirSync(join(tree, "dist", "js"), { recursive: true });
-    for (const path of ["host", "types", "wit", "LICENSE", "DIVERGENCES.md", "package.json",
-      "dist/kernel.component.wasm", "dist/kernel.core.wasm"]) {
-      cpSync(join(repoRoot, path), join(tree, path), { recursive: true });
-    }
-    await transpileComponent(join(tree, "dist", "kernel.component.wasm"), join(tree, "dist", "js", "kernel"), { minify: variant === "minified" });
-    cpSync(join(repoRoot, "dist", "js", "kernel", "commands.js"), join(tree, "dist", "js", "kernel", "commands.js"));
+    stagePackage(repoRoot, tree, env);
+    cpSync(join(repoRoot, "dist", "kernel.core.wasm"), join(tree, "dist", "kernel.core.wasm"));
+    await transpileComponent(join(tree, "dist", "kernel.component.wasm"), generated, { minify: variant === "minified" });
+    cpSync(generated, join(tree, "dist", "js", "kernel"), { recursive: true });
   }
   const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
   const assertion = [

@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { measureWarm, packedJsFiles } from "../tools/measure-l2.mjs";
+import { measureWarm, packedJsFiles, stagePackage } from "../tools/measure-l2.mjs";
 import { scratch } from "./helpers.mjs";
 
 test("each warm process collects discarded warmup objects before sampling its workload", () => {
   const fixture = `
     export class Bash {
-      constructor({ customCommands } = {}) { this.custom = !!customCommands; hits.constructors++; }
+      constructor({ customCommands } = {}) {
+        this.custom = !!customCommands;
+        hits.constructors++;
+        registry.register(this, null);
+      }
       execSync() { hits.sync++; }
       async exec(command) {
         hits[this.custom ? "custom" : "async"]++;
@@ -22,7 +26,12 @@ test("each warm process collects discarded warmup objects before sampling its wo
   const setup = `
     globalThis.hits = { constructors: 0, async: 0, sync: 0, custom: 0 };
     let tick = 0;
-    performance.now = () => tick += 2;
+    let finalized = 0;
+    globalThis.registry = new FinalizationRegistry(() => finalized++);
+    performance.now = () => {
+      hits.finalizedAtStart ??= finalized;
+      return tick += 2;
+    };
     const collect = globalThis.gc;
     globalThis.gc = () => {
       hits.collections = (hits.collections ?? 0) + 1;
@@ -45,11 +54,31 @@ test("each warm process collects discarded warmup objects before sampling its wo
   assert.deepEqual(Object.keys(warm), ["M2", "M3a", "M3aSync", "M_host"]);
   assert.ok(Object.values(warm).every((samples) => samples.length === 1000));
   assert.deepEqual(hits, [
-    { constructors: 1020, async: 0, sync: 0, custom: 0, collections: 1, beforeSamples: [20, 0, 0, 0, 0] },
-    { constructors: 1, async: 1020, sync: 0, custom: 0, collections: 1, beforeSamples: [1, 20, 0, 0, 0] },
-    { constructors: 1, async: 0, sync: 1020, custom: 0, collections: 1, beforeSamples: [1, 0, 20, 0, 0] },
-    { constructors: 1, async: 0, sync: 0, custom: 1020, collections: 1, beforeSamples: [1, 0, 0, 20, 0] },
+    { constructors: 1020, async: 0, sync: 0, custom: 0, collections: 1, beforeSamples: [20, 0, 0, 0, 0], finalizedAtStart: 20 },
+    { constructors: 1, async: 1020, sync: 0, custom: 0, collections: 1, beforeSamples: [1, 20, 0, 0, 0], finalizedAtStart: 0 },
+    { constructors: 1, async: 0, sync: 1020, custom: 0, collections: 1, beforeSamples: [1, 0, 20, 0, 0], finalizedAtStart: 0 },
+    { constructors: 1, async: 0, sync: 0, custom: 1020, collections: 1, beforeSamples: [1, 0, 0, 20, 0], finalizedAtStart: 0 },
   ]);
+});
+
+test("staging a variant preserves packed JavaScript and excludes unpacked files", () => {
+  const source = scratch("pack-l2-source");
+  const tree = scratch("pack-l2-variant");
+  for (const dir of ["dist/js/kernel", "host", "types", "wit"]) {
+    mkdirSync(join(source, dir), { recursive: true });
+  }
+  writeFileSync(join(source, "package.json"), JSON.stringify({
+    name: "l2-variant", version: "0.0.0", files: ["dist/js/", "host/index.js", "entry.js"],
+  }));
+  for (const path of ["LICENSE", "DIVERGENCES.md", "dist/kernel.component.wasm", "dist/kernel.core.wasm",
+    "dist/js/kernel/commands.js", "entry.js", "host/index.js", "host/unpacked.js"]) {
+    writeFileSync(join(source, path), path);
+  }
+  const env = { ...process.env, npm_config_cache: join(source, "cache"), TMPDIR: source };
+  stagePackage(source, tree, env);
+  assert.deepEqual(packedJsFiles(tree, env), packedJsFiles(source, env));
+  assert.equal(readFileSync(join(tree, "entry.js"), "utf8"), "entry.js");
+  assert.equal(existsSync(join(tree, "host/unpacked.js")), false);
 });
 
 test("package sizes take their JavaScript files from the variant tree", () => {
