@@ -39,9 +39,3 @@ const { Bash, InMemoryFs } = createFacade(loader);
 export { Bash, InMemoryFs, defineCommand, getCommandNames, getNetworkCommandNames, getPythonCommandNames, getJavaScriptCommandNames };
 export { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError };
 export const { EMPTY_BYTES, bytesOutput, decodeBytesToUtf8, encodeUtf8ToBytes, latin1FromBytes, stdoutAsBytes, stdoutKind, textOutput, unsafeBytesFromLatin1 } = bytes;
-
-/** Loads and instantiates the pipeline probe on demand. */
-export async function pipelineProbe(coreModule) {
-  const { pipelineProbe: instantiateProbe } = await import("./browser-probe.js");
-  return instantiateProbe(coreModule);
-}

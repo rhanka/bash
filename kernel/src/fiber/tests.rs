@@ -1,4 +1,4 @@
-//! Native tests of the bootstrap interpreter. The test-only commands need `--features test-commands`.
+//! Native tests of the shell VM. The test-only commands need `--features test-commands`.
 use super::*;
 use crate::fs::Vfs;
 use crate::shell::{Config, G_CUSTOM};
@@ -9,13 +9,13 @@ fn shell(profile: usize, overrides: &[(&str, u64)], grants: u8, custom: &[&str])
     crate::mem::testing::reset(CEIL);
     let meta = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
     let vfs = KRc::try_new_in(Vfs::create(1 << 20, LimitId(30)).unwrap(), &meta).ok().unwrap();
-    let cfg = Config { profile, overrides, grants, custom_commands: custom, env: &[(b"A", b"1", true)], cwd: Some(b"/x") };
+    let cfg = Config { profile, overrides, grants, custom_commands: custom, env: &[(b"A", b"1", true)], cwd: Some(b"/x"), ..Config::default() };
     let s = Shell::create(vfs, &cfg, CEIL).unwrap();
     KRc::try_new_in(s, &meta).ok().unwrap()
 }
 
 fn fib(sh: &KRc<Shell>, script: &str) -> Fiber {
-    Fiber::spawn(sh.clone(), None, &Opts { script: script.as_bytes(), overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap()
+    Fiber::spawn(sh.clone(), None, &Opts { script: script.as_bytes(), overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap()
 }
 
 fn run_done(f: &mut Fiber) -> ExecResult {
@@ -26,6 +26,142 @@ fn run_done(f: &mut Fiber) -> ExecResult {
             Step::Host { .. } => panic!("host call"),
         }
     }
+}
+
+#[test]
+fn finishing_replaces_a_shared_result_environment() {
+    let sh = shell(1, &[], 0, &[]);
+    let mut f = fib(&sh, "A=after");
+    let original = f.result.env.clone();
+    let result = run_done(&mut f);
+    assert!(original.get(b"A").is_none());
+    assert_eq!(result.env.get(b"A").unwrap().value.as_slice(), b"after");
+}
+
+#[test]
+fn relative_fiber_cwd_is_anchored_even_without_env() {
+    let sh = shell(1, &[], 0, &[]);
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts { cwd: Some(b"./sub"), script: b"echo $PWD", ..Opts::default() },
+    ).unwrap();
+    let result = run_done(&mut f);
+    assert_eq!(result.env.get(b"PWD").unwrap().value.as_slice(), b"/x/./sub");
+    assert_eq!(drain(&mut f, false), "/x/./sub\n");
+}
+
+#[test]
+fn one_fuel_unit_resumes_echo_with_partial_output() {
+    let sh = shell(1, &[], 0, &[]);
+    let text = "a".repeat(24 * 1024);
+    let script = std::format!("echo -e '{text}\\nend'");
+    let mut f = fib(&sh, &script);
+    let mut out = std::string::String::new();
+    let mut yielded_output = false;
+    for _ in 0..100 {
+        let step = f.run(1);
+        let chunk = drain(&mut f, false);
+        if let Step::Done(r) = step {
+            assert_eq!(r.exit, 0);
+            assert!(yielded_output);
+            out.push_str(&chunk);
+            assert_eq!(out, std::format!("{text}\nend\n"));
+            return;
+        }
+        assert!(matches!(step, Step::OutOfFuel));
+        yielded_output |= !chunk.is_empty();
+        out.push_str(&chunk);
+    }
+    panic!("echo did not finish");
+}
+
+#[test]
+fn path_lookup_resumes_inside_one_stage() {
+    let sh = shell(1, &[], 0, &[]);
+    let path = "missing:".repeat(1024) + "/bin";
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts {
+            script: b"echo resolved",
+            env: &[(b"PATH", path.as_bytes(), true)],
+            ..Opts::default()
+        },
+    ).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    assert_eq!(run_done(&mut f).exit, 0);
+    assert_eq!(drain(&mut f, false), "resolved\n");
+}
+
+#[test]
+fn shared_prefix_lookup_pays_before_expanding_the_value() {
+    let sh = shell(1, &[], 0, &[]);
+    let prefix = "a".repeat(8192);
+    let name = prefix.clone() + "b";
+    let other = prefix + "a";
+    let script = std::format!("echo \"${name}\"");
+    let mut f = Fiber::spawn(sh, None, &Opts {
+        script: script.as_bytes(),
+        env: &[(other.as_bytes(), b"wrong", true), (name.as_bytes(), b"found", true)],
+        ..Opts::default()
+    }).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    assert_eq!(run_done(&mut f).exit, 0);
+    assert_eq!(drain(&mut f, false), "found\n");
+}
+
+#[test]
+fn a_relative_explicit_path_pays_for_cwd_before_resolving() {
+    let sh = shell(1, &[], 0, &[]);
+    let cwd = "/".to_owned() + &"sub/".repeat(16_384);
+    let mut f = Fiber::spawn(sh, None, &Opts {
+        script: b"./missing",
+        cwd: Some(cwd.as_bytes()),
+        ..Opts::default()
+    }).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, true).is_empty());
+    assert_eq!(run_done(&mut f).exit, 127);
+    assert_eq!(drain(&mut f, true), "bash: ./missing: No such file or directory\n");
+}
+
+#[test]
+fn pipeline_snapshot_yields_and_keeps_stage_assignments_isolated() {
+    let sh = shell(1, &[("maxCommandCount", 3)], 0, &[]);
+    let names: std::vec::Vec<_> = (0..64).map(|i| std::format!("VAR{i}")).collect();
+    let env: std::vec::Vec<_> = names
+        .iter()
+        .map(|n| (n.as_bytes(), b"value".as_slice(), true))
+        .collect();
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts {
+            script: b"A=inner | echo \"$A\"; echo \"$A\"",
+            env: &env,
+            ..Opts::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(f.run(2), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    let result = run_done(&mut f);
+    assert_eq!(result.exit, 0);
+    assert_eq!(result.env.get(b"VAR63").unwrap().value.as_slice(), b"value");
+    assert_eq!(drain(&mut f, false), "1\n1\n");
+}
+
+#[test]
+fn a_long_function_definition_spends_multiple_fuel_units() {
+    let sh = shell(1, &[("maxCommandCount", 1)], 0, &[]);
+    let name = "f".repeat(64 * 1024);
+    let script = std::format!("{name}() {{ echo unused; }}");
+    let mut f = fib(&sh, &script);
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert_eq!(run_done(&mut f).exit, 0);
 }
 
 fn drain(f: &mut Fiber, err: bool) -> std::string::String {
@@ -67,10 +203,10 @@ fn source_size_checks() {
     let sh = shell(1, &[], 0, &[]);
     let mut f = fib(&sh, &" ".repeat(1_000_006));
     let r = run_done(&mut f);
-    assert_eq!(r.exit, 2);
-    assert_eq!(drain(&mut f, true), "bash: syntax error: Parse error at 1:1: Input too large: 1000006 bytes exceeds limit of 1000000\n");
-    let mut f = Fiber::spawn(sh.clone(), None, &Opts { script: b"", overflow: Some((5, 3_145_729)), env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap();
-    assert_eq!(run_done(&mut f).exit, 126);
+    assert_eq!(r.exit, 0);
+    assert_eq!(drain(&mut f, true), "");
+    let mut f = Fiber::spawn(sh.clone(), None, &Opts { script: b"", overflow: Some((1_048_577, 3_145_729)), env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap();
+    assert_eq!(run_done(&mut f).exit, 2);
 }
 
 #[test]
@@ -140,7 +276,7 @@ mod commands {
         let r = run_done(&mut f);
         assert_eq!(r.exit, 126);
         assert_eq!(r.limit_name.as_ref().unwrap().as_str(), "maxLiveBytes");
-        assert_eq!(drain(&mut f, true), "bash: maxLiveBytes exceeded\n");
+        assert_eq!(drain(&mut f, true), "bash: execution: live byte limit exceeded (10000 bytes)\n");
         let mut g = fib(&sh, "__alloc 4000\n__out 3");
         assert_eq!(run_done(&mut g).exit, 0);
         
@@ -151,7 +287,7 @@ mod commands {
         let sh = shell(1, &[("maxLiveBytes", 10000)], 0, &[]);
         let mut p = fib(&sh, "__alloc 6000\n__spin");
         assert!(matches!(p.run(10), Step::OutOfFuel));
-        let mut c = Fiber::spawn(sh.clone(), Some(p.live_budget()), &Opts { script: b"__alloc 6000", overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None }).unwrap();
+        let mut c = Fiber::spawn(sh.clone(), Some(&p), &Opts { script: b"__alloc 6000", overflow: None, env: &[], replace_env: false, cwd: None, bypass_custom: None, ..Opts::default() }).unwrap();
         let r = run_done(&mut c);
         assert_eq!(r.exit, 126);
         assert_eq!(r.limit_name.as_ref().unwrap().as_str(), "maxLiveBytes");

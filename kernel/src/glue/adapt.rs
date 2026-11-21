@@ -7,7 +7,7 @@ use crate::fiber::{self, CallError, Chan, Fiber, HostReq, Outcome, Status, Step}
 use crate::fs::{self, Code, Ok_, Op, Vfs};
 use crate::limits::{self, Resolved};
 use crate::mem::{self, Budget, KRc, LimitId, MemError};
-use crate::shell::{Config, CreateError, Shell};
+use crate::shell::{Config, CreateError, ProcessInfo, Shell};
 use crate::util::Env;
 use crate::mem::abi::{String, Vec};
 use core::cell::RefCell;
@@ -148,7 +148,12 @@ impl E::Guest for Kernel {
     }
 
     fn coverage_features() -> Vec<String> {
-        Vec::new()
+        let encode = || {
+            let features = collect(crate::cmd::COVERAGE_FEATURES.iter(), |s| copy_text(s))?;
+            rt::prepare_lowering(&[(features.len(), 8, 4)])?;
+            Ok::<_, MemError>(features)
+        };
+        encode().unwrap_or_default()
     }
 
     fn exec_oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
@@ -295,7 +300,11 @@ impl rt::Resource for ShellRes {
 }
 
 fn env_out(e: &Env) -> Result<Vec<T::EnvVar>, MemError> {
-    collect(e.v.iter(), |x| Ok(T::EnvVar { name: copy(&x.name)?, value: copy(&x.value)?, exported: x.exported }))
+    collect(e.iter(), |(name, entry)| env_var(name.bytes(), entry))
+}
+
+fn env_var(name: &[u8], entry: &crate::util::EnvValue) -> Result<T::EnvVar, MemError> {
+    Ok(T::EnvVar { name: copy(name)?, value: copy(&entry.value)?, exported: entry.exported })
 }
 
 fn env_in(e: &[T::EnvVar]) -> Result<Vec<(&[u8], &[u8], bool)>, T::KernelError> {
@@ -313,22 +322,26 @@ fn overrides_of(l: &T::Limits) -> Result<Vec<(&str, u64)>, T::KernelError> {
     collect(l.overrides.iter(), |o| Ok((o.name.as_str(), o.value))).map_err(mem_err)
 }
 
+fn create_shell(vfs: KRc<Vfs>, config: &T::ShellConfig) -> Result<Shell, T::KernelError> {
+    let overrides = overrides_of(&config.limits)?;
+    let env = env_in(&config.env)?;
+    let custom = collect(config.custom_commands.iter(), |s| Ok(s.as_str())).map_err(mem_err)?;
+    let commands = config.commands.as_ref().map(|names| collect(names.iter(), |s| Ok(s.as_str()))).transpose().map_err(mem_err)?;
+    let cfg = Config {
+        profile: config.limits.profile as usize, overrides: &overrides, grants: config.grants.bits(),
+        custom_commands: &custom, env: &env, cwd: config.cwd.as_deref(),
+        default_layout: config.default_layout, commands: commands.as_deref(),
+        process_info: config.process_info.as_ref().map(|p| ProcessInfo { pid: p.pid, ppid: p.ppid, uid: p.uid, gid: p.gid }),
+        coverage: config.coverage,
+    };
+    Shell::create(vfs, &cfg, mem::usage().ceiling).map_err(create_err)
+}
+
 impl E::GuestShell for ShellRes {
     fn create(root: E::VfsBorrow<'_>, config: T::ShellConfig) -> Result<E::Shell, T::KernelError> {
         configured()?;
         let vfs = root.get::<VfsRes>().0.clone();
-        let overrides = overrides_of(&config.limits)?;
-        let env = env_in(&config.env)?;
-        let custom = collect(config.custom_commands.iter(), |s| Ok(s.as_str())).map_err(mem_err)?;
-        let cfg = Config {
-            profile: config.limits.profile as usize,
-            overrides: &overrides,
-            grants: config.grants.bits(),
-            custom_commands: &custom,
-            env: &env,
-            cwd: config.cwd.as_deref(),
-        };
-        let sh = Shell::create(vfs, &cfg, mem::usage().ceiling).map_err(create_err)?;
+        let sh = create_shell(vfs, &config)?;
         rt::new_resource(ShellRes(rc(sh)?), |ptr| {
             // SAFETY: `ptr` is an owned ShellRes with the layout expected by the generated destructor.
             unsafe { E::Shell::from_handle(Self::_resource_new(ptr)) }
@@ -416,7 +429,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
                 name: lossy_text(name)?,
                 args: collect(args.iter(), |a| copy(a))?,
                 cwd: copy(cwd)?,
-                env: env_out(env)?,
+                env: collect(env.iter(), |(name, entry)| env_var(name, entry))?,
                 fds: Vec::new(),
                 input_len: *input_len,
                 xpg_echo: false,
@@ -443,7 +456,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
 fn step_out(f: &mut Fiber, s: Step) -> T::Step {
     let result = match s {
         Step::Done(r) if r.status != Status::Completed => {
-            return T::Step::Done(result_out(&r, 0, 0).unwrap_or_else(|_| result_header(&r)));
+            return T::Step::Done(mem::reserve_scope(|| result_out(&r, 0, 0)).unwrap_or_else(|_| result_header(&r)));
         }
         Step::Done(r) => result_out(&r, 0, 0).map(T::Step::Done),
         Step::OutOfFuel => return T::Step::OutOfFuel,
@@ -495,12 +508,15 @@ fn chan_in(c: &T::OutChannel) -> Chan {
     }
 }
 
-fn spawn_fiber(shell: KRc<Shell>, parent: Option<&Budget>, o: &T::ExecOpts) -> Result<Fiber, T::KernelError> {
+fn spawn_fiber(shell: KRc<Shell>, parent: Option<&Fiber>, o: &T::ExecOpts) -> Result<Fiber, T::KernelError> {
     let env = env_in(&o.env)?;
+    let args = collect(o.args.iter(), |a| Ok(a.as_slice())).map_err(mem_err)?;
     let opts = fiber::Opts {
         script: &o.script,
         overflow: o.script_overflow.as_ref().map(|s| (s.utf16_units, s.utf8_bytes)),
         env: &env,
+        args: &args,
+        raw_script: o.raw_script,
         replace_env: o.replace_env,
         cwd: o.cwd.as_deref(),
         bypass_custom: o.bypass_custom.as_deref(),
@@ -512,8 +528,8 @@ impl E::GuestFiber for FiberRes {
     fn spawn(owner: E::ShellBorrow<'_>, parent: Option<E::FiberBorrow<'_>>, opts: T::ExecOpts) -> Result<E::Fiber, T::KernelError> {
         configured()?;
         let shell = owner.get::<ShellRes>().0.clone();
-        let parent_live = parent.as_ref().map(|p| p.get::<FiberRes>().0.borrow().live_budget().clone());
-        let f = spawn_fiber(shell, parent_live.as_ref(), &opts)?;
+        let parent = parent.as_ref().map(|p| p.get::<FiberRes>().0.borrow());
+        let f = spawn_fiber(shell, parent.as_deref(), &opts)?;
         rt::new_resource(FiberRes(RefCell::new(f)), |ptr| {
             // SAFETY: `ptr` is an owned FiberRes with the layout expected by the generated destructor.
             unsafe { E::Fiber::from_handle(Self::_resource_new(ptr)) }
@@ -564,30 +580,49 @@ impl E::GuestFiber for FiberRes {
             T::CancelReason::Limit => fiber::CancelReason::Limit,
         };
         let result = self.0.borrow_mut().cancel(r);
-        result_out(&result, 0, 0).unwrap_or_else(|_| result_header(&result))
+        mem::reserve_scope(|| result_out(&result, 0, 0)).unwrap_or_else(|_| result_header(&result))
     }
 
     fn take_stdout(&self, max: u32) -> Vec<u8> {
-        let mut f = self.0.borrow_mut();
-        let v = drain_copy(f.stdout_chunk(max as usize)).unwrap_or_default();
-        f.stdout_consume(v.len());
-        v
+        take_output(&mut self.0.borrow_mut(), false, max as usize)
     }
 
     fn take_stderr(&self, max: u32) -> Vec<u8> {
-        let mut f = self.0.borrow_mut();
-        let v = drain_copy(f.stderr_chunk(max as usize)).unwrap_or_default();
-        f.stderr_consume(v.len());
-        v
+        take_output(&mut self.0.borrow_mut(), true, max as usize)
     }
-
     fn take_trace(&self, _max: u32) -> Vec<T::TraceEvent> {
         Vec::new()
     }
 
-    fn take_coverage(&self, _max: u32) -> Vec<u16> {
-        Vec::new()
+    fn take_coverage(&self, max: u32) -> Vec<u16> {
+        let mut f = self.0.borrow_mut();
+        let hits = copy(f.coverage_hits((max as usize).min(1 << 19))).unwrap_or_default();
+        f.consume_coverage(hits.len());
+        hits
     }
+}
+
+fn take_output(f: &mut Fiber, stderr: bool, max: usize) -> Vec<u8> {
+    let count = f.output_segment_len(stderr).min(max.min(1 << 20));
+    let mut bytes = Vec::new();
+    let mut reserve = |size| bytes.try_reserve_exact(size);
+    let size = if reserve(count).is_ok() {
+        count
+    } else {
+        let Some(size) = mem::reserve_scope(|| [16 << 10, 1024].into_iter()
+            .map(|n| n.min(count)).find(|&n| reserve(n).is_ok())) else { return bytes; };
+        size
+    };
+    f.drain_output(stderr, size, |s| bytes.extend_from_slice(s));
+    bytes
+}
+
+fn all_output(f: &mut Fiber, stderr: bool) -> Result<Vec<u8>, MemError> {
+    let len = f.output_len(stderr);
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(|_| MemError::Ceiling)?;
+    f.drain_output(stderr, len, |s| bytes.extend_from_slice(s));
+    Ok(bytes)
 }
 
 // --------------------------------------------------------------------------------------- oneshot
@@ -611,10 +646,7 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
         let w = Op::WriteFile { path: &f.path, data: &f.data, offset: Some(0), truncate: true, mode: Some(f.mode), mtime_ms: None };
         vfs.op(w).map_err(|_| kerr(T::KernelErrorCode::InvalidConfig, "cannot place an input file"))?;
     }
-    let env = env_in(&req.config.env)?;
-    let custom = collect(req.config.custom_commands.iter(), |s| Ok(s.as_str())).map_err(mem_err)?;
-    let cfg = Config { profile: req.config.limits.profile as usize, overrides: &overrides, grants: req.config.grants.bits(), custom_commands: &custom, env: &env, cwd: req.config.cwd.as_deref() };
-    let sh = rc(Shell::create(vfs.clone(), &cfg, mem::usage().ceiling).map_err(create_err)?)?;
+    let sh = rc(create_shell(vfs.clone(), &req.config)?)?;
     let mut f = spawn_fiber(sh, None, &req.opts)?;
     for (i, c) in req.stdin.chunks(1 << 20).enumerate() {
         let _ = i;
@@ -635,12 +667,8 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
             Step::Host { .. } => return Err(kerr(T::KernelErrorCode::BadState, "the script needs a host call")),
         }
     };
-    let stdout = copy(f.stdout_chunk(usize::MAX)).map_err(mem_err)?;
-    let [pending, diagnostic] = f.stderr_chunks();
-    let mut stderr = Vec::new();
-    stderr.try_reserve_exact(pending.len() + diagnostic.len()).map_err(|_| mem_err(MemError::Ceiling))?;
-    stderr.extend_from_slice(pending);
-    stderr.extend_from_slice(diagnostic);
+    let stdout = all_output(&mut f, false).map_err(mem_err)?;
+    let stderr = all_output(&mut f, true).map_err(mem_err)?;
     let mut changed = Vec::new();
     let mut removed: Vec<Vec<u8>> = Vec::new();
     if let Ok(Ok_::Paths(paths)) = vfs.op(Op::AllPaths) {

@@ -8,7 +8,7 @@ import type {
   BashExecResult, BashLogger, BashOptions, Command, CommandContext, CustomCommand, ExecOptions, ExecResult, ExecutionLimitProfile,
   ExecutionLimits, IFileSystem, InitialFiles, LazyCommand, NetworkConfig, SecureFetch, TraceEvent,
 } from "@sentropic/bash";
-import { Bash as BrowserBash, pipelineProbe } from "@sentropic/bash/browser";
+import { Bash as BrowserBash } from "@sentropic/bash/browser";
 
 const profile: ExecutionLimitProfile = "contain";
 const limits: ExecutionLimits = { maxOutputSize: 10, maxLiveBytes: 1 << 20 };
@@ -52,9 +52,9 @@ async function main(): Promise<void> {
   bash.registerCommand(hello);
   await Bash.precompile();
   await BrowserBash.precompile(undefined);
-  void [k, fs, cwd, env, pipelineProbe];
+  void [k, fs, cwd, env];
   const errors: Error[] = [new KernelPoisonedError(), new AsyncCapabilityError(), new NotSupportedError(), new ExecutionAbortedError()];
-  const names: string[] = [...getCommandNames(), ...getNetworkCommandNames(), ...getPythonCommandNames(), ...getJavaScriptCommandNames()];
+  const names: string[] = [...bash.getCommandNames(), ...getCommandNames(), ...getNetworkCommandNames(), ...getPythonCommandNames(), ...getJavaScriptCommandNames()];
   const b: string = encodeUtf8ToBytes("x") + decodeBytesToUtf8(EMPTY_BYTES) + latin1FromBytes(unsafeBytesFromLatin1("y"));
   const out: ExecResult = bytesOutput("x");
   void [errors, names, b, stdoutKind(out), stdoutAsBytes(out)];

@@ -1,3 +1,4 @@
+import { COMMAND_NAMES } from "../../dist/js/kernel/commands.js";
 // The facade: `Bash`, `defineCommand` and the name helpers (spec 7.1-7.3), bound to a loader.
 import { decodeUtf8, unsafeBytesFromLatin1, utf8 } from "./bytes.js";
 import { anySignal, envToObject, execLoop, nullObject, runAsync, runSync } from "./driver.js";
@@ -32,7 +33,7 @@ function stringRecord(v, what) {
 
 /** Initial environment in the order of spec 7.2. */
 function initialEnvEntries(cwd, home, userEnv) {
-  return [
+  return [...new Map([
     ["HOME", home],
     ["PATH", "/usr/bin:/bin"],
     ["IFS", " \t\n"],
@@ -43,10 +44,10 @@ function initialEnvEntries(cwd, home, userEnv) {
     ["PWD", cwd],
     ["OLDPWD", cwd],
     ["OPTIND", "1"],
-    ...userEnv,
+    ...userEnv.filter(([key]) => key !== "SHELLOPTS" && key !== "BASHOPTS"),
     ["SHELLOPTS", "braceexpand:hashall:interactive-comments"],
     ["BASHOPTS", "globskipdots"],
-  ];
+  ])];
 }
 
 /** Validates a command (Command or LazyCommand). */
@@ -64,7 +65,7 @@ export function defineCommand(name, execute, options) {
   return c;
 }
 
-export const getCommandNames = () => [];
+export const getCommandNames = () => [...COMMAND_NAMES];
 export const getNetworkCommandNames = () => ["curl"];
 export const getPythonCommandNames = () => ["python3", "python"];
 export const getJavaScriptCommandNames = () => ["js-exec", "node"];
@@ -116,11 +117,19 @@ export function createFacade(loader) {
       const effective = hooks?.ceilingBytes ?? Math.max(sharedHolder?.ceiling ?? 0, PROFILES[profile].ceiling);
       const limits = resolveLimits(profile, overrides, effective);
       const hasFiles = options.files !== undefined;
-      const cwd = options.cwd ?? (hasFiles ? "/" : "/home/user");
+      const defaultLayout = !options.cwd && !options.files;
+      const home = defaultLayout ? "/home/user" : "/";
+      const cwd = options.cwd || home;
       const initialCwd = resolvePath("/", cwd);
-      const home = options.cwd === undefined && !hasFiles ? "/home/user" : "/";
       const envEntries = initialEnvEntries(initialCwd, home, userEnv);
-      const commands = customs.map((c) => c.name);
+      const commands = [...(options.commands ?? []), ...customs.map((c) => c.name)];
+      const exported = new Set(["HOME", "PATH", "PWD", "OLDPWD", ...userEnv.map(([key]) => key)]);
+      if (hasFiles) {
+        const paths = new Set(Object.keys(options.files).map((path) => resolvePath(initialCwd, path)));
+        const systemDirs = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
+        const conflict = systemDirs.find((path) => paths.has(path));
+        if (conflict) throw new Error("EEXIST: file already exists, mkdir '" + conflict + "'");
+      }
       const headroom = PROFILES[profile].headroom;
       const limit = stringLimit([...userEnv.flat(), ...commands, options.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
         stringLimit([...envEntries.flat(), ...commands, initialCwd, ...Object.keys(overrides)], Infinity, headroom,
@@ -137,6 +146,7 @@ export function createFacade(loader) {
         headroom,
         profile,
         commands: new Map(),
+        commandNames: options.commands === undefined ? COMMAND_NAMES : COMMAND_NAMES.filter((name) => options.commands.includes(name)),
         sleep: options.sleep,
         fetch: options.fetch,
         network: options.network,
@@ -166,12 +176,12 @@ export function createFacade(loader) {
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
         grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null },
-        commands: undefined,
+        commands: options.commands?.slice(),
         customCommands: [...B.commands.keys()],
-        env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: true })),
+        env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: exported.has(n) })),
         cwd: utf8(B.initialCwd),
         processInfo: options.processInfo ? { pid: options.processInfo.pid ?? 1, ppid: options.processInfo.ppid ?? 0, uid: options.processInfo.uid ?? 1000, gid: options.processInfo.gid ?? 1000 } : undefined,
-        defaultLayout: false,
+        defaultLayout,
         trace: typeof options.trace === "function",
         coverage: !!options.coverage,
       };
@@ -201,6 +211,10 @@ export function createFacade(loader) {
       const B = STATE.get(this);
       B.holder.instance?.check();
       this.#register(B, command, true);
+    }
+
+    getCommandNames() {
+      return [...STATE.get(this).commandNames];
     }
 
     getCwd() {
@@ -246,7 +260,8 @@ export function createFacade(loader) {
       return {
         env,
         replaceEnv: options.replaceEnv,
-        cwd: options.cwd === undefined ? undefined : resolvePath(B.initialCwd, options.cwd),
+        cwd: options.cwd || undefined,
+        envGiven: options.env !== undefined,
         rawScript: options.rawScript,
         stdin,
         args: options.args ?? [],
