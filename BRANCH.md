@@ -2,7 +2,7 @@
 
 ## Objective
 Two engine-agnostic tools, a recorder and a replay runner, with the case and snapshot formats they share,
-proven on a mock engine. Spec: `spec/lots/L10a.md`. Stacked on `feat/l0-pipeline`.
+proven on a mock engine. Spec: `spec/lots/L10a.md`. Based on `main` (L0 merged).
 
 ## Scope / Guardrails
 - Scope limited to the L10a lot spec section 3.
@@ -16,17 +16,20 @@ proven on a mock engine. Spec: `spec/lots/L10a.md`. Stacked on `feat/l0-pipeline
   - `tools/parity-record.mjs`
   - `test/parity/**`, `test/cases/l10a/**`, `test/snapshots/l10a/**`, `test/api/**`
   - `spec/lots/L10a.md`, `BRANCH.md`
+  - `.track/**` (Track CLI updates of the L10a item only, single writer)
 - **Forbidden Paths (must not change in this branch)**:
-  - `LICENSE`, `.githooks/**`, `rules/**`, `.track/**`, `harness.profile.json`, `package.json`
+  - `LICENSE`, `.githooks/**`, `rules/**`, `harness.profile.json`, `package.json`
   - the rest of `spec/**`, `plan/**`, `kernel/**`, `probe/**`, `wit/**`, `host/**`, `types/**`
 - **Conditional Paths (allowed only with explicit exception)**:
-  - `tools/check.mjs` (BR10a-EX1), `Makefile` (BR10a-EX2)
+  - `tools/gates.mjs` (BR10a-EX1, export only)
 - **Exception process**:
   - Declared in `## Feedback Loop` before touching the path.
 
 ## Feedback Loop
-- BR10a-EX1 `tools/check.mjs`. Reason: the test glob `test/*.test.mjs` does not reach `test/parity/` and `test/api/`, so the lot tests would not run in `make check`. Impact: glob list extended with `test/*/*.test.mjs`; nothing else changes. Rollback: revert the file.
-- BR10a-EX2 `Makefile`. Reason: same glob in the `test` target. Impact: same. Rollback: revert the file.
+- BR10a-EX1 `tools/gates.mjs`. Reason: the Gate 12 isolation self-test reuses `stripComments` and `scanImports`; they are already exported on main, so no edit was needed. Impact: none (read-only use). Rollback: not applicable.
+- BR10a-EX2 `tools/check.mjs`, `Makefile`: no longer needed. main's `tools/run-tests.mjs` runs `test/**/*.test.mjs` recursively, so the lot tests run in `make check` unchanged. Withdrawn.
+- BR10a-EX3 `.track/**`: the Track CLI (single writer) records the L10a item state; the two files changed are `.track/events.jsonl` and `.track/head.json`. Rollback: revert the Track commit.
+- Review fixes (PR #5): see `tmp/conductor/lanes/review-pr5.md`; all findings addressed on this branch.
 
 ## Plan / Todo (lot-based)
 - [x] **Lot 0 — Baseline**: BRANCH.md, lot spec copy, scope exceptions
