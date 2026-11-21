@@ -1,0 +1,9 @@
+{
+  "id": "l2/vars-ifs-splitting",
+  "steps": [
+    {
+      "script": "V='  aa:bb::cc  '\nIFS=' :'\necho $V\nIFS=''\necho $V"
+    }
+  ],
+  "title": "Vars ifs splitting"
+}

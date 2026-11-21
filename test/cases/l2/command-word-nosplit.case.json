@@ -1,0 +1,9 @@
+{
+  "id": "l2/command-word-nosplit",
+  "steps": [
+    {
+      "script": "C='echo hi'\n$C\nf() { \"$@\"; }\nf echo there\ng() { $*; }\ng echo x"
+    }
+  ],
+  "title": "Command word nosplit"
+}
