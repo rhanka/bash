@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync, lstatSync, readlinkSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,13 +62,15 @@ const SAFE_PATH = (p) => typeof p === "string" && p !== "" && !p.startsWith("/")
  * components, so they must hold no separator and no "..". Unless fieldsOnly (the SENTROPIC_PINS test hook),
  * the url must be https and carry a sha256. */
 export function pinsProblem(list, { fieldsOnly = false } = {}) {
+  const str = (v) => typeof v === "string";
   for (const p of list) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p.name ?? "") || String(p.name).includes("..")) return `pin ${p.name} has an unsafe name`;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(p.version ?? "") || String(p.version).includes("..")) return `pin ${p.name} has an unsafe version`;
+    if (!str(p.name) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p.name) || p.name.includes("..")) return `pin ${p.name} has an unsafe name`;
+    if (!str(p.version) || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(p.version) || p.version.includes("..")) return `pin ${p.name} has an unsafe version`;
     if (!SAFE_PATH(p.bin)) return `pin ${p.name} has an unsafe bin path`;
+    if (!str(p.url)) return `pin ${p.name} has a non-string url`;
+    if (!str(p.sha256) || !/^[0-9a-f]{64}$/.test(p.sha256)) return `pin ${p.name} has no valid sha256`;
     if (fieldsOnly) continue;
-    if (!/^https:\/\/[^/\s]+\//.test(p.url ?? "")) return `pin ${p.name} does not use an https:// URL`;
-    if (!/^[0-9a-f]{64}$/.test(p.sha256 ?? "")) return `pin ${p.name} has no valid sha256`;
+    if (!/^https:\/\/[^/\s]+\//.test(p.url)) return `pin ${p.name} does not use an https:// URL`;
   }
   return null;
 }
@@ -97,9 +99,14 @@ export function treeManifest(dir) {
       const p = join(d, name);
       const st = lstatSync(p);
       const rel = p.slice(dir.length + 1);
-      if (st.isSymbolicLink()) map[rel] = `link:${readlinkSync(p)}`;
-      else if (st.isDirectory()) visit(p);
-      else map[rel] = sha256File(p);
+      if (st.isSymbolicLink()) {
+        const target = readlinkSync(p);
+        const abs = resolve(d, target);
+        if (abs !== dir && !abs.startsWith(dir + sep)) throw new Error(`symbolic link ${rel} escapes the tree: ${target}`);
+        map[rel] = `link:${target}`;
+      } else if (st.isDirectory()) visit(p);
+      else if (st.isFile()) map[rel] = sha256File(p);
+      else throw new Error(`special file ${rel} (neither a regular file, a directory nor a symbolic link)`);
     }
   };
   if (existsSync(dir)) visit(dir);
@@ -124,7 +131,12 @@ export function npmProblem(npmDir, want) {
   } catch {
     return "staged node_modules has no file-hash manifest";
   }
-  const now = treeManifest(join(npmDir, "node_modules"));
+  let now;
+  try {
+    now = treeManifest(join(npmDir, "node_modules"));
+  } catch (e) {
+    return `staged node_modules differs from the install manifest: ${e.message}`;
+  }
   for (const k of new Set([...Object.keys(recorded), ...Object.keys(now)])) {
     if (recorded[k] !== now[k]) return `staged node_modules differs from the install manifest at ${k}`;
   }
