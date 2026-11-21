@@ -1,7 +1,7 @@
 //! Workloads and probes of the allocator tests (spec L1a-2 section 7), exported from the wasm module only
 //! under the `mem-test-exports` feature. Integer arguments and results only: a node test instantiates the
 //! core module with an empty import object and calls these. Never part of a normal build.
-use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, realloc, Layout};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 const SLOTS: usize = 8192;

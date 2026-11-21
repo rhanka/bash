@@ -12,7 +12,7 @@ use super::budget::Budget;
 use super::clone::TryClone;
 use super::error::{MemError, MemResult};
 use super::vec::KVec;
-use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, realloc, Layout};
 use core::ptr::{self, NonNull};
 
 /// Growable byte sequence stored in chunks; never reallocates existing full chunks. Not `Send`.
