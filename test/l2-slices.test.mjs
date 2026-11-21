@@ -14,6 +14,34 @@ function pipelineOptions() {
   return { env: { A: payload, B: payload, C: payload }, replaceEnv: true };
 }
 
+function repeatedCalls(body, depth) {
+  const tree = [`f0() { ${body}; }`];
+  for (let i = 1; i <= depth; i++) tree.push(`f${i}() { f${i - 1}; f${i - 1}; }`);
+  return [...tree, `f${depth}`, "echo unreachable"].join("\n");
+}
+
+async function abortAfterReady(script) {
+  const ctrl = new AbortController();
+  let start, timer;
+  const ready = defineCommand("ready", () => {
+    start = performance.now();
+    timer = setTimeout(() => ctrl.abort(), 35);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+  const shell = new Bash({ executionLimitProfile: "micro", customCommands: [ready] });
+  try {
+    const r = await shell.exec(script, { signal: ctrl.signal });
+    const elapsed = performance.now() - start;
+    assert.notEqual(start, undefined, "script must reach ready before the abort is armed");
+    assert.equal(r.exitCode, 124, r.stderr);
+    assert.equal(r.stderr, "bash: execution aborted\n");
+    assert.ok(elapsed < 750, `shared-prefix abort took ${elapsed} ms`);
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal((await shell.exec("echo ok")).stdout, "ok\n");
+}
+
 const cases = {
   async abort() {
     const shell = new Bash({ executionLimitProfile: "contain" });
@@ -78,14 +106,39 @@ const cases = {
     assert.ok(elapsed < 750, `pipeline deadline took ${elapsed} ms`);
     assert.equal(shell.execSync("echo ok").stdout, "ok\n");
   },
+  async sharedPrefixLookup() {
+    const prefix = "a".repeat(996);
+    const names = Array.from({ length: 490 }, (_, i) => prefix + String(i).padStart(4, "0"));
+    const tree = repeatedCalls('B="' + ("$" + names.at(-1)).repeat(490) + '"', 12);
+    await abortAfterReady(names.map((name) => name + "=x").join(" ") + "\nready\n" + tree);
+  },
+  async sharedPrefixUndo() {
+    const prefix = "a".repeat(996);
+    const bindings = Array.from({ length: 960 }, (_, i) => prefix + String(i).padStart(4, "0") + "=x");
+    // All prefix variables disappear after the command, ready to be added by the next call.
+    await abortAfterReady("ready\n" + repeatedCalls(bindings.join(" ") + " echo -n", 10));
+  },
+  async relativeCwdDeadline() {
+    const shell = new Bash({ executionLimitProfile: "contain", executionLimits: { maxExecutionTimeMs: 100 } });
+    const cwd = "/" + "a/".repeat(7 << 20);
+    const start = performance.now();
+    const r = shell.execSync(repeatedCalls("./missing", 12), { cwd });
+    const elapsed = performance.now() - start;
+    assert.equal(r.exitCode, 124, r.stderr);
+    assert.match(r.stderr, /bash: execution aborted\n$/);
+    assert.ok(elapsed < 750, `relative cwd deadline took ${elapsed} ms`);
+    assert.equal(shell.execSync("echo ok").stdout, "ok\n");
+  },
 };
 
 for (const [name, run] of Object.entries(cases)) {
   test(`L2 ${name} completes within its wall-clock bound`, () => {
     const source = `import assert from "node:assert/strict";
-      import { Bash } from "@sentropic/bash";
+      import { Bash, defineCommand } from "@sentropic/bash";
       ${pipelineTree.toString()}
       ${pipelineOptions.toString()}
+      ${repeatedCalls.toString()}
+      ${abortAfterReady.toString()}
       await (${run.toString().replace(/^async \w+/, "async function")})();`;
     const child = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
       cwd: new URL("../", import.meta.url), encoding: "utf8", timeout: 3_000, killSignal: "SIGKILL",

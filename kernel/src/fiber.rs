@@ -9,7 +9,7 @@ use crate::mem::{
     TryClone,
 };
 use crate::shell::{Shell, G_CUSTOM, G_HOST_FS};
-use crate::util::{bytes_in, fmt_in, str_in, Env};
+use crate::util::{bytes_in, fmt_in, str_in, Env, EnvValue};
 use core::{cell::Cell, fmt::Write};
 
 mod expand;
@@ -58,7 +58,7 @@ pub enum HostReq {
         name: KBytes,
         args: KVec<KBytes>,
         cwd: KBytes,
-        env: Env,
+        env: KVec<(KRc<KBytes>, EnvValue)>,
         input_len: u64,
     },
     Fetch {
@@ -217,6 +217,7 @@ pub struct Fiber {
     pub(crate) stdin: KChunks,
     input_window: KBytes,
     stdin_total: u64,
+    stdin_error: Option<MemError>,
     failed: Option<Fail>,
     pub(crate) env: Env,
     overlay: Env,
@@ -304,7 +305,9 @@ impl Fiber {
                 }
                 if opt_cwd.is_some() {
                     if let Some(pwd) = overlay.get(b"PWD") {
-                        env.replace_shared(b"PWD", pwd.value.clone(), true)?;
+                        let mut pwd = pwd.clone();
+                        pwd.exported = true;
+                        env.replace_shared(b"PWD", pwd)?;
                     } else {
                         env.set(b"PWD", &cwd, true)?;
                     }
@@ -358,6 +361,7 @@ impl Fiber {
             failed,
             stdout_bytes: false,
             stdin_total: 0,
+            stdin_error: None,
             out_total: 0,
             last_exit: 0,
             epoch: 0,
@@ -496,14 +500,20 @@ impl Fiber {
         }
         self.stdin_total = self.stdin_total.saturating_add(chunk.len() as u64);
         if self.stdin_total > self.in_cap {
-            self.failed = Some(Fail::Input);
+            self.failed.get_or_insert(Fail::Input);
             self.stdin.clear();
-        } else if self.failed.is_none() {
+        } else if self.failed.is_none() && self.stdin_error.is_none() {
             if let Err(e) = self.stdin.try_append(chunk) {
-                self.failed = Some(Fail::Mem(e));
+                // A later chunk can still establish that the whole input exceeds
+                // the input cap. Keep this storage error separate from spawn failures.
+                self.stdin_error = Some(e);
             }
         }
         Ok(())
+    }
+
+    fn take_failure(&mut self) -> Option<Fail> {
+        self.failed.take().or_else(|| self.stdin_error.take().map(Fail::Mem))
     }
 
     fn check_call(&self, epoch: u64) -> Result<Pending, CallError> {
@@ -645,10 +655,27 @@ impl Fiber {
         true
     }
 
+    fn pay_bytes(&self, remaining: &mut usize) -> bool {
+        while *remaining > 0 {
+            if !self.tick() {
+                return false;
+            }
+            *remaining = remaining.saturating_sub(BYTE_CHUNK);
+        }
+        true
+    }
+
+    /// KMap uses at most five comparisons per node, with at least eight
+    /// keys per non-root node. An insertion can traverse the tree twice.
+    fn name_work(len: usize, entries: usize, traversals: usize) -> usize {
+        let comparisons = if entries == 0 { 0 } else { 5 * (1 + entries.ilog2() as usize / 3) };
+        len.max(1).saturating_mul(1 + traversals * comparisons)
+    }
+
     pub fn resume(&mut self, epoch: u64, outcome: Outcome<'_>) -> Result<Step, CallError> {
         let pending = self.check_call(epoch)?;
         self.state = State::Ready;
-        if let Some(fail) = self.failed.take() {
+        if let Some(fail) = self.take_failure() {
             return Ok(self.end_fail(fail));
         }
         if let Outcome::LimitExceeded(name) = outcome {
@@ -714,7 +741,7 @@ impl Fiber {
                 return step;
             }
         }
-        if let Some(fail) = self.failed.take() {
+        if let Some(fail) = self.take_failure() {
             return self.end_fail(fail);
         }
         if self.active.is_some() {
@@ -759,19 +786,18 @@ impl Fiber {
             );
             return Some(self.done_step());
         }
+        if let Some(fail) = self.take_failure() {
+            drop(source);
+            return Some(self.end_fail(fail));
+        }
         if self.overflow.is_none()
             && !source
                 .utf8_chunks()
                 .any(|c| !c.invalid().is_empty() || c.valid().chars().any(|c| !syntax::space(c)))
-            && !matches!(self.failed, Some(Fail::ExecDepth | Fail::Mem(_)))
         {
             drop(source);
             self.finish_early(0, Status::Completed, None, None);
             return Some(self.done_step());
-        }
-        if let Some(fail) = self.failed.take() {
-            drop(source);
-            return Some(self.end_fail(fail));
         }
         let units = if self.overflow.is_none() && !self.raw_script {
             match syntax::normalize(&source, &self.live) {
@@ -861,7 +887,7 @@ impl Fiber {
                 name: bytes_in(name, &self.live)?,
                 args,
                 cwd: bytes_in(&self.cwd, &self.live)?,
-                env: self.env.try_clone()?,
+                env: self.env.snapshot()?,
                 input_len: self.stdin.len(),
             },
         ))
@@ -1028,6 +1054,7 @@ impl Fiber {
         self.args = KVec::new_in(&self.live);
         self.kept = KVec::new_in(&self.live);
         self.call_env = None;
+        self.stdin_error = None;
         self.failed = None;
         let mut env = core::mem::replace(&mut self.env, Env::new_in(&self.scratch));
         if early {

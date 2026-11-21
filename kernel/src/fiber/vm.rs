@@ -5,6 +5,7 @@ use super::*;
 use crate::cmd::{coverage_id, CommandSpec, COVERAGE_FEATURES};
 use crate::fs::{Code, Kind};
 use crate::mem::KMap;
+use crate::util::OrderedNames;
 
 pub(super) struct Vm {
     frames: KVec<Frame>,
@@ -43,7 +44,7 @@ enum Frame {
     Pipeline {
         stage: u32,
         input: Option<KChunks>,
-        snapshot: Option<Env>,
+        snapshot: Option<(Env, Option<usize>)>,
     },
     StageEnd(KBox<StageEnd>),
     Define {
@@ -52,7 +53,10 @@ enum Frame {
         remaining: usize,
     },
     SimpleCmd(Span, u32),
-    Restore(KVec<Undo>),
+    Restore {
+        undo: OrderedNames<Option<EnvValue>>,
+        remaining: Option<usize>,
+    },
     SetLastArg(Option<KRc<KBytes>>),
     FuncCall(KVec<KBytes>),
 }
@@ -64,21 +68,26 @@ struct StageEnd {
     next: Option<u32>,
     previous_exit: i32,
     last_arg: Option<KRc<KBytes>>,
+    remaining: Option<usize>,
 }
 
-struct Undo {
-    name: KBytes,
-    previous: Option<(KRc<KBytes>, bool)>,
+struct Assignment {
+    name: Span,
+    append: bool,
+    from: u32,
+    remaining: usize,
+    position: Option<usize>,
 }
 
 struct Simple {
     entered: bool,
     word: usize,
+    assignment: Option<Assignment>,
     scalar: Option<Scalar>,
     arg: Option<Argument>,
     name: Option<KBytes>,
     args: KVec<KBytes>,
-    undo: KVec<Undo>,
+    undo: OrderedNames<Option<EnvValue>>,
     delims: Delimiters,
     last_arg: KBytes,
     dispatch_ready: bool,
@@ -88,6 +97,7 @@ struct Simple {
 #[derive(Default)]
 struct PathSearch {
     started: bool,
+    explicit_left: Option<usize>,
     start: usize,
     end: usize,
     candidate: Option<(core::ops::Range<usize>, usize)>,
@@ -162,21 +172,25 @@ impl Fiber {
                         self.vm.command_count += 1;
                         if input.is_some() || !matches!(node.pipe, Pipe::Last) {
                             let mut env = Env::new_in(&self.live);
-                            env.v.try_reserve_exact(self.env.v.len())?;
-                            snapshot = Some(env);
+                            env.reserve_entries(self.env.len())?;
+                            snapshot = Some((env, None));
                         }
                     }
-                    if let Some(mut env) = snapshot {
-                        while let Some(entry) = self.env.v.get(env.v.len()) {
-                            if !self.tick() {
+                    if let Some((mut env, mut remaining)) = snapshot {
+                        while let Some((name, entry)) = self.env.entry(env.len()) {
+                            let left = remaining.get_or_insert_with(|| {
+                                Self::name_work(name.bytes().len(), env.len(), 2)
+                            });
+                            if !self.pay_bytes(left) {
                                 self.vm.frames.try_push(Frame::Pipeline {
                                     stage,
                                     input,
-                                    snapshot: Some(env),
+                                    snapshot: Some((env, remaining)),
                                 })?;
                                 return Ok(Some(Step::OutOfFuel));
                             }
-                            env.v.try_push(entry.clone())?;
+                            env.insert_shared(name, entry.clone())?;
+                            remaining = None;
                         }
                         self.begin_stage(node.pipe, input, env)?;
                     }
@@ -192,16 +206,7 @@ impl Fiber {
                                 .try_push(Frame::StmtList { term, top: false })?;
                         }
                         Command::Define { name, body } => {
-                            let count = self.vm.functions.len();
-                            // KMap insertion can search twice, with at most five
-                            // comparisons per node and at least eight keys in
-                            // each non-root node. Also charge the key copy.
-                            let comparisons = if count == 0 {
-                                0
-                            } else {
-                                10 * (1 + count.ilog2() as usize / 3)
-                            };
-                            let remaining = name.get(&program.source).len() * (1 + comparisons);
+                            let remaining = Self::name_work(name.get(&program.source).len(), self.vm.functions.len(), 2);
                             self.vm.frames.try_push(Frame::Define {
                                 name,
                                 body,
@@ -215,16 +220,9 @@ impl Fiber {
                     body,
                     mut remaining,
                 } => {
-                    while remaining != 0 {
-                        if !self.tick() {
-                            self.vm.frames.try_push(Frame::Define {
-                                name,
-                                body,
-                                remaining,
-                            })?;
-                            return Ok(Some(Step::OutOfFuel));
-                        }
-                        remaining = remaining.saturating_sub(BYTE_CHUNK);
+                    if !self.pay_bytes(&mut remaining) {
+                        self.vm.frames.try_push(Frame::Define { name, body, remaining })?;
+                        return Ok(Some(Step::OutOfFuel));
                     }
                     self.hit("bash:cmd:FunctionDef")?;
                     self.vm.functions.try_insert(
@@ -233,13 +231,18 @@ impl Fiber {
                     )?;
                     self.last_exit = 0;
                 }
-                Frame::StageEnd(end) => {
-                    while !self.env.v.is_empty() {
-                        if !self.tick() {
+                Frame::StageEnd(mut end) => {
+                    while let Some(pos) = self.env.len().checked_sub(1) {
+                        let (name, _) = self.env.entry(pos).expect("nonempty environment");
+                        let left = end.remaining.get_or_insert_with(|| {
+                            Self::name_work(name.bytes().len(), self.env.len(), 1)
+                        });
+                        if !self.pay_bytes(left) {
                             self.vm.frames.try_push(Frame::StageEnd(end))?;
                             return Ok(Some(Step::OutOfFuel));
                         }
-                        drop(self.env.v.pop());
+                        drop(self.env.pop());
+                        end.remaining = None;
                     }
                     let StageEnd {
                         env,
@@ -248,6 +251,7 @@ impl Fiber {
                         next,
                         previous_exit,
                         last_arg,
+                        remaining: _,
                     } = KBox::into_inner(end);
                     self.env = env;
                     self.last_arg = last_arg;
@@ -270,11 +274,12 @@ impl Fiber {
                     let mut simple = self.vm.simple.take().unwrap_or_else(|| Simple {
                         entered: false,
                         word: words.range().start,
+                        assignment: None,
                         scalar: None,
                         arg: None,
                         name: None,
                         args: KVec::new_in(&self.live),
-                        undo: KVec::new_in(&self.live),
+                        undo: OrderedNames::new_in(&self.live),
                         delims: Delimiters::new(),
                         last_arg: KBytes::new_in(&self.live),
                         dispatch_ready: false,
@@ -311,18 +316,27 @@ impl Fiber {
                         Flow::Fail(fail) => return Err(fail),
                     }
                 }
-                Frame::Restore(mut undo) => {
-                    while !undo.is_empty() {
-                        if !self.tick() {
-                            self.vm.frames.try_push(Frame::Restore(undo))?;
+                Frame::Restore { mut undo, mut remaining } => {
+                    while let Some(pos) = undo.len().checked_sub(1) {
+                        let (name, previous) = undo.entry(pos).expect("nonempty undo stack");
+                        let len = name.bytes().len();
+                        let left = remaining.get_or_insert_with(|| {
+                            let shift = if previous.is_none() { self.env.removal_bytes(name) } else { 0 };
+                            Self::name_work(len, undo.len(), 1)
+                                + Self::name_work(len, self.env.len(), 3) + shift
+                        });
+                        if !self.pay_bytes(left) {
+                            self.vm.frames.try_push(Frame::Restore { undo, remaining })?;
                             return Ok(Some(Step::OutOfFuel));
                         }
-                        let Undo { name, previous } = undo.pop().expect("nonempty undo stack");
-                        if let Some((value, exported)) = previous {
-                            self.env.replace_shared(&name, value, exported)?;
-                        } else {
-                            self.env.remove(&name);
+                        let (name, previous) = undo.pop().expect("nonempty undo stack");
+                        match (self.env.position(name.bytes()), previous) {
+                            (Some(pos), Some(value)) => { self.env.replace_at(pos, value); }
+                            (Some(pos), None) => { self.env.remove_at(pos); }
+                            (None, Some(value)) => { self.env.insert_shared(&name, value)?; }
+                            (None, None) => {}
                         }
+                        remaining = None;
                     }
                 }
                 Frame::SetLastArg(arg) => self.last_arg = arg,
@@ -365,6 +379,7 @@ impl Fiber {
             },
             previous_exit: self.last_exit,
             last_arg: self.last_arg.clone(),
+            remaining: None,
         };
         if end.next.is_some() {
             let i = self.vm.pipes.len();
@@ -399,8 +414,8 @@ impl Fiber {
 
     fn restore_after_command(&mut self, simple: &mut Simple) -> Result<(), Fail> {
         if !simple.undo.is_empty() {
-            let undo = core::mem::replace(&mut simple.undo, KVec::new_in(&self.live));
-            self.vm.frames.try_push(Frame::Restore(undo))?;
+            let undo = core::mem::replace(&mut simple.undo, OrderedNames::new_in(&self.live));
+            self.vm.frames.try_push(Frame::Restore { undo, remaining: None })?;
         }
         Ok(())
     }
@@ -420,28 +435,40 @@ impl Fiber {
         }
         while s.word < first_arg {
             let word = program.ast.word(s.word);
-            let (name, append, from) =
-                assignment(word, &program.source).expect("parsed assignment");
-            let name = name.get(&program.source);
-            if readonly(name) {
-                if !self.tick() {
-                    return Ok(None);
+            let a = s.assignment.get_or_insert_with(|| {
+                let (name, append, from) =
+                    assignment(word, &program.source).expect("parsed assignment");
+                let len = name.get(&program.source).len();
+                let mut remaining = Self::name_work(len, self.env.len(), 3);
+                if has_command {
+                    remaining += Self::name_work(len, s.undo.len(), 3);
                 }
+                Assignment { name, append, from, remaining, position: None }
+            });
+            let name = a.name.get(&program.source);
+            if !self.pay_bytes(&mut a.remaining) {
+                return Ok(None);
+            }
+            if readonly(name) {
                 if !has_command {
                     return Err(Fail::Readonly(bytes_in(name, &self.live)?));
                 }
                 self.write_error(name, b"readonly variable")?;
+                s.assignment = None;
                 s.word += 1;
                 continue;
             }
-            let previous = self.env.get(name);
             let ex = self.expander(program);
-            let scalar = s.scalar.get_or_insert_with(|| Scalar::new(&ex));
+            let scalar = s.scalar.get_or_insert_with(|| {
+                a.position = self.env.position(name);
+                Scalar::new(&ex)
+            });
+            let previous = a.position.and_then(|pos| self.env.entry(pos)).map(|(_, value)| value);
             let value = scalar.run(
                 &ex,
                 word,
-                from,
-                if append {
+                a.from,
+                if a.append {
                     previous.map_or(b"".as_slice(), |e| &e.value)
                 } else {
                     b""
@@ -450,13 +477,17 @@ impl Fiber {
             let Some(value) = value else { return Ok(None) };
             s.scalar = None;
             let exported = has_command || previous.is_some_and(|e| e.exported);
-            let previous = self.env.replace_owned(name, value, exported)?;
-            if has_command && !s.undo.iter().any(|e| e.name.as_slice() == name) {
-                s.undo.try_push(Undo {
-                    name: bytes_in(name, &self.live)?,
-                    previous,
-                })?;
+            let value = self.env.own_value(value, exported)?;
+            let (key, previous) = if let Some(pos) = a.position {
+                let previous = self.env.replace_at(pos, value);
+                (self.env.entry(pos).expect("just replaced").0, Some(previous))
+            } else {
+                (self.env.insert(name, value)?, None)
+            };
+            if has_command && s.undo.position(name).is_none() {
+                s.undo.insert_shared(key, previous)?;
             }
+            s.assignment = None;
             s.word += 1;
         }
         if !has_command {
@@ -548,7 +579,13 @@ impl Fiber {
         search: &mut PathSearch,
     ) -> Result<Option<Flow>, Fail> {
         if !search.started {
-            if name.contains(&b'/') {
+            if search.explicit_left.is_some() || name.contains(&b'/') {
+                let left = search.explicit_left.get_or_insert_with(|| {
+                    name.len() + if name.starts_with(b"/") { 0 } else { self.cwd.len() }
+                });
+                if !self.pay_bytes(left) {
+                    return Ok(None);
+                }
                 let path = self.resolve_path(&self.cwd, name)?;
                 let args = self.finish_dispatch(args, last_arg)?;
                 return self.explicit_path(name, &path, args).map(Some);
@@ -746,11 +783,8 @@ impl Fiber {
             .map_or(b"/usr/bin:/bin".as_slice(), |e| &e.value);
         loop {
             if let Some((dir, left)) = &mut search.candidate {
-                while *left > 0 {
-                    if !self.tick() {
-                        return Ok(None);
-                    }
-                    *left = left.saturating_sub(BYTE_CHUNK);
+                if !self.pay_bytes(left) {
+                    return Ok(None);
                 }
                 let dir = self.resolve_path(&self.cwd, &path[dir.clone()])?;
                 let resolved = self.resolve_path(&dir, name)?;

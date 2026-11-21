@@ -41,9 +41,7 @@ impl<'a> Expander<'a> {
             b"" => Value::Text(b""),
             _ if identifier(name) => f
                 .env
-                .v
-                .iter()
-                .position(|e| e.name.as_slice() == name)
+                .position(name)
                 .map_or(Value::Text(b""), Value::Env),
             _ => {
                 if !name[0].is_ascii_alphanumeric() && !b"_?$!#@*-".contains(&name[0]) {
@@ -130,6 +128,7 @@ struct Cursor {
     join: bool,
     prefix_done: bool,
     value: Option<Value>,
+    lookup_left: Option<usize>,
 }
 
 impl Cursor {
@@ -164,7 +163,16 @@ impl Cursor {
             let done = match part.kind {
                 PartKind::Param | PartKind::QuotedParam => match match self.value {
                     Some(value) => value,
-                    None => *self.value.insert(ex.value(text)?),
+                    None => {
+                        let left = self.lookup_left.get_or_insert_with(|| {
+                            Fiber::name_work(text.len(), ex.fiber.env.len(), 1)
+                        });
+                        if !ex.fiber.pay_bytes(left) {
+                            return Ok(true);
+                        }
+                        self.lookup_left = None;
+                        *self.value.insert(ex.value(text)?)
+                    }
                 } {
                     Value::Text(bytes) => self.visit(bytes, quoted, eligible, false, &mut visit)?,
                     Value::LastArg => {
@@ -176,7 +184,7 @@ impl Cursor {
                         self.visit(last_arg, quoted, eligible, false, &mut visit)?
                     }
                     Value::Env(i) => self.visit(
-                        &ex.fiber.env.v[i].value,
+                        &ex.fiber.env.entry(i).expect("environment is stable during expansion").1.value,
                         quoted,
                         eligible,
                         false,
