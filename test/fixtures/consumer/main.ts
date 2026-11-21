@@ -1,16 +1,20 @@
 // A consumer that uses every declaration of the facade (spec L1b 7.1).
 import {
-  AsyncCapabilityError, Bash, EMPTY_BYTES, ExecutionAbortedError, InMemoryFs, KernelPoisonedError, NotSupportedError,
+  AsyncCapabilityError, Bash, EMPTY_BYTES, ExecutionAbortedError, InMemoryFs, KernelPoisonedError, NotSupportedError, OverlayFs, ReadWriteFs,
   bytesOutput, decodeBytesToUtf8, defineCommand, encodeUtf8ToBytes, getCommandNames, getJavaScriptCommandNames, getNetworkCommandNames,
   getPythonCommandNames, latin1FromBytes, stdoutAsBytes, stdoutKind, textOutput, unsafeBytesFromLatin1,
 } from "@sentropic/bash";
 import type {
   BashExecResult, BashLogger, BashOptions, Command, CommandContext, CustomCommand, ExecOptions, ExecResult, ExecutionLimitProfile,
-  ExecutionLimits, IFileSystem, InitialFiles, LazyCommand, NetworkConfig, SecureFetch, TraceEvent,
+  ExecutionLimits, IFileSystem, InitialFiles, LazyCommand, NetworkConfig, OverlayFsOptions, ReadWriteFsOptions, SecureFetch, TraceEvent,
 } from "@sentropic/bash";
 import { Bash as BrowserBash } from "@sentropic/bash/browser";
 
 const profile: ExecutionLimitProfile = "contain";
+const overlayOptions: OverlayFsOptions = { root: ".", mountPoint: "/project", maxMemoryBytes: 1024 };
+const readWriteOptions: ReadWriteFsOptions = { root: ".", maxCopyOnWriteSize: 1024 };
+const hostFilesystems: IFileSystem[] = [new OverlayFs(overlayOptions), new ReadWriteFs(readWriteOptions)];
+void hostFilesystems;
 const limits: ExecutionLimits = { maxOutputSize: 10, maxLiveBytes: 1 << 20 };
 const logger: BashLogger = { info() {}, debug() {} };
 const network: NetworkConfig = { allowedUrlPrefixes: ["https://example.test", { url: "https://x.test/v1", transform: [{ headers: { a: "b" } }] }] };
