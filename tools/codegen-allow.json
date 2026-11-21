@@ -1,0 +1,4 @@
+{
+  "comment": "Test files that may use code generation from strings (eval, Function, ...). Each entry is { \"file\": \"test/<path>.test.mjs\", \"reason\": \"...\" }. Expected to stay empty.",
+  "allow": []
+}

@@ -83,6 +83,13 @@ G7 manifests: OK
 G8 tool pins: OK
 ```
 
+### G2 scope and the runtime layer
+
+G2 is a static guard against accidental imports and capability use in our own code (host/, dist/js/, types/). It is not a sandbox against adversarial source: a regex-based JavaScript scanner cannot be made sound, so where it cannot classify a construct (for example a "/" after a "}") it fails closed. The enforcement is the runtime layer B:
+
+- `tools/run-tests.mjs` runs every test process with `--disallow-code-generation-from-strings`, so eval, Function, the Function constructors reached through `.constructor`, and `setTimeout` with a string throw whatever their syntax. A test that really needs code generation must be listed with a reason in `tools/codegen-allow.json` (currently empty).
+- `tools/test-hooks.mjs` is a synchronous resolve hook (`node:module` `registerHooks`) preloaded in every test process: a bare specifier or non-file URL imported from host/ or dist/js/ throws, and any `node:` import from host/ outside host/node/, or reachable from host/browser.js, throws. It does not see `process.getBuiltinModule()`, which G2 bans outside host/node/.
+
 G3 builds from two copies under different paths (`tmp/g3-a/copy-one`, `tmp/g3-b/nested/copy-two`); both produced identical hashes, equal to those of the build in the worktree itself:
 
 ```
