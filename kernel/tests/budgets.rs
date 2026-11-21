@@ -25,17 +25,21 @@ fn exact(what: &str, need: u64, op: impl Fn(&Budget) -> Outcome) {
         Ok(_) => panic!("{what}: cap = need - 1 must fail"),
     }
     assert!(tight.used() <= need - 1, "{what}");
+    assert_eq!(tight.used(), 0, "{what}: released on refusal");
 }
 
 fn rc_size() -> u64 {
     let probe = root(98, BIG);
-    let _x = KRc::try_new_in([0u8; 64], &probe).unwrap();
-    probe.used()
+    let x = KRc::try_new_in([0u8; 64], &probe).unwrap();
+    let size = probe.used();
+    drop(x);
+    assert_eq!(probe.used(), 0);
+    size
 }
 
 #[test]
 fn budgets() {
-    let base = start();
+    start();
     let rc = rc_size();
     assert!(rc >= 64 + core::mem::size_of::<usize>() as u64);
 
@@ -126,12 +130,13 @@ fn budgets() {
             let s = KString::try_from_str_in(&"q".repeat(len), &tiny).expect("a short text fits exactly its length");
             assert_eq!(tiny.used(), len as u64);
             drop(s);
+            assert_eq!(tiny.used(), 0);
         }
         exact("KString from_str", nb, |b| KString::try_from_str_in(&"z".repeat(n), b).map(|s| Box::new(s) as Box<dyn Any>));
 
         // KBox<[u8; 64]> and KRc<[u8; 64]>: n of them.
+        let holder = root(99, BIG);
         exact("KBox<[u8;64]>", nb * 64, |b| {
-            let holder = root(99, BIG);
             let mut kept: KVec<KBox<[u8; 64]>> = KVec::new_in(&holder);
             for i in 0..n {
                 match KBox::try_new_in([i as u8; 64], b) {
@@ -144,8 +149,8 @@ fn budgets() {
             }
             Ok(Box::new(kept))
         });
+        assert_eq!(holder.used(), 0);
         exact("KRc<[u8;64]>", nb * rc, |b| {
-            let holder = root(99, BIG);
             let mut kept: KVec<KRc<[u8; 64]>> = KVec::new_in(&holder);
             for i in 0..n {
                 match KRc::try_new_in([i as u8; 64], b) {
@@ -158,13 +163,18 @@ fn budgets() {
             }
             Ok(Box::new(kept))
         });
+        assert_eq!(holder.used(), 0);
+        drop(holder);
 
         // KMap<u32, u32>: the exact need is probed (entry overhead depends on the map layout), and is at
         // least the payload.
         let fill = |cap: u64| -> bool {
             let p = root(97, cap);
             let mut m: KMap<u32, u32> = KMap::new_in(&p);
-            (0..n as u32).all(|i| m.try_insert(i.wrapping_mul(2654435761), i).is_ok())
+            let fits = (0..n as u32).all(|i| m.try_insert(i.wrapping_mul(2654435761), i).is_ok());
+            drop(m);
+            assert_eq!(p.used(), 0);
+            fits
         };
         let (mut lo, mut hi) = (0u64, BIG);
         while lo < hi {
@@ -190,12 +200,9 @@ fn budgets() {
             Ok(Box::new(m))
         });
     }
-    assert_eq!(usage().used, base, "no leak");
-
     nested();
     overflow();
     preservation();
-    assert_eq!(usage().used, base, "no leak");
 }
 
 /// Gate 3.
@@ -236,6 +243,7 @@ fn nested() {
     grand.release(10);
     grand.charge(5).unwrap();
     grand.release(5);
+    assert_eq!(grand.used(), 0);
     // A container on a child budget charges the chain.
     let c2 = parent.child(LimitId(13), 100).unwrap();
     let mut v: KVec<u8> = KVec::new_in(&c2);
@@ -267,6 +275,7 @@ fn overflow() {
     drop(v);
     drop(s);
     assert_eq!(usage().used, before);
+    assert_eq!(b.used(), 0);
 }
 
 /// Gate 7 (the containers that hand a value back or drop it).
@@ -283,18 +292,22 @@ fn preservation() {
     let (value, _) = KRc::try_new_in((tracker.clone(), [0u8; 64]), &b).err().expect("refused");
     drop(value);
     assert_eq!(Rc::strong_count(&tracker), 1);
+    assert_eq!(b.used(), 0);
     // try_push: the value is dropped, the vector is unchanged.
     let b8 = root(ID, 8);
     let mut v: KVec<(Rc<()>, u32)> = KVec::new_in(&b8);
     assert_eq!(v.try_push((tracker.clone(), 1)), Err(MemError::Limit(LimitId(ID))));
     assert_eq!((v.len(), v.capacity(), b8.used()), (0, 0, 0));
     assert_eq!(Rc::strong_count(&tracker), 1, "dropped");
+    drop(v);
+    assert_eq!(b8.used(), 0);
     // try_insert on a map: unchanged, key and value dropped; replacing never allocates.
-    let b16 = root(ID, 16 * core::mem::size_of::<(u32, Rc<()>)>() as u64);
+    let b16 = root(ID, BIG);
     let mut m: KMap<u32, Rc<()>> = KMap::new_in(&b16);
     assert_eq!(m.try_insert(1, tracker.clone()).map(|o| o.is_none()), Ok(true));
     let tight = root(ID, b16.used());
     drop(m);
+    assert_eq!(b16.used(), 0);
     let mut m: KMap<u32, Rc<()>> = KMap::new_in(&tight);
     assert!(m.try_insert(1, tracker.clone()).is_ok());
     let used = tight.used();
@@ -314,4 +327,5 @@ fn preservation() {
     assert_eq!(Rc::strong_count(&tracker), 1 + len, "the refused pair was dropped");
     drop(m);
     assert_eq!(Rc::strong_count(&tracker), 1);
+    assert_eq!(tight.used(), 0);
 }

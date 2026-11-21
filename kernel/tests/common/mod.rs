@@ -1,5 +1,5 @@
-//! Shared helpers. The ceiling and the counters are process-wide, so each test binary holds exactly one
-//! `#[test]` function that runs its scenarios in order: nothing else allocates while it measures.
+//! Shared helpers. Each test binary runs its scenarios in order because the ceiling is process-wide.
+//! The test harness can also allocate, so container leak checks use their own budgets.
 #![allow(dead_code)]
 use sentropic_bash_kernel::mem::{testing, usage, Budget, LimitId};
 
