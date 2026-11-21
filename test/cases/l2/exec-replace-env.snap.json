@@ -1,0 +1,21 @@
+{
+  "case": "l2/exec-replace-env",
+  "caseHash": "218b066a642eb7b0278e5c2dd6e664daba13a0b287f7c426f6ad0299014d256e",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "ONLY": "yes"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "base= only=yes path=\n"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "l2/functions-nested-and-shadow",
+  "steps": [
+    {
+      "script": "function outer {\n  inner() { echo \"in:$1\"; }\n  inner \"$1\"\n  echo \"out:$1\"\n}\nouter top"
+    }
+  ],
+  "title": "Functions nested and shadow"
+}

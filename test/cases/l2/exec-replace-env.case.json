@@ -1,0 +1,16 @@
+{
+  "env": {
+    "BASE": "1"
+  },
+  "id": "l2/exec-replace-env",
+  "steps": [
+    {
+      "env": {
+        "ONLY": "yes"
+      },
+      "replaceEnv": true,
+      "script": "echo base=$BASE only=$ONLY path=$PATH"
+    }
+  ],
+  "title": "Exec replace env"
+}

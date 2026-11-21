@@ -1,0 +1,15 @@
+{
+  "files": {
+    "/nonexec.sh": {
+      "content": "echo no\n",
+      "mode": 420
+    }
+  },
+  "id": "l2/path-resolution",
+  "steps": [
+    {
+      "script": "/bin/echo via-bin\n/usr/bin/echo via-usr-bin\n/nope\n/bin\n/nonexec.sh\nPATH='' echo after-empty-path"
+    }
+  ],
+  "title": "Path resolution"
+}

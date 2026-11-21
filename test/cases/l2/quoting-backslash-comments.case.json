@@ -1,0 +1,9 @@
+{
+  "id": "l2/quoting-backslash-comments",
+  "steps": [
+    {
+      "script": "echo hel\\lo\\ world # trailing comment\necho not#comment # real comment\n# full line comment\necho line\\\ncontinuation"
+    }
+  ],
+  "title": "Quoting backslash comments"
+}

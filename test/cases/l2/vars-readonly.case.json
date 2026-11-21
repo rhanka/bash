@@ -1,0 +1,12 @@
+{
+  "id": "l2/vars-readonly",
+  "steps": [
+    {
+      "script": "SHELLOPTS=foo echo still-runs"
+    },
+    {
+      "script": "SHELLOPTS=foo\necho unreachable"
+    }
+  ],
+  "title": "Vars readonly"
+}

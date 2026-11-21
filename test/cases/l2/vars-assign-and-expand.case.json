@@ -1,0 +1,9 @@
+{
+  "id": "l2/vars-assign-and-expand",
+  "steps": [
+    {
+      "script": "A=first B=second\necho $A ${B} $UNSET ${UNSET} $"
+    }
+  ],
+  "title": "Vars assign and expand"
+}

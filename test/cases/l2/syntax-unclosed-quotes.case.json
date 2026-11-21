@@ -1,0 +1,15 @@
+{
+  "id": "l2/syntax-unclosed-quotes",
+  "steps": [
+    {
+      "script": "echo 'unterminated"
+    },
+    {
+      "script": "echo \"unterminated"
+    },
+    {
+      "script": "echo ${UNCLOSED"
+    }
+  ],
+  "title": "Syntax unclosed quotes"
+}
