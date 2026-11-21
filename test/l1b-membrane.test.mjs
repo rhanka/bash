@@ -69,9 +69,10 @@ test("gate 10: a granted host call reaches the driver and is served through the 
     stat: async (p) => ({ isFile: true, isDirectory: false, isSymbolicLink: false, mode: 0o644, size: 1, mtime: new Date(0) }),
   };
   const b = bash({ fs }, { onHostCall: (r) => seen.push(r.tag) });
-  const r = await b.exec("__hostfs 7 /p");
+  const r = await b.exec("__hostfs 1 /p");
   assert.equal(r.stdout, "ok\n");
   assert.deepEqual(seen, ["fs-batch"]);
+  assert.equal((await b.exec("__hostfs 7 /p")).stderr, "denied\n");
   let slept = null;
   const s = bash({ sleep: async (ms) => (slept = ms) });
   await s.exec("__sleep 25");

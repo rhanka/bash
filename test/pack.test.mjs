@@ -27,6 +27,7 @@ const EXPECTED = [
   "host/core/driver.js",
   "host/core/errors.js",
   "host/core/facade.js",
+  "host/core/fs-batch.js",
   "host/core/fs.js",
   "host/core/holder.js",
   "host/core/instance.js",
@@ -34,7 +35,11 @@ const EXPECTED = [
   "host/core/membrane.js",
   "host/core/paths.js",
   "host/index.js",
+  "host/node/fs-errors.js",
+  "host/node/host-paths.js",
   "host/node/load.js",
+  "host/node/overlay-fs.js",
+  "host/node/read-write-fs.js",
   "package.json",
   "types/browser.d.ts",
   "types/core.d.ts",
@@ -62,7 +67,7 @@ test("the tarball holds exactly the expected files and installs offline", () => 
   assert.equal(i.status, 0, i.stderr);
   writeFileSync(
     join(consumer, "main.mjs"),
-    "import assert from \"node:assert/strict\";\nimport { readFileSync } from \"node:fs\";\nimport * as node from \"@sentropic/bash\";\nimport * as browser from \"@sentropic/bash/browser\";\nawait browser.Bash.precompile(readFileSync(new URL(\"./node_modules/@sentropic/bash/dist/js/kernel/kernel.core.wasm\", import.meta.url)));\nfor (const entry of [node, browser]) {\n  assert.equal(\"pipelineProbe\" in entry, false);\n  const bash = new entry.Bash();\n  for (const { exitCode, stdout, stderr } of [await bash.exec(\"echo hi\"), bash.execSync(\"echo hi\")]) {\n    assert.deepEqual({ exitCode, stdout, stderr }, { exitCode: 0, stdout: \"hi\\n\", stderr: \"\" });\n  }\n}",
+    "import assert from \"node:assert/strict\";\nimport { readFileSync } from \"node:fs\";\nimport * as node from \"@sentropic/bash\";\nassert.equal(typeof node.OverlayFs, \"function\");\nassert.equal(typeof node.ReadWriteFs, \"function\");\nimport * as browser from \"@sentropic/bash/browser\";\nawait browser.Bash.precompile(readFileSync(new URL(\"./node_modules/@sentropic/bash/dist/js/kernel/kernel.core.wasm\", import.meta.url)));\nfor (const entry of [node, browser]) {\n  assert.equal(\"pipelineProbe\" in entry, false);\n  const bash = new entry.Bash();\n  for (const { exitCode, stdout, stderr } of [await bash.exec(\"echo hi\"), bash.execSync(\"echo hi\")]) {\n    assert.deepEqual({ exitCode, stdout, stderr }, { exitCode: 0, stdout: \"hi\\n\", stderr: \"\" });\n  }\n}",
   );
   const r = spawnSync("node", ["main.mjs"], { cwd: consumer, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
