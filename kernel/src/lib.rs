@@ -13,7 +13,8 @@ pub mod mem;
 pub mod shell;
 pub mod util;
 
-#[cfg(target_arch = "wasm32")]
+// The standalone allocator probe is instantiated as a core module without resource imports.
+#[cfg(all(target_arch = "wasm32", not(feature = "mem-test-exports")))]
 mod glue;
 
 #[cfg(all(target_arch = "wasm32", not(test)))]

@@ -157,20 +157,49 @@ test("filesystem return copies near the Wasm ceiling report no-space without tra
   const vfs = engine.Vfs.create(400_000n);
   const path = enc("/data");
   const bytes = new Uint8Array(150_000).fill(97);
-  assert.equal(vfs.op({ tag: "write-file", val: { path, data: bytes, offset: 0n, truncate: true } }).tag, "ok");
+  // Transfer each chunk below the 64 KiB headroom cap. Repeating the call also checks that
+  // the generated Vec drops return their charges.
+  for (let offset = 0; offset < bytes.length; offset += 50_000) {
+    const data = bytes.subarray(offset, offset + 50_000);
+    assert.equal(vfs.op({ tag: "write-file", val: { path, data, offset: BigInt(offset), truncate: false } }).tag, "ok");
+  }
+  const fill = { path: enc("/fill"), data: new Uint8Array(0), offset: 100_000n, truncate: true };
+  assert.equal(vfs.op({ tag: "write-file", val: fill }).tag, "ok");
   const full = vfs.op({ tag: "read-file", val: { path, offset: 0n, len: 120_000 } });
   assert.deepEqual(full, { tag: "err", val: { code: "no-space", path } });
   const small = vfs.op({ tag: "read-file", val: { path, offset: 0n, len: 64 } });
   assert.deepEqual(small, { tag: "ok", val: { tag: "data", val: bytes.subarray(0, 64) } });
 });
 
+test("post-return releases the transfer charge for an input echoed in an error", () => {
+  const { engine } = new Instance(module, internal());
+  engine.configure(8n * 65_536n);
+  const vfs = engine.Vfs.create(400_000n);
+  const path = new Uint8Array(40_000).fill(97);
+  const before = engine.usage().used;
+  for (let i = 0; i < 3; i++) {
+    const error = thrown(() => vfs.mountHost(path, 1));
+    assert.equal(error.code, "unsupported");
+    assert.deepEqual(error.path, path);
+  }
+  assert.equal(engine.usage().used, before);
+});
+
+test("the ceiling cannot be configured below the heap's existing footprint", () => {
+  const { engine } = new Instance(module, internal());
+  const initial = thrown(() => engine.Vfs.create(4096n));
+  assert.deepEqual(initial, { code: "not-configured", detail: "configure was not called" });
+  assert.equal(engine.usage().used, 0n);
+  assert.equal(thrown(() => engine.configure(32_768n)).code, "invalid-config");
+  engine.configure(2n * 65_536n);
+  assert.equal(engine.usage().ceiling, 2n * 65_536n);
+});
+
 test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () => {
   const { engine } = new Instance(module, internal());
-  engine.configure(10n << 20n);
-  const vfs = engine.Vfs.create(5n << 20n);
-  const fill = new Uint8Array((5 << 20) - 170_000);
-  const val = { path: enc("/fill"), data: fill, offset: 0n, truncate: true };
-  assert.equal(vfs.op({ tag: "write-file", val }).tag, "ok");
+  const ceiling = 10n << 20n;
+  engine.configure(ceiling);
+  const vfs = engine.Vfs.create(ceiling);
   const c = config();
   c.limits = {
     profile: "micro",
@@ -178,8 +207,12 @@ test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () 
   };
   const shell = engine.Shell.create(vfs, c);
   const fiber = engine.Fiber.spawn(shell, undefined, opts("__out 200000"));
+  const fill = { path: enc("/fill"), data: new Uint8Array(0), offset: ceiling - 330_000n, truncate: true };
+  assert.equal(vfs.op({ tag: "write-file", val: fill }).tag, "ok");
   assert.equal(fiber.run(5n).val.exitCode, 0);
-  const chunks = [];
+  const first = fiber.takeStdout(1 << 20);
+  assert.equal(first.length, 16 << 10, "the first drain needs the bounded reserve copy");
+  const chunks = [first];
   for (;;) {
     const bytes = fiber.takeStdout(1 << 20);
     if (bytes.length === 0) break;
@@ -188,45 +221,33 @@ test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () 
   assert.equal(Buffer.concat(chunks).toString(), "a".repeat(200_000));
 });
 
-test("a limit result keeps its name when the ordinary Wasm allocation space is exhausted", () => {
-  const ceiling = 10 << 20;
-  function fillBody(size) {
-    const { engine } = new Instance(module, internal());
-    engine.configure(BigInt(ceiling));
-    const vfs = engine.Vfs.create(BigInt(ceiling));
-    const c = config(["foo"]);
-    c.limits = {
-      profile: "micro",
-      overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 500_000n })),
-    };
-    const shell = engine.Shell.create(vfs, c);
-    const fiber = engine.Fiber.spawn(shell, undefined, opts("foo"));
-    const { epoch } = fiber.run(5n).val;
-    // Pre-fill memory without staging the file contents across the ABI.
-    const val = { path: enc("/fill"), data: new Uint8Array(0), offset: BigInt(ceiling - 350_000), truncate: true };
-    assert.equal(vfs.op({ tag: "write-file", val }).tag, "ok");
-    const before = engine.usage().used;
-    fiber.pushCallData(epoch, "body", new Uint8Array(size));
-    return { fiber, epoch, fits: engine.usage().used - before === BigInt(size) };
-  }
-
-  // Find the largest body that fits with its ABI input copy, accounting for allocator layout.
-  let lo = 0;
-  let hi = 175_000;
-  while (hi - lo > 1) {
-    const size = Math.floor((lo + hi) / 2);
-    if (fillBody(size).fits) lo = size;
-    else hi = size;
-  }
-  const { fiber, epoch, fits } = fillBody(lo - 4);
-  assert.ok(fits);
+test("a limit result includes its name and diagnostic after ordinary heap growth is refused", () => {
+  const ceiling = 10n << 20n;
+  const { engine } = new Instance(module, internal());
+  engine.configure(ceiling);
+  const vfs = engine.Vfs.create(ceiling);
+  const c = config(["foo"]);
+  c.limits = {
+    profile: "micro",
+    overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 500_000n })),
+  };
+  const shell = engine.Shell.create(vfs, c);
+  const fiber = engine.Fiber.spawn(shell, undefined, opts("foo"));
+  const { epoch } = fiber.run(5n).val;
+  const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
+  // Pre-fill the heap in the kernel so the transfer account only sees the paths and body chunks.
+  assert.equal(fill("/fill", ceiling - 350_000n).tag, "ok");
+  const before = engine.usage().used;
+  fiber.pushCallData(epoch, "body", new Uint8Array(140_000));
+  assert.equal(engine.usage().used - before, 140_000n);
+  assert.equal(fill("/fill2", 130_000n).tag, "ok");
   // The one-byte input fits, but the body cannot grow. Diagnostics run before the body is released.
   fiber.pushCallData(epoch, "body", enc("x"));
   const result = fiber.resume(epoch, { tag: "command-exit", val: 0 });
   assert.equal(result.tag, "done");
   assert.equal(result.val.status, "limit-exceeded");
   assert.equal(result.val.exitCode, 126);
-  assert.equal(fiber.takeStderr(100).length, 0);
+  assert.equal(dec(fiber.takeStderr(100)), "bash: memory-ceiling exceeded\n");
   assert.equal(result.val.limitName, "memory-ceiling");
 });
 

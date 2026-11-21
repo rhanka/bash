@@ -12,22 +12,6 @@ static USED: AtomicU64 = AtomicU64::new(0);
 static HIGH_WATER: AtomicU64 = AtomicU64::new(0);
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(target_arch = "wasm32")]
-static ABI_RESERVE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Leaves one Wasm page for ABI diagnostics and small drain chunks after ordinary allocations fail.
-#[cfg(target_arch = "wasm32")]
-pub(super) fn with_abi_reserve<R>(f: impl FnOnce() -> R) -> R {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            ABI_RESERVE_ACTIVE.store(false, Relaxed);
-        }
-    }
-    let _reset = (!ABI_RESERVE_ACTIVE.swap(true, Relaxed)).then(|| Reset);
-    f()
-}
-
 /// Why `configure` or `raise_ceiling` refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConfigError {
@@ -88,12 +72,7 @@ pub fn usage() -> Usage {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn current_ceiling() -> u64 {
-    let ceiling = CEILING.load(Relaxed);
-    if ABI_RESERVE_ACTIVE.load(Relaxed) {
-        ceiling
-    } else {
-        ceiling.saturating_sub(super::bump::PAGE as u64)
-    }
+    CEILING.load(Relaxed)
 }
 
 /// Test support: forgets the configuration and sets the ceiling, keeping `used`.
@@ -108,14 +87,10 @@ pub(crate) fn reset(ceiling_bytes: u64) {
 
 /// Takes `delta` bytes from the ceiling; false when it would be exceeded.
 fn reserve(delta: u64) -> bool {
-    #[cfg(target_arch = "wasm32")]
-    let ceiling = current_ceiling();
-    #[cfg(not(target_arch = "wasm32"))]
-    let ceiling = CEILING.load(Relaxed);
     let mut cur = USED.load(Relaxed);
     loop {
         let next = match cur.checked_add(delta) {
-            Some(n) if n <= ceiling => n,
+            Some(n) if n <= CEILING.load(Relaxed) => n,
             _ => return false,
         };
         match USED.compare_exchange_weak(cur, next, Relaxed, Relaxed) {

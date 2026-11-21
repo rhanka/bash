@@ -14,7 +14,8 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
 
 ## Branch Scope Boundaries (MANDATORY)
 - **Allowed Paths (implementation scope)**:
-  - `kernel/src/**` (except `kernel/src/mem/**`), `kernel/Cargo.toml` (features only), `Cargo.lock`
+  - `kernel/src/*.rs`, `kernel/src/bindings/**`, `kernel/src/fiber/**`, `kernel/src/glue/**`
+  - `kernel/Cargo.toml` (features only), `Cargo.lock`
   - `host/**`, `types/**`, `test/**`
   - `tools/**` (build learns the two components, the committed bindings check and the `[export]` imports)
   - `wit/**` (export `types` from the world and carry binary stdout through the kernel contract)
@@ -22,24 +23,22 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
 - **Forbidden Paths (must not change in this branch)**:
   - `LICENSE`, `.githooks/**`, `rules/**`, `.track/**`, `harness.profile.json`
   - `Makefile`, `package.json`, `.github/workflows/**`, `Cargo.toml`
-  - `kernel/src/mem/**`, the rest of `spec/**` and `plan/**`
+  - The rest of `spec/**` and `plan/**`
 - **Conditional Paths**:
-  - `kernel/src/mem/mod.rs` under `BR1b-EX1` and `BR1b-EX2`.
-  - `kernel/src/mem/bump.rs` and `kernel/src/mem/ceiling.rs` under `BR1b-EX2`.
+  - `kernel/src/mem/mod.rs`, `kernel/src/mem/heap.rs` and `kernel/src/mem/ceiling.rs` under BR1b-EX1.
 
 ## Feedback Loop
-- **BR1b-EX1** — `kernel/src/mem/mod.rs` gains a small `pub mod abi` that re-exports `Vec`, `String`, `vec!` and the
-  allocator entry points.
+- **BR1b-EX1** — `mem::abi` re-exports the heap types and allocator entry points used by the binding
+  adapter. Its `cabi_realloc` entry tags incoming transfer blocks with a spare Wasm heap header bit.
+  Restore `ceiling.rs` to L1a-2 and use its dedicated reserve through `reserve_scope`.
   - Rationale: main hardened G6 (alloc paths allowed only in `kernel/src/mem/` and the declared bindings
     directory) and the bindings check (that directory holds exactly the generated `kernel.rs`). The hand-written
     glue (`kernel/src/glue/`) names the heap types of the generated traits, and the generated `_rt` module is
-    private, so `mem` is the one place that may expose them.
-  - Impact: purely additive, no behaviour change; L1a-2 rewrites `mem/mod.rs`, so the merge keeps this block.
-  - Rollback: remove the `abi` module and move the glue back under a declared bindings directory.
-- **BR1b-EX2** — `kernel/src/mem/mod.rs`, `kernel/src/mem/bump.rs` and `kernel/src/mem/ceiling.rs` expose and enforce a 64 KiB ABI reserve.
-  - Rationale: L1a-2's reserve is specified but absent on this base. Ordinary allocations can use the whole ceiling, leaving no space to report a refusal or drain pending bytes.
-  - Impact: the Wasm allocator leaves one page for small diagnostics and drain copies. Native ceilings and the configured Wasm ceiling remain the same.
-  - Rollback: revert the reserve and adapter changes together. When L1a-2 lands, replace the temporary reserve with its allocator reserve API.
+    private. Generated Rust-owned inputs and generated post-return cleanup deallocate through the global
+    allocator, which must release the transfer charge carried by each tagged block.
+  - Impact: the L1a-2 heap keeps one reserve page for bounded diagnostics and drain copies. The transfer
+    account releases each tagged charge on free or when an ordinary Rust resize takes ownership.
+  - Rollback: revert the ABI glue and its heap tag together. Remove `mem::abi` when the glue no longer uses it.
 
 ## Plan / Todo (lot-based)
 - [x] **Lot 0 — Baseline**: BRANCH.md, lot spec
