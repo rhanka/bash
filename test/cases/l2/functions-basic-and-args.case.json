@@ -1,0 +1,9 @@
+{
+  "id": "l2/functions-basic-and-args",
+  "steps": [
+    {
+      "script": "greet() { echo \"hi $1 ($#): $*\"; echo \"$@\"; }\ngreet alice bob\necho after=$#:$1"
+    }
+  ],
+  "title": "Functions basic and args"
+}
