@@ -4,7 +4,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { repoRoot, readJson, sha256, sha256File, toolsDir, toolDir, toolProblem, tryRun, lockResolution, lockProblem, markerText, nonRegularEntries, pinsProblem } from "./lib.mjs";
+import { repoRoot, readJson, sha256, sha256File, toolsDir, toolDir, toolProblem, tryRun, lockResolution, lockProblem, markerText, nonRegularEntries, pinsProblem, tarProblem, treeManifest, npmProblem, NPM_MANIFEST } from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const offline = args.includes("--offline");
@@ -46,6 +46,9 @@ async function fetchNative(pin) {
   mkdirSync(dl, { recursive: true });
   const archive = join(dl, `${pin.name}-${pin.version}.tar.gz`);
   writeFileSync(archive, buf);
+  // The archive is listed and refused before anything is extracted.
+  const listed = tarProblem(archive);
+  if (listed) return fail(`tool ${pin.name} ${pin.version} ERROR ${listed}`);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
   const r = tryRun("tar", ["-xzf", archive, "-C", out, "--strip-components=1", "--no-same-owner", "--no-same-permissions"]);
@@ -69,17 +72,6 @@ async function fetchNative(pin) {
   console.log(`tool ${pin.name} ${pin.version} verified`);
 }
 
-function npmInstalled(npmDir, want) {
-  for (const [name, version] of Object.entries(want)) {
-    try {
-      if (readJson(join(npmDir, "node_modules", ...name.split("/"), "package.json")).version !== version) return false;
-    } catch {
-      return false;
-    }
-  }
-  return true;
-}
-
 function fetchNpm() {
   const src = join(repoRoot, "tools");
   const npmDir = join(dir, "npm");
@@ -93,11 +85,14 @@ function fetchNpm() {
   const same = () =>
     existsSync(join(npmDir, "package-lock.json")) &&
     resolved(readJson(join(npmDir, "package-lock.json"))) === resolved(lockSrc);
-  if (same() && npmInstalled(npmDir, want)) {
+  if (same() && npmProblem(npmDir, want) === null) {
     console.log("tool npm-tools verified");
     return;
   }
   if (offline) return fail("tool npm-tools ERROR offline and not installed or lockfile differs");
+  // A tree that fails verification is discarded, so nothing planted in it survives the reinstall.
+  rmSync(join(npmDir, "node_modules"), { recursive: true, force: true });
+  rmSync(join(npmDir, NPM_MANIFEST), { force: true });
   mkdirSync(npmDir, { recursive: true });
   copyFileSync(join(src, "package.json"), join(npmDir, "package.json"));
   copyFileSync(join(src, "package-lock.json"), join(npmDir, "package-lock.json"));
@@ -106,13 +101,15 @@ function fetchNpm() {
   const r = tryRun("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: npmDir });
   if (r.status !== 0) return fail(`tool npm-tools ERROR npm install failed: ${r.stderr.trim().slice(0, 500)}`);
   if (!same()) return fail("tool npm-tools ERROR lockfile changed during install");
-  if (!npmInstalled(npmDir, want)) return fail("tool npm-tools ERROR installed versions differ from the manifest");
+  writeFileSync(join(npmDir, NPM_MANIFEST), JSON.stringify(treeManifest(join(npmDir, "node_modules")), null, 1));
+  const problem = npmProblem(npmDir, want);
+  if (problem) return fail(`tool npm-tools ERROR ${problem}`);
   console.log("tool npm-tools verified");
 }
 
 const pins = readJson(pinsFile).tools;
-if (!testPins) {
-  const bad = pinsProblem(pins);
+{
+  const bad = pinsProblem(pins, { fieldsOnly: testPins });
   if (bad) {
     console.log(bad);
     process.exit(1);

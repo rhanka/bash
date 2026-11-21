@@ -65,7 +65,7 @@ function buildComponent(c, def, core) {
 }
 
 async function main() {
-  const f = tryRun("node", [join(repoRoot, "tools", "fetch-tools.mjs"), "--offline"], { cwd: repoRoot });
+  const f = tryRun("node", [join(repoRoot, "tools", "fetch-tools.mjs"), "--offline"], { cwd: repoRoot, env: { ...process.env, SENTROPIC_PINS: undefined } });
   if (f.status !== 0) {
     process.stderr.write(f.stdout + f.stderr);
     throw new Error("tools are not verified; run node tools/fetch-tools.mjs");

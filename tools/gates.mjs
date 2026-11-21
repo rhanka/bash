@@ -2,7 +2,7 @@
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { components, lockProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { components, lockProblem, npmProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 
 const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.toolsDir, ctx.root);
@@ -38,58 +38,121 @@ const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:${CLAUSE}$
 const DYNAMIC_LITERAL = new RegExp(String.raw`\bimport${W}\(${W}(['"])([^'"` + "`" + String.raw`\n$\\]*)\1${W}\)`, "g");
 const DYNAMIC_ANY = new RegExp(String.raw`\bimport${W}\(`, "g");
 
-/** Replaces JS comments by a space, leaving string and template literals and regex literals intact. */
-export function stripComments(src) {
-  let out = "";
+const PUNCT = "(,=:[!&|?{};+-*%<>~^";
+// A keyword before a slash means a regex literal follows, not a division.
+const REGEX_KEYWORDS = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "delete", "throw", "new", "instanceof", "yield", "await"]);
+
+/** One pass over a script. Returns { src, code, unicodeEscape }: src is the source with comments replaced
+ * by a space; code is src with the text of string, template and regex literals blanked, so identifier
+ * rules cannot fire on literal text; unicodeEscape is true when a backslash appears in code position
+ * (a unicode-escaped identifier). Template literals are tracked with a `${` expression stack. */
+export function scanSource(input) {
+  const n = input.length;
   let i = 0;
-  let prev = ""; // last significant character, to tell a regex literal from a division
-  const n = src.length;
-  while (i < n) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === "/" && d === "*") {
-      const e = src.indexOf("*/", i + 2);
-      i = e < 0 ? n : e + 2;
-      out += " ";
-    } else if (c === "/" && d === "/") {
-      const e = src.indexOf("\n", i);
-      i = e < 0 ? n : e;
-      out += " ";
-    } else if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < n && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      prev = c;
-    } else if (c === "/" && (prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev))) {
-      let j = i + 1;
-      let cls = false;
-      while (j < n && src[j] !== "\n" && (cls || src[j] !== "/")) {
-        if (src[j] === "\\") j++;
-        else if (src[j] === "[") cls = true;
-        else if (src[j] === "]") cls = false;
-        j++;
+  let src = "";
+  let code = "";
+  let unicodeEscape = false;
+  const emit = (text, blank = text) => {
+    src += text;
+    code += blank;
+  };
+  function template() {
+    emit("`");
+    i++;
+    while (i < n && input[i] !== "`") {
+      if (input[i] === "\\") {
+        emit(input.slice(i, i + 2), "");
+        i += 2;
+      } else if (input[i] === "$" && input[i + 1] === "{") {
+        emit("${");
+        i += 2;
+        codeMode(true);
+        if (input[i] === "}") {
+          emit("}");
+          i++;
+        }
+      } else {
+        emit(input[i], "");
+        i++;
       }
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      prev = "/";
-    } else {
-      out += c;
-      i++;
-      if (!/\s/.test(c)) prev = c;
+    }
+    if (i < n) emit("`");
+    i++;
+  }
+  function codeMode(nested) {
+    let prev = "";
+    let word = "";
+    let depth = 0;
+    while (i < n) {
+      const c = input[i];
+      const d = input[i + 1];
+      if (c === "/" && d === "*") {
+        const e = input.indexOf("*/", i + 2);
+        i = e < 0 ? n : e + 2;
+        emit(" ");
+      } else if (c === "/" && d === "/") {
+        const e = input.indexOf("\n", i);
+        i = e < 0 ? n : e;
+        emit(" ");
+      } else if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < n && input[j] !== c) j += input[j] === "\\" ? 2 : 1;
+        emit(input.slice(i, j + 1), c + c);
+        i = j + 1;
+        prev = c;
+        word = "";
+      } else if (c === "`") {
+        template();
+        prev = "`";
+        word = "";
+      } else if (c === "/" && (prev === "" || PUNCT.includes(prev) || REGEX_KEYWORDS.has(word))) {
+        let j = i + 1;
+        let cls = false;
+        while (j < n && input[j] !== "\n" && (cls || input[j] !== "/")) {
+          if (input[j] === "\\") j++;
+          else if (input[j] === "[") cls = true;
+          else if (input[j] === "]") cls = false;
+          j++;
+        }
+        emit(input.slice(i, j + 1), "/ /");
+        i = j + 1;
+        prev = "/";
+        word = "";
+      } else {
+        if (c === "}" && nested && depth === 0) return;
+        if (c === "{") depth++;
+        else if (c === "}") depth--;
+        else if (c === "\\") unicodeEscape = true;
+        emit(c);
+        i++;
+        if (/[\w$]/.test(c)) {
+          word = /[\w$]/.test(prev) ? word + c : c;
+          prev = c;
+        } else if (!/\s/.test(c)) {
+          word = "";
+          prev = c;
+        }
+      }
     }
   }
-  return out;
+  codeMode(false);
+  return { src, code, unicodeEscape };
 }
 
-/** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
+/** Replaces JS comments by a space, leaving string, template and regex literals intact. */
+export function stripComments(input) {
+  return scanSource(input).src;
+}
+
+/** Returns { specifiers, nonLiteralDynamic, src, code, unicodeEscape }. Only a single or double quoted
+ * literal is a literal import(). */
 export function scanImports(raw) {
-  const src = stripComments(raw);
+  const { src, code, unicodeEscape } = scanSource(raw);
   const specifiers = [];
   for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
   for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
   const nonLiteralDynamic = [...src.matchAll(DYNAMIC_ANY)].length > [...src.matchAll(DYNAMIC_LITERAL)].length;
-  return { specifiers, nonLiteralDynamic, src };
+  return { specifiers, nonLiteralDynamic, src, code, unicodeEscape };
 }
 
 // Constructs that reach a module, a code evaluator or a node API by a route the import scan cannot see.
@@ -98,7 +161,15 @@ const FORBIDDEN = [
   [new RegExp(String.raw`\beval${W}\(`), "eval()"],
   [/\bFunction\b/, "the Function constructor"],
   [new RegExp(String.raw`\b(?:globalThis|global|self|window|process)${W}(?:\?\.)?${W}\[`), "a bracket lookup on a global object"],
+  [/\b(?:eval|require|Function|AsyncFunction|GeneratorFunction|Reflect)\b/, "a banned bare identifier (eval, require, Function, AsyncFunction, GeneratorFunction, Reflect)"],
+  [new RegExp(String.raw`\.${W}constructor\b`), ".constructor"],
+  [new RegExp(String.raw`[{,]${W}constructor${W}[,}:=]`), "a destructured constructor"],
 ];
+// Rules that read the comment-stripped source, where a literal key is still visible.
+const FORBIDDEN_SRC = [[/\[\s*(["'`])constructor\1\s*\]/, "a [\"constructor\"] lookup"]];
+// The one legitimate use in generated jco glue (dist/js only): a literal-key read from the component state
+// object. A literal key cannot reach an arbitrary property, so it is removed before the identifier scan.
+const GENERATED_ALLOWED = ['Reflect.get(cstate, "callingSyncExport")'];
 const NODE_ONLY = [
   [/\bgetBuiltinModule\b/, "getBuiltinModule"],
   [/\bcreateRequire\b/, "createRequire"],
@@ -129,9 +200,13 @@ export function g2NoBareImport(ctx) {
   // Scripts: every file of host/ and dist/js/. A relative specifier must reach a regular script file in them.
   function checkScript(f, inNodeDir) {
     const rel = relative(ctx.root, f);
-    const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
+    let text = readFileSync(f, "utf8");
+    if (inside(jsDir, f)) for (const a of GENERATED_ALLOWED) text = text.replaceAll(a, "0");
+    const { specifiers, nonLiteralDynamic, src, code, unicodeEscape } = scanImports(text);
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
-    for (const [re, what] of FORBIDDEN) if (re.test(src)) return `${rel}: uses ${what}`;
+    if (unicodeEscape) return `${rel}: backslash escape outside a string literal`;
+    for (const [re, what] of FORBIDDEN) if (re.test(code)) return `${rel}: uses ${what}`;
+    for (const [re, what] of FORBIDDEN_SRC) if (re.test(src)) return `${rel}: uses ${what}`;
     if (!inNodeDir) for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: uses ${what} outside host/node/`;
     for (const s of specifiers) {
       if (isRelative(s)) {
@@ -433,6 +508,8 @@ export function g8ToolPins(ctx) {
   const staged = join(ctx.toolsDir, "npm", "package-lock.json");
   if (!existsSync(staged)) return "staged npm lockfile is missing";
   if (lockResolution(readJson(staged)) !== lockResolution(readJson(committed))) return "staged npm lockfile resolves differently from tools/package-lock.json";
+  const npm = npmProblem(join(ctx.toolsDir, "npm"), readJson(join(ctx.root, "tools", "package.json")).devDependencies);
+  if (npm) return npm;
   const nm = findNodeModules(ctx.root, ctx.root, []);
   if (nm.length) return `node_modules inside the repository: ${nm.join(", ")}`;
   return null;

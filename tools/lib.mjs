@@ -1,7 +1,7 @@
 // Shared helpers for the build tools. Node built-ins only.
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, existsSync, lstatSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, lstatSync, readlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,11 +56,77 @@ export function toolProblem(pin, tdir = toolsDir()) {
   return null;
 }
 
-/** Returns an error string when a pin is not an https URL with a sha256, else null. */
-export function pinsProblem(list) {
+const SAFE_PATH = (p) => typeof p === "string" && p !== "" && !p.startsWith("/") && p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..") && !/[\\\x00-\x1f]/.test(p);
+
+/** Returns an error string when a pin is unsafe, else null. The name, version and bin fields become path
+ * components, so they must hold no separator and no "..". Unless fieldsOnly (the SENTROPIC_PINS test hook),
+ * the url must be https and carry a sha256. */
+export function pinsProblem(list, { fieldsOnly = false } = {}) {
   for (const p of list) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p.name ?? "") || String(p.name).includes("..")) return `pin ${p.name} has an unsafe name`;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(p.version ?? "") || String(p.version).includes("..")) return `pin ${p.name} has an unsafe version`;
+    if (!SAFE_PATH(p.bin)) return `pin ${p.name} has an unsafe bin path`;
+    if (fieldsOnly) continue;
     if (!/^https:\/\/[^/\s]+\//.test(p.url ?? "")) return `pin ${p.name} does not use an https:// URL`;
     if (!/^[0-9a-f]{64}$/.test(p.sha256 ?? "")) return `pin ${p.name} has no valid sha256`;
+  }
+  return null;
+}
+
+/** Lists a tar.gz archive BEFORE it is extracted. Returns an error string or null: only regular files and
+ * directories, no absolute path, no ".." segment. */
+export function tarProblem(archive) {
+  const names = tryRun("tar", ["-tzf", archive]);
+  const verbose = tryRun("tar", ["-tvzf", archive]);
+  if (names.status !== 0 || verbose.status !== 0) return `cannot list archive: ${(names.stderr || verbose.stderr).trim()}`;
+  for (const line of verbose.stdout.split("\n")) {
+    if (line && line[0] !== "-" && line[0] !== "d") return `archive holds a non-regular entry (type ${line[0]}): ${line}`;
+  }
+  for (const name of names.stdout.split("\n")) {
+    if (!name) continue;
+    if (name.startsWith("/") || name.split("/").includes("..")) return `archive holds an unsafe path: ${name}`;
+  }
+  return null;
+}
+
+/** Path -> sha256 (files) or "link:<target>" (symbolic links) for a whole tree, sorted. */
+export function treeManifest(dir) {
+  const map = {};
+  const visit = (d) => {
+    for (const name of readdirSync(d).sort()) {
+      const p = join(d, name);
+      const st = lstatSync(p);
+      const rel = p.slice(dir.length + 1);
+      if (st.isSymbolicLink()) map[rel] = `link:${readlinkSync(p)}`;
+      else if (st.isDirectory()) visit(p);
+      else map[rel] = sha256File(p);
+    }
+  };
+  if (existsSync(dir)) visit(dir);
+  return map;
+}
+
+export const NPM_MANIFEST = ".node_modules.manifest.json";
+
+/** Returns an error string when the staged npm tree is not the one written at install, else null: the
+ * installed versions match the wanted ones and every file of node_modules matches the recorded hash. */
+export function npmProblem(npmDir, want) {
+  for (const [name, version] of Object.entries(want)) {
+    try {
+      if (readJson(join(npmDir, "node_modules", ...name.split("/"), "package.json")).version !== version) return `npm package ${name} is not at ${version}`;
+    } catch {
+      return `npm package ${name} is not installed`;
+    }
+  }
+  let recorded;
+  try {
+    recorded = readJson(join(npmDir, NPM_MANIFEST));
+  } catch {
+    return "staged node_modules has no file-hash manifest";
+  }
+  const now = treeManifest(join(npmDir, "node_modules"));
+  for (const k of new Set([...Object.keys(recorded), ...Object.keys(now)])) {
+    if (recorded[k] !== now[k]) return `staged node_modules differs from the install manifest at ${k}`;
   }
   return null;
 }

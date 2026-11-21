@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -57,7 +57,7 @@ test("an archive holding a symbolic link is refused and leaves no marker", () =>
   const f = fixture(undefined, { symlink: true });
   const r = run(f);
   assert.notEqual(r.status, 0);
-  assert.match(r.stdout, /symbolic links/);
+  assert.match(r.stdout, /non-regular entry/);
   assert.equal(existsSync(f.marker), false);
 });
 
@@ -77,4 +77,75 @@ test("a committed pin that is not https is refused outside the test hook", () =>
   const r = run(f);
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /url is not https/);
+});
+
+function rawArchive(name, build, tarArgs = []) {
+  const dir = scratch(name);
+  const src = join(dir, "src");
+  mkdirSync(join(src, "toolpkg"), { recursive: true });
+  writeFileSync(join(src, "toolpkg", "tool"), "#!/bin/sh\n");
+  build(src, dir);
+  const archive = join(dir, "toolpkg.tar.gz");
+  assert.equal(spawnSync("tar", ["-czf", archive, ...tarArgs, "-C", src, "."]).status, 0);
+  return { dir, archive };
+}
+
+function fixtureFrom(archive, dir, extra = {}) {
+  const pin = { name: "faketool", version: "1.0.0", url: pathToFileURL(archive).href, sha256: sha256File(archive), bin: "tool", ...extra };
+  const pinsFile = join(dir, "pins.json");
+  writeFileSync(pinsFile, JSON.stringify({ tools: [pin] }));
+  const tools = join(dir, "tools");
+  return { dir, pinsFile, tools, marker: join(tools, "faketool-1.0.0", ".verified") };
+}
+
+test("an archive holding a hard link, a fifo or a path with .. is refused before extraction", () => {
+  const cases = {
+    hardlink: (src) => linkSync(join(src, "toolpkg", "tool"), join(src, "toolpkg", "hard")),
+    fifo: (src) => assert.equal(spawnSync("mkfifo", [join(src, "toolpkg", "fifo")]).status, 0),
+  };
+  for (const [name, build] of Object.entries(cases)) {
+    const a = rawArchive(`fetch-${name}`, build);
+    const f = fixtureFrom(a.archive, a.dir);
+    const r = run(f);
+    assert.notEqual(r.status, 0, name);
+    assert.match(r.stdout, /non-regular entry/, name);
+    assert.equal(existsSync(join(f.tools, "faketool-1.0.0")), false, `${name}: nothing extracted`);
+  }
+  const a = rawArchive("fetch-dotdot", () => {}, ["--transform", "s|^\\./toolpkg|../escape|"]);
+  const f = fixtureFrom(a.archive, a.dir);
+  const r = run(f);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /unsafe path/);
+  assert.equal(existsSync(join(a.dir, "tools", "escape")), false);
+});
+
+test("an archive with an absolute path is refused before extraction", () => {
+  const a = rawArchive("fetch-abs", () => {}, ["-P", "--transform", "s|^\\./toolpkg|/abs-escape|"]);
+  const f = fixtureFrom(a.archive, a.dir);
+  const r = run(f);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /unsafe path/);
+  assert.equal(existsSync(f.marker), false);
+});
+
+test("a pin with an unsafe name, version or bin is refused even under the test hook", () => {
+  const a = rawArchive("fetch-pin", () => {});
+  for (const bad of [{ name: "../evil" }, { version: "1/../2" }, { bin: "../tool" }, { bin: "/bin/sh" }]) {
+    const f = fixtureFrom(a.archive, a.dir, bad);
+    const r = run(f);
+    assert.notEqual(r.status, 0, JSON.stringify(bad));
+    assert.match(r.stdout, /unsafe/);
+  }
+});
+
+test("build.mjs scrubs SENTROPIC_PINS before it verifies the tools", () => {
+  const a = rawArchive("fetch-scrub", () => {});
+  const f = fixtureFrom(a.archive, a.dir);
+  // The ambient pin file names an unverified tool in an empty tools dir; if it leaked into the offline
+  // verification the build would stop, but the real pins are verified in the real tools dir.
+  const r = spawnSync("node", [join(repoRoot, "tools", "build.mjs"), "--check-bindings"], {
+    encoding: "utf8",
+    env: { ...process.env, SENTROPIC_PINS: f.pinsFile },
+  });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
 });
