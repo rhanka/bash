@@ -23,10 +23,17 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
   - `LICENSE`, `.githooks/**`, `rules/**`, `.track/**`, `harness.profile.json`
   - `Makefile`, `package.json`, `.github/workflows/**`, `Cargo.toml`
   - `kernel/src/mem/**`, the rest of `spec/**` and `plan/**`
-- **Conditional Paths**: none. No scope exception is needed.
+- **Conditional Paths**: `kernel/src/mem/mod.rs` (additive only), under exception `BR-L1b-EX1` below.
 
 ## Feedback Loop
-- none.
+- **BR-L1b-EX1** — `kernel/src/mem/mod.rs` gains a small `pub mod abi` that re-exports `Vec`, `String`, `vec!` and the
+  allocator entry points.
+  - Rationale: main hardened G6 (alloc paths allowed only in `kernel/src/mem/` and the declared bindings
+    directory) and the bindings check (that directory holds exactly the generated `kernel.rs`). The hand-written
+    glue (`kernel/src/glue/`) names the heap types of the generated traits, and the generated `_rt` module is
+    private, so `mem` is the one place that may expose them.
+  - Impact: purely additive, no behaviour change; L1a-2 rewrites `mem/mod.rs`, so the merge keeps this block.
+  - Rollback: remove the `abi` module and move the glue back under a declared bindings directory.
 
 ## Plan / Todo (lot-based)
 - [x] **Lot 0 — Baseline**: BRANCH.md, lot spec

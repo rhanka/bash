@@ -19,14 +19,14 @@ export function declaredBindingDirs(root = repoRoot) {
 
 /** Returns the problems found in one source file (`rel` is its path relative to kernel/src/). */
 export function unsafeProblems(rel, src, bindingDirs = declaredBindingDirs()) {
-  const inMem = rel.startsWith("mem/");
+  const inMem = rel.startsWith("mem/") || rel.startsWith("glue/");
   const inBindings = bindingDirs.some((d) => rel.startsWith(d));
   const lines = src.split("\n");
   const problems = [];
   lines.forEach((line, i) => {
     if (!UNSAFE.test(line)) return;
     if (!inMem && !inBindings) {
-      problems.push(`${rel}:${i + 1}: the word unsafe outside kernel/src/mem/ and kernel/src/bindings/`);
+      problems.push(`${rel}:${i + 1}: the word unsafe outside kernel/src/mem/, kernel/src/glue/ and the declared bindings dirs`);
       return;
     }
     // A declaration `unsafe fn` states a caller obligation, it is not an unsafe block.

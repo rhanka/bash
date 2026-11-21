@@ -1,7 +1,7 @@
 //! Runtime of the generated glue (EVOL D16): the few items `wit-bindgen` expects from its runtime path,
 //! written here so that no crate is needed. Everything goes through the global allocator, which is
 //! `kernel::mem`.
-use alloc::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use crate::mem::abi::{alloc, dealloc, handle_alloc_error, Layout};
 
 /// A resource implemented by this component. `Rep` is how the value is stored behind the handle.
 pub trait Resource: Sized + 'static {

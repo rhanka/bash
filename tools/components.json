@@ -18,9 +18,9 @@
         "args": [
           "--std-feature",
           "--runtime-path",
-          "crate::bindings::rt",
+          "crate::glue::rt",
           "--bitflags-path",
-          "crate::bindings::rt::bitflags",
+          "crate::glue::rt::bitflags",
           "--disable-custom-section-link-helpers"
         ]
       }
