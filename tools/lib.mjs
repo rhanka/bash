@@ -136,8 +136,12 @@ export function lockProblem(lock, manifest) {
   return null;
 }
 
+/** Returns the import lines of wasm-tools text output: only lines that start with `(import`. */
+export function importLines(text) {
+  return text.split("\n").filter((l) => /^\s*\(import\b/.test(l)).map((l) => l.trim());
+}
+
 /** Returns the `(import` lines of a core module as printed by wasm-tools (empty when it has none). */
 export function coreImports(path, tdir = toolsDir(), root = repoRoot) {
-  const text = run(toolBin("wasm-tools", tdir, root), ["print", path], { maxBuffer: 1 << 28 });
-  return text.split("\n").filter((l) => /\(import\b/.test(l)).map((l) => l.trim());
+  return importLines(run(toolBin("wasm-tools", tdir, root), ["print", path], { maxBuffer: 1 << 28 }));
 }
