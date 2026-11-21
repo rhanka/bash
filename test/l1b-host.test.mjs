@@ -61,6 +61,27 @@ test("gate 20: the browser entry's import graph has no node: import (G2)", () =>
   assert.equal(g2NoBareImport(ctx), null);
 });
 
+test("browser compilation retries after failure and accepts wasm served with another MIME type", async () => {
+  const { Bash } = await import("../host/browser.js?precompile-retry");
+  const b = new Bash({ files: { "/staged": "replayed" } });
+  let fetched = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetched++;
+    return new Response("invalid wasm", { headers: { "Content-Type": "application/wasm" } });
+  };
+  try {
+    await assert.rejects(b.readFile("/staged"), WebAssembly.CompileError);
+    assert.equal(fetched, 1);
+    const core = readFileSync(new URL("../dist/js/kernel/kernel.core.wasm", import.meta.url));
+    const good = new Response(core, { headers: { "Content-Type": "Application/Wasm" } });
+    await Bash.precompile(Promise.resolve(good));
+    assert.equal(await b.readFile("/staged"), "replayed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("gate 1: both components have zero imports and conform to the committed WIT", () => {
   const ctx = { root: repoRoot, out: join(repoRoot, "dist"), toolsDir: toolsDir() };
   assert.ok(existsSync(join(ctx.out, "kernel.component.wasm")));
