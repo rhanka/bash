@@ -136,6 +136,15 @@ impl<T: super::TryClone> super::TryClone for KBox<T> {
 /// assert_eq!(format!("{:?}", &*d), "5");
 /// ```
 ///
+/// The target is a single type, so tokens cannot be injected:
+///
+/// ```compile_fail
+/// use sentropic_bash_kernel::mem::{Budget, KBox, LimitId};
+/// let budget = Budget::root(LimitId(1), 1 << 20).unwrap();
+/// let b = KBox::try_new_in(5u8, &budget).unwrap();
+/// let _wrong = sentropic_bash_kernel::kbox_unsize!(b, u64 = core::ptr::null_mut(); let _);
+/// ```
+///
 /// A reinterpreting cast is rejected at compile time:
 ///
 /// ```compile_fail
@@ -153,9 +162,9 @@ impl<T: super::TryClone> super::TryClone for KBox<T> {
 /// ```
 #[macro_export]
 macro_rules! kbox_unsize {
-    ($boxed:expr, $($target:tt)+) => {{
+    ($boxed:expr, $target:ty) => {{
         let (raw, budget) = $crate::mem::KBox::into_raw($boxed);
-        let coerced: *mut $($target)+ = raw;
+        let coerced: *mut $target = raw;
         // SAFETY: `raw` and `budget` come straight from `into_raw`, and the unsizing coercion keeps the
         // address and the allocation layout (the size is read back with `Layout::for_value`).
         unsafe { $crate::mem::KBox::from_raw(coerced, budget) }
