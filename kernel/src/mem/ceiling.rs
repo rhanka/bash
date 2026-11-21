@@ -90,13 +90,15 @@ fn reserve(delta: u64) -> bool {
             _ => return false,
         };
         match USED.compare_exchange_weak(cur, next, Relaxed, Relaxed) {
-            Ok(_) => {
-                HIGH_WATER.fetch_max(next, Relaxed);
-                return true;
-            }
+            Ok(_) => return true,
             Err(seen) => cur = seen,
         }
     }
+}
+
+/// Records the peak once the inner allocator has served the request (a refusal never counts).
+fn commit() {
+    HIGH_WATER.fetch_max(USED.load(Relaxed), Relaxed);
 }
 
 fn unreserve(delta: u64) {
@@ -104,7 +106,7 @@ fn unreserve(delta: u64) {
 }
 
 /// The allocator wrapper: counts live bytes and refuses an allocation that would pass the ceiling.
-pub struct Ceiling<A>(pub A);
+pub(crate) struct Ceiling<A>(pub(crate) A);
 
 // SAFETY: every method forwards to the inner allocator with unchanged arguments, so the inner allocator's
 // contract is the one callers rely on; the wrapper only adds counting and refusing (returning null).
@@ -118,6 +120,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Ceiling<A> {
         let p = unsafe { self.0.alloc(layout) };
         if p.is_null() {
             unreserve(n);
+        } else {
+            commit();
         }
         p
     }
@@ -131,6 +135,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Ceiling<A> {
         let p = unsafe { self.0.alloc_zeroed(layout) };
         if p.is_null() {
             unreserve(n);
+        } else {
+            commit();
         }
         p
     }
@@ -155,6 +161,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Ceiling<A> {
             }
         } else if new < old {
             unreserve(old - new);
+        } else {
+            commit();
         }
         p
     }
