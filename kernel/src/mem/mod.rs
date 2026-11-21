@@ -26,7 +26,7 @@ mod vec;
 
 pub use boxed::KBox;
 pub use budget::Budget;
-pub use ceiling::{configure, raise_ceiling, usage, Ceiling, ConfigError, Usage};
+pub use ceiling::{configure, raise_ceiling, usage, ConfigError, Usage};
 pub use clone::TryClone;
 pub use error::{LimitId, MemError, MemResult};
 pub use map::KMap;
@@ -50,7 +50,7 @@ const fn inner() -> Inner {
 }
 
 #[global_allocator]
-static ALLOCATOR: Ceiling<Inner> = Ceiling(inner());
+static ALLOCATOR: ceiling::Ceiling<Inner> = ceiling::Ceiling(inner());
 
 /// Test support, native target only: process-wide state cannot be reset by the public interface.
 #[cfg(not(target_arch = "wasm32"))]

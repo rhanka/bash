@@ -62,9 +62,26 @@ fn ceiling() {
     assert!(last > 0);
     drop(w);
 
+    inner_refusal_keeps_high_water();
+
     transfer();
     drop(b);
     assert_eq!(usage().used, base, "no leak");
+}
+
+/// The inner allocator refusing (here: the system allocator cannot serve 2^62 bytes) must not inflate
+/// `high_water` above the peak of `used`.
+fn inner_refusal_keeps_high_water() {
+    testing::reset(u64::MAX);
+    let b = root(52, u64::MAX);
+    let before = usage();
+    let mut v: KVec<u8> = KVec::new_in(&b);
+    assert_eq!(v.try_reserve_exact(1 << 62), Err(MemError::Ceiling));
+    assert_eq!(b.used(), 0);
+    let after = usage();
+    assert_eq!(after.used, before.used);
+    assert_eq!(after.high_water, before.high_water, "a refused allocation is not a peak");
+    testing::reset(BIG);
 }
 
 fn transfer() {
