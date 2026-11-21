@@ -121,6 +121,12 @@ fn budgets() {
             }
             Ok(Box::new(s))
         });
+        for len in 1..=3usize {
+            let tiny = root(96, len as u64);
+            let s = KString::try_from_str_in(&"q".repeat(len), &tiny).expect("a short text fits exactly its length");
+            assert_eq!(tiny.used(), len as u64);
+            drop(s);
+        }
         exact("KString from_str", nb, |b| KString::try_from_str_in(&"z".repeat(n), b).map(|s| Box::new(s) as Box<dyn Any>));
 
         // KBox<[u8; 64]> and KRc<[u8; 64]>: n of them.
@@ -153,8 +159,25 @@ fn budgets() {
             Ok(Box::new(kept))
         });
 
-        // KMap<u32, u32>.
-        exact("KMap<u32,u32>", nb * 8, |b| {
+        // KMap<u32, u32>: the exact need is probed (entry overhead depends on the map layout), and is at
+        // least the payload.
+        let fill = |cap: u64| -> bool {
+            let p = root(97, cap);
+            let mut m: KMap<u32, u32> = KMap::new_in(&p);
+            (0..n as u32).all(|i| m.try_insert(i.wrapping_mul(2654435761), i).is_ok())
+        };
+        let (mut lo, mut hi) = (0u64, BIG);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if fill(mid) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let map_need = lo;
+        assert!(map_need >= nb * 8, "an entry holds at least its key and value");
+        exact("KMap<u32,u32>", map_need, |b| {
             let mut m: KMap<u32, u32> = KMap::new_in(b);
             for i in 0..n as u32 {
                 let snap = (m.len(), b.used());
