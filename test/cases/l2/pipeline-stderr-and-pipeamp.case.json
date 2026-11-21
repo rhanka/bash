@@ -1,0 +1,9 @@
+{
+  "id": "l2/pipeline-stderr-and-pipeamp",
+  "steps": [
+    {
+      "script": "missing_cmd |& echo caught\necho status=$?"
+    }
+  ],
+  "title": "Pipeline stderr and pipeamp"
+}
