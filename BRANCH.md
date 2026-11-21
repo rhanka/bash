@@ -4,7 +4,7 @@
 Close the residual holes found by the adversarial review of PR #6 in the L0 tooling now on main: the G2 comment stripper and evaluator bypasses (finding 2) and the tool supply-chain / G8 gaps (finding 5).
 
 ## Scope / Guardrails
-- Scope limited to tools/, test/ and this file.
+- Scope limited to tools/, test/, plan/reports/ and this file.
 - Make-only workflow; branch work in worktree `tmp/tools-hardening`.
 - Commits via `make commit`; no AI/agent attribution (hook + CI).
 - Zero Python. All new text in English.
@@ -13,6 +13,7 @@ Close the residual holes found by the adversarial review of PR #6 in the L0 tool
 - **Allowed Paths (implementation scope)**:
   - `tools/**`
   - `test/**`
+  - `plan/reports/**`
   - `BRANCH.md`
 - **Forbidden Paths (must not change in this branch)**:
   - `Makefile`
