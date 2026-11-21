@@ -28,7 +28,7 @@ impl BumpState {
     /// Returns the address of a block of `size` bytes aligned to `align`, or 0 when the region would pass
     /// `ceiling` bytes (rounded down to whole pages) or the engine refuses to grow.
     pub(crate) fn alloc<P: Pages>(&self, src: &P, size: usize, align: usize, ceiling: u64) -> usize {
-        let max_pages = (ceiling / PAGE as u64).min(usize::MAX as u64) as usize;
+        let max_pages = (ceiling / PAGE as u64).min((usize::MAX / PAGE) as u64) as usize;
         loop {
             let cur = self.cur.load(Relaxed);
             let end = self.end.load(Relaxed);
@@ -51,17 +51,20 @@ impl BumpState {
             }
             let Some(old_pages) = src.grow(want) else { return 0 };
             self.pages.store(total + want, Relaxed);
+            let grown = want.saturating_mul(PAGE);
             if old_pages == 0 {
-                // Page 0 starts at address 0, which is the refusal value: leave it unused and ask again
-                // (the pages already obtained count against the ceiling, so this terminates).
+                // Page 0 starts at address 0, which is the refusal value: keep the other grown pages and
+                // skip only page 0 (the region is empty when `want == 1`, and the loop asks again).
+                self.cur.store(PAGE, Relaxed);
+                self.end.store(grown, Relaxed);
                 continue;
             }
-            let old_addr = old_pages * PAGE;
+            let Some(old_addr) = old_pages.checked_mul(PAGE) else { return 0 };
             if old_addr != end {
                 // Someone else grew the memory: the new region is not contiguous with the old one.
                 self.cur.store(old_addr, Relaxed);
             }
-            self.end.store(old_addr + want * PAGE, Relaxed);
+            self.end.store(old_addr.saturating_add(grown), Relaxed);
         }
     }
 
@@ -164,7 +167,7 @@ mod tests {
     impl Pages for Fake {
         fn grow(&self, n: usize) -> Option<usize> {
             let old = self.pages.get();
-            if old + n > self.limit {
+            if old.checked_add(n)? > self.limit {
                 return None;
             }
             self.pages.set(old + n);
@@ -272,6 +275,26 @@ mod tests {
         // The foreign page 3 must stay outside the free range [cur, end).
         let (cur, end) = (b.cur.load(Relaxed), b.end.load(Relaxed));
         assert!(cur >= 4 * PAGE && cur < end, "the free range [{cur}, {end}) spans the foreign page");
+    }
+
+    #[test]
+    fn page_zero_skip_keeps_the_other_grown_pages() {
+        let m = fake(0, 100);
+        let b = BumpState::new();
+        let a = b.alloc(&m, 3 * PAGE, 8, BIG);
+        assert_eq!(a, PAGE, "only page 0 is skipped");
+        assert_eq!(m.pages.get(), 4, "a single grow of four pages, none discarded");
+    }
+
+    #[test]
+    fn the_end_of_a_region_at_the_top_of_the_address_space_does_not_overflow() {
+        let top = usize::MAX / PAGE;
+        let m = fake(top, usize::MAX);
+        let b = BumpState::new();
+        // Must neither panic (debug overflow) nor wrap the end to a small value.
+        let a = b.alloc(&m, 8, 8, u64::MAX);
+        assert!(a == 0 || a >= top * PAGE);
+        assert_eq!(BumpState::new().alloc(&fake(usize::MAX, usize::MAX), 8, 8, u64::MAX), 0, "address overflow is a refusal");
     }
 
     #[test]
