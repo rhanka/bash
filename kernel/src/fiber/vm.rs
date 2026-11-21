@@ -1,5 +1,5 @@
 //! Non-recursive execution. A frame schedules at most one child before returning to the dispatch loop.
-use super::expand::Expander;
+use super::expand::{Argument, Delimiters, Expander, Scalar, BYTE_CHUNK};
 use super::syntax::{assignment, Command, Link, PartKind, Pipe, Span};
 use super::*;
 use crate::cmd::{coverage_id, CommandSpec, COVERAGE_FEATURES};
@@ -8,6 +8,7 @@ use crate::mem::KMap;
 
 pub(super) struct Vm {
     frames: KVec<Frame>,
+    simple: Option<Simple>,
     functions: KMap<KBytes, u32>,
     command_count: u64,
     call_depth: u64,
@@ -19,6 +20,7 @@ impl Vm {
     pub fn new(live: &Budget) -> Self {
         Self {
             frames: KVec::new_in(live),
+            simple: None,
             functions: KMap::new_in(live),
             command_count: 0,
             call_depth: 0,
@@ -63,6 +65,28 @@ struct Undo {
     previous: Option<(KBytes, bool)>,
 }
 
+struct Simple {
+    entered: bool,
+    word: usize,
+    scalar: Option<Scalar>,
+    arg: Option<Argument>,
+    name: Option<KBytes>,
+    args: KVec<KBytes>,
+    undo: KVec<Undo>,
+    delims: Delimiters,
+    last_arg: KBytes,
+    dispatch_ready: bool,
+    path: PathSearch,
+}
+
+#[derive(Default)]
+struct PathSearch {
+    started: bool,
+    start: usize,
+    end: usize,
+    candidate: Option<(core::ops::Range<usize>, usize)>,
+}
+
 impl Fiber {
     pub(super) fn start_vm(&mut self, entry: Option<u32>) -> Result<(), Fail> {
         if let Some(term) = entry {
@@ -77,8 +101,8 @@ impl Fiber {
         let ast = &program.ast;
         while let Some(frame) = self.vm.frames.pop() {
             match frame {
-                Frame::StmtList { term, top } => {
-                    let term = ast.terms[term as usize];
+                Frame::StmtList { term: term_id, top } => {
+                    let term = ast.terms[term_id as usize];
                     let run = match term.link {
                         Link::And => self.last_exit == 0,
                         Link::Or => self.last_exit != 0,
@@ -95,6 +119,12 @@ impl Fiber {
                             input: None,
                         })?;
                     } else {
+                        if !self.tick() {
+                            self.vm
+                                .frames
+                                .try_push(Frame::StmtList { term: term_id, top })?;
+                            return Ok(Some(Step::OutOfFuel));
+                        }
                         self.end_term(program, term.next, top)?;
                     }
                 }
@@ -105,11 +135,10 @@ impl Fiber {
                     self.end_term(program, next, top)?;
                 }
                 Frame::Pipeline { stage, input } => {
-                    if self.fuel == 0 {
+                    if !self.take_fuel() {
                         self.vm.frames.try_push(Frame::Pipeline { stage, input })?;
                         return Ok(Some(Step::OutOfFuel));
                     }
-                    self.fuel -= 1;
                     if self.vm.command_count >= self.shell.lim.vals[I_COMMAND_COUNT] {
                         return Err(Fail::CommandCount);
                     }
@@ -163,9 +192,30 @@ impl Fiber {
                     }
                 }
                 Frame::SimpleCmd(words, first_arg) => {
-                    let flow = match self.simple(program, words, first_arg as usize) {
-                        Ok(flow) => flow,
+                    let mut simple = self.vm.simple.take().unwrap_or_else(|| Simple {
+                        entered: false,
+                        word: words.range().start,
+                        scalar: None,
+                        arg: None,
+                        name: None,
+                        args: KVec::new_in(&self.live),
+                        undo: KVec::new_in(&self.live),
+                        delims: Delimiters::new(),
+                        last_arg: KBytes::new_in(&self.live),
+                        dispatch_ready: false,
+                        path: PathSearch::default(),
+                    });
+                    let flow = match self.simple(program, words, first_arg as usize, &mut simple) {
+                        Ok(Some(flow)) => flow,
+                        Ok(None) => {
+                            self.vm.simple = Some(simple);
+                            self.vm
+                                .frames
+                                .try_push(Frame::SimpleCmd(words, first_arg))?;
+                            return Ok(Some(Step::OutOfFuel));
+                        }
                         Err(Fail::BadSubstitution(inner)) => {
+                            self.restore_after_command(&mut simple)?;
                             self.command_error(&inner, b"bad substitution", 1)?;
                             Flow::Next
                         }
@@ -187,7 +237,12 @@ impl Fiber {
                     }
                 }
                 Frame::Restore(mut undo) => {
-                    while let Some(Undo { name, previous }) = undo.pop() {
+                    while !undo.is_empty() {
+                        if !self.tick() {
+                            self.vm.frames.try_push(Frame::Restore(undo))?;
+                            return Ok(Some(Step::OutOfFuel));
+                        }
+                        let Undo { name, previous } = undo.pop().expect("nonempty undo stack");
                         if let Some((value, exported)) = previous {
                             self.env.set_owned(&name, value, exported)?;
                         } else {
@@ -272,26 +327,48 @@ impl Fiber {
         }
     }
 
-    fn simple(&mut self, program: &Program, words: Span, first_arg: usize) -> Result<Flow, Fail> {
-        self.hit("bash:cmd:SimpleCommand")?;
+    fn restore_after_command(&mut self, simple: &mut Simple) -> Result<(), Fail> {
+        if !simple.undo.is_empty() {
+            let undo = core::mem::replace(&mut simple.undo, KVec::new_in(&self.live));
+            self.vm.frames.try_push(Frame::Restore(undo))?;
+        }
+        Ok(())
+    }
+
+    fn simple(
+        &mut self,
+        program: &Program,
+        words: Span,
+        first_arg: usize,
+        s: &mut Simple,
+    ) -> Result<Option<Flow>, Fail> {
         let range = words.range();
         let has_command = first_arg < range.end;
-        let mut undo = KVec::new_in(&self.live);
-        let mut assignment_error = None;
-        for i in range.start..first_arg {
-            let word = program.ast.word(i);
+        if !s.entered {
+            self.hit("bash:cmd:SimpleCommand")?;
+            s.entered = true;
+        }
+        while s.word < first_arg {
+            let word = program.ast.word(s.word);
             let (name, append, from) =
                 assignment(word, &program.source).expect("parsed assignment");
             let name = name.get(&program.source);
             if readonly(name) {
+                if !self.tick() {
+                    return Ok(None);
+                }
                 if !has_command {
                     return Err(Fail::Readonly(bytes_in(name, &self.live)?));
                 }
                 self.write_error(name, b"readonly variable")?;
+                s.word += 1;
                 continue;
             }
             let previous = self.env.get(name);
-            let value = self.expander(program).scalar(
+            let ex = self.expander(program);
+            let scalar = s.scalar.get_or_insert_with(|| Scalar::new(&ex));
+            let value = scalar.run(
+                &ex,
                 word,
                 from,
                 if append {
@@ -299,108 +376,144 @@ impl Fiber {
                 } else {
                     b""
                 },
-            );
-            let value = match value {
-                Ok(value) => value,
-                Err(fail @ Fail::BadSubstitution(_)) => {
-                    assignment_error = Some(fail);
-                    break;
-                }
-                Err(fail) => return Err(fail),
-            };
-            if has_command && !undo.iter().any(|e: &Undo| e.name.as_slice() == name) {
-                undo.try_push(Undo {
+            )?;
+            let Some(value) = value else { return Ok(None) };
+            s.scalar = None;
+            let exported = has_command || previous.is_some_and(|e| e.exported);
+            let previous = self.env.replace_owned(name, value, exported)?;
+            if has_command && !s.undo.iter().any(|e| e.name.as_slice() == name) {
+                s.undo.try_push(Undo {
                     name: bytes_in(name, &self.live)?,
-                    previous: previous
-                        .map(|e| Ok::<_, MemError>((e.value.try_clone()?, e.exported)))
-                        .transpose()?,
+                    previous,
                 })?;
             }
-            let exported = has_command || previous.is_some_and(|e| e.exported);
-            self.env.set_owned(name, value, exported)?;
-        }
-        if !undo.is_empty() {
-            self.vm.frames.try_push(Frame::Restore(undo))?;
-        }
-        if let Some(error) = assignment_error {
-            return Err(error);
+            s.word += 1;
         }
         if !has_command {
             self.last_arg = KBytes::new_in(&self.live);
             self.last_exit = 0;
-            return Ok(Flow::Next);
+            return Ok(Some(Flow::Next));
         }
 
         let word = program.ast.word(first_arg);
-        let mut name = self.expander(program).scalar(word, word.text.start, b"")?;
-        let mut args = KVec::new_in(&self.live);
-        for i in first_arg + 1..range.end {
-            let word = program.ast.word(i);
-            self.hit("bash:expansion:word_glob")?;
-            let (split, positional) = self.expander(program).splitting(word);
-            if split && !positional {
-                self.hit("bash:expansion:word_split")?;
+        if s.word == first_arg {
+            let ex = self.expander(program);
+            let scalar = s.scalar.get_or_insert_with(|| Scalar::new(&ex));
+            let Some(name) = scalar.run(&ex, word, word.text.start, b"")? else {
+                return Ok(None);
+            };
+            s.scalar = None;
+            s.name = Some(name);
+            s.word += 1;
+        }
+        while s.word < range.end {
+            let word = program.ast.word(s.word);
+            if s.arg.is_none() {
+                self.hit("bash:expansion:word_glob")?;
+                let (split, positional) = self.expander(program).splitting(word);
+                if split && !positional {
+                    self.hit("bash:expansion:word_split")?;
+                }
+                s.arg = Some(Argument::new(&self.expander(program), word, split));
             }
-            self.expander(program).args(word, &mut args)?;
-        }
-        let elide = name.is_empty()
-            && !program.ast.parts[word.parts.range()].is_empty()
-            && program.ast.parts[word.parts.range()]
-                .iter()
-                .all(|p| p.kind == PartKind::Param);
-        if args.len() as u64 + self.args.len() as u64 > self.shell.lim.vals[I_ARRAY_ELEMENTS] {
-            return Err(Fail::Arguments);
-        }
-        if !self.args.is_empty() {
-            let mut appended = core::mem::replace(&mut self.args, KVec::new_in(&self.live));
-            args.try_reserve_exact(appended.len())?;
-            for value in appended.as_mut_slice() {
-                args.try_push(core::mem::replace(value, KBytes::new_in(&self.live)))?;
+            let arg = s.arg.as_mut().expect("argument expansion started");
+            if !arg.run(&self.expander(program), word, &mut s.delims, &mut s.args)? {
+                return Ok(None);
             }
+            s.arg = None;
+            s.word += 1;
         }
-        if elide {
-            if args.is_empty() {
-                self.last_arg = KBytes::new_in(&self.live);
-                self.last_exit = 0;
-                return Ok(Flow::Next);
+        if !s.dispatch_ready {
+            let name = s.name.as_mut().expect("command word expanded");
+            let elide = name.is_empty()
+                && !program.ast.parts[word.parts.range()].is_empty()
+                && program.ast.parts[word.parts.range()]
+                    .iter()
+                    .all(|p| p.kind == PartKind::Param);
+            if s.args.len() as u64 + self.args.len() as u64 > self.shell.lim.vals[I_ARRAY_ELEMENTS]
+            {
+                return Err(Fail::Arguments);
             }
-            name = args.remove(0);
+            if !self.args.is_empty() {
+                let mut appended = core::mem::replace(&mut self.args, KVec::new_in(&self.live));
+                s.args.try_reserve_exact(appended.len())?;
+                for value in appended.as_mut_slice() {
+                    s.args
+                        .try_push(core::mem::replace(value, KBytes::new_in(&self.live)))?;
+                }
+            }
+            self.restore_after_command(s)?;
+            if elide {
+                if s.args.is_empty() {
+                    self.last_arg = KBytes::new_in(&self.live);
+                    self.last_exit = 0;
+                    return Ok(Some(Flow::Next));
+                }
+                s.name = Some(s.args.remove(0));
+            }
+            s.dispatch_ready = true;
         }
-        self.vm.frames.try_push(Frame::SetLastArg(bytes_in(
-            args.last().unwrap_or(&name),
-            &self.live,
-        )?))?;
-        self.dispatch(&name, args)
+
+        let name = s.name.as_ref().expect("command word expanded");
+        let last_arg = s.args.last().unwrap_or(name);
+        s.last_arg
+            .try_reserve_exact(last_arg.len() - s.last_arg.len())?;
+        while s.last_arg.len() < last_arg.len() {
+            if !self.tick() {
+                return Ok(None);
+            }
+            let start = s.last_arg.len();
+            s.last_arg.try_extend_from_slice(
+                &last_arg[start..(start + BYTE_CHUNK).min(last_arg.len())],
+            )?;
+        }
+        self.dispatch(name, &mut s.args, &mut s.last_arg, &mut s.path)
     }
 
-    fn dispatch(&mut self, name: &[u8], args: KVec<KBytes>) -> Result<Flow, Fail> {
-        if name.contains(&b'/') {
-            let path = self.resolve_path(&self.cwd, name)?;
-            return self.explicit_path(name, &path, args);
-        }
-        if self.shell.coverage {
-            const BUILTINS: core::ops::Range<usize> = 12..71;
-            if let Some(id) = BUILTINS
-                .clone()
-                .find(|&id| &COVERAGE_FEATURES[id].as_bytes()[13..] == name)
-            {
-                self.coverage.try_push(id as u16)?;
+    fn dispatch(
+        &mut self,
+        name: &[u8],
+        args: &mut KVec<KBytes>,
+        last_arg: &mut KBytes,
+        search: &mut PathSearch,
+    ) -> Result<Option<Flow>, Fail> {
+        if !search.started {
+            if name.contains(&b'/') {
+                let path = self.resolve_path(&self.cwd, name)?;
+                let args = self.finish_dispatch(args, last_arg)?;
+                return self.explicit_path(name, &path, args).map(Some);
+            }
+            if self.shell.coverage {
+                const BUILTINS: core::ops::Range<usize> = 12..71;
+                if let Some(id) = BUILTINS
+                    .clone()
+                    .find(|&id| &COVERAGE_FEATURES[id].as_bytes()[13..] == name)
+                {
+                    self.coverage.try_push(id as u16)?;
+                }
+            }
+            if let Some(term) = self.vm.functions.get(name).copied() {
+                if self.vm.call_depth >= self.shell.lim.vals[I_CALL_DEPTH] {
+                    let func = core::str::from_utf8(name).unwrap_or("?");
+                    let func = &func[..func.floor_char_boundary(func.len().min(128))];
+                    return Err(Fail::CallDepth(bytes_in(func.as_bytes(), &self.live)?));
+                }
+                let args = self.finish_dispatch(args, last_arg)?;
+                self.vm.call_depth += 1;
+                let previous = core::mem::replace(&mut self.params, args);
+                self.vm.frames.try_push(Frame::FuncCall(previous))?;
+                self.vm
+                    .frames
+                    .try_push(Frame::StmtList { term, top: false })?;
+                return Ok(Some(Flow::Next));
             }
         }
-        if let Some(term) = self.vm.functions.get(name).copied() {
-            if self.vm.call_depth >= self.shell.lim.vals[I_CALL_DEPTH] {
-                return Err(Fail::CallDepth(bytes_in(name, &self.live)?));
-            }
-            self.vm.call_depth += 1;
-            let previous = core::mem::replace(&mut self.params, args);
-            self.vm.frames.try_push(Frame::FuncCall(previous))?;
-            self.vm
-                .frames
-                .try_push(Frame::StmtList { term, top: false })?;
-            return Ok(Flow::Next);
-        }
-        if let Some(command) = self.find_command(name)? {
-            return self.invoke(command, name, args);
+        let Some(command) = self.find_command(name, search)? else {
+            return Ok(None);
+        };
+        let args = self.finish_dispatch(args, last_arg)?;
+        if let Some(command) = command {
+            return self.invoke(command, name, args).map(Some);
         }
         #[cfg(feature = "test-commands")]
         if name.starts_with(b"__") {
@@ -409,11 +522,25 @@ impl Fiber {
                 borrowed.try_push(arg.as_slice())?;
             }
             if let Some(flow) = self.exec_test(name, &borrowed) {
-                return Ok(flow);
+                return Ok(Some(flow));
             }
         }
         self.command_error(name, b"command not found", 127)?;
-        Ok(Flow::Next)
+        Ok(Some(Flow::Next))
+    }
+
+    fn finish_dispatch(
+        &mut self,
+        args: &mut KVec<KBytes>,
+        last_arg: &mut KBytes,
+    ) -> Result<KVec<KBytes>, Fail> {
+        self.vm
+            .frames
+            .try_push(Frame::SetLastArg(core::mem::replace(
+                last_arg,
+                KBytes::new_in(&self.live),
+            )))?;
+        Ok(core::mem::replace(args, KVec::new_in(&self.live)))
     }
 
     fn invoke(&mut self, command: Dispatch, name: &[u8], args: KVec<KBytes>) -> Result<Flow, Fail> {
@@ -437,21 +564,15 @@ impl Fiber {
                         fiber: self,
                         xpg_echo: false,
                     },
-                    &args,
+                    args,
                 )?;
                 match poll {
                     CmdPoll::Done(code) => {
                         self.last_exit = code;
                         Ok(Flow::Next)
                     }
-                    CmdPoll::Yield(frame) => {
-                        self.active = Some(frame);
-                        Ok(Flow::Yield)
-                    }
-                    CmdPoll::Host { frame, req } => {
-                        self.active = Some(frame);
-                        Ok(Flow::Host(Pending::Kernel, req))
-                    }
+                    CmdPoll::Yield => Ok(Flow::Yield),
+                    CmdPoll::Host(req) => Ok(Flow::Host(Pending::Kernel, req)),
                 }
             }
             Dispatch::Script => {
@@ -524,9 +645,14 @@ impl Fiber {
             .map_err(|_| Fail::Mem(MemError::Ceiling))
     }
 
-    fn find_command(&self, name: &[u8]) -> Result<Option<Dispatch>, Fail> {
+    // The outer option indicates whether the search finished in this slice.
+    fn find_command(
+        &self,
+        name: &[u8],
+        search: &mut PathSearch,
+    ) -> Result<Option<Option<Dispatch>>, Fail> {
         if name.is_empty() {
-            return Ok(None);
+            return Ok(Some(None));
         }
         let lookup = |path: &[u8]| match self.shell.root.stat_normalized(path) {
             Ok(s) if s.kind == Kind::File => Ok(self.file_dispatch(path, name, s.mode)),
@@ -534,31 +660,75 @@ impl Fiber {
             _ => Ok(None),
         };
         let mut table = self.shell.paths.borrow_mut();
-        if let Some(path) = table.get(name) {
-            if let Some(command) = lookup(path)? {
-                return Ok(Some(command));
+        if !search.started {
+            search.started = true;
+            if let Some(path) = table.get(name) {
+                if let Some(command) = lookup(path)? {
+                    return Ok(Some(Some(command)));
+                }
+                table.remove(name);
             }
-            table.remove(name);
         }
         let path = self
             .env
             .get(b"PATH")
             .map_or(b"/usr/bin:/bin".as_slice(), |e| &e.value);
-        for dir in path.split(|&c| c == b':').filter(|s| !s.is_empty()) {
-            let dir = self.resolve_path(&self.cwd, dir)?;
-            let resolved = self.resolve_path(&dir, name)?;
-            if let Some(command) = lookup(&resolved)? {
-                table.try_insert(bytes_in(name, &self.shell.meta)?, resolved)?;
-                return Ok(Some(command));
+        loop {
+            if let Some((dir, left)) = &mut search.candidate {
+                while *left > 0 {
+                    if !self.tick() {
+                        return Ok(None);
+                    }
+                    *left = left.saturating_sub(BYTE_CHUNK);
+                }
+                let dir = self.resolve_path(&self.cwd, &path[dir.clone()])?;
+                let resolved = self.resolve_path(&dir, name)?;
+                search.candidate = None;
+                if let Some(command) = lookup(&resolved)? {
+                    table.try_insert(bytes_in(name, &self.shell.meta)?, resolved)?;
+                    return Ok(Some(Some(command)));
+                }
+            }
+            if search.end == path.len() {
+                break;
+            }
+            if !self.tick() {
+                return Ok(None);
+            }
+            let from = search.end;
+            let chunk = &path[from..(from + BYTE_CHUNK).min(path.len())];
+            let colon = chunk.iter().position(|&b| b == b':');
+            search.end += colon.unwrap_or(chunk.len());
+            if colon.is_none() && search.end != path.len() {
+                continue;
+            }
+            let dir = search.start..search.end;
+            if colon.is_some() {
+                search.end += 1;
+            }
+            search.start = search.end;
+            if !dir.is_empty() {
+                // Directory scanning already paid for its own bytes. Charge the
+                // other input copied to resolve this candidate before doing so.
+                let cwd_len = if path[dir.start] == b'/' {
+                    0
+                } else {
+                    self.cwd.len()
+                };
+                let extra = name
+                    .len()
+                    .saturating_add(cwd_len)
+                    .saturating_sub(BYTE_CHUNK);
+                search.candidate = Some((dir, extra));
             }
         }
         if matches!(
             self.shell.root.stat_normalized(b"/usr/bin"),
             Err(Code::NotFound)
         ) {
-            return Ok(self.active_command(name));
+            return Ok(Some(self.active_command(name)));
         }
-        Ok(None)
+        Ok(Some(None))
     }
 
     fn write_error(&mut self, name: &[u8], message: &[u8]) -> Result<(), Fail> {

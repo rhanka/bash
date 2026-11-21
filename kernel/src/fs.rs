@@ -261,19 +261,23 @@ impl Vfs {
     }
 
     #[cfg(feature = "test-commands")]
-    pub(crate) fn allocate_file(&self, path: &[u8], len: u64) -> MemResult<()> {
+    pub(crate) fn allocate_file(&self, path: &[u8], len: u64) -> MemResult<bool> {
+        let path = self.norm(path).map_err(|_| MemError::Ceiling)?;
+        let mut inner = self.inner.borrow_mut();
+        if inner.map.get(path.as_slice()).is_some_and(|n| n.kind == Kind::Dir) {
+            return Ok(false);
+        }
         if len > self.budget.cap().saturating_sub(self.budget.used()) {
             return Err(MemError::Limit(self.budget.limit()));
         }
-        let path = self.norm(path).map_err(|_| MemError::Ceiling)?;
-        let mut inner = self.inner.borrow_mut();
+        let path = bytes_in(&path, &self.budget)?;
         let ino = inner.next_ino;
         let mut data = KChunks::new_in(&self.budget);
         // Extending an empty sequence zero-fills its chunks after the allocation succeeds.
         data.try_write_at(len, &[])?;
         inner.map.try_insert(path, Node { kind: Kind::File, data, mode: 0o644, mtime_ms: 0, ino })?;
         inner.next_ino += 1;
-        Ok(())
+        Ok(true)
     }
 
     fn mkdir(&self, path: &[u8], recursive: bool, mode: u32) -> Result<Ok_, Code> {
@@ -434,5 +438,18 @@ mod tests {
         assert_eq!(v.used_bytes(), used);
         assert_eq!(read(&v, b"/a").unwrap(), contents);
         assert!(matches!(v.op(Op::Stat(b"/a")), Ok(Ok_::Info(Stat { mode: 0o644, mtime_ms: 0, .. }))));
+    }
+
+    #[cfg(feature = "test-commands")]
+    #[test]
+    fn test_file_allocator_charges_the_key_and_preserves_directories() {
+        let v = vol(4096);
+        assert_eq!(v.allocate_file(b"/", 0), Ok(false));
+        assert_eq!(v.stat_normalized(b"/").unwrap().kind, Kind::Dir);
+        let path = [b"/".as_slice(), &[b'x'; 4096]].concat();
+        let used = v.used_bytes();
+        assert_eq!(v.allocate_file(&path, 0), Err(MemError::Limit(LimitId(30))));
+        assert_eq!(v.used_bytes(), used);
+        assert!(matches!(v.stat_normalized(&path), Err(Code::NotFound)));
     }
 }

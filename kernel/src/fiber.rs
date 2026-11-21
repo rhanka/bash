@@ -8,13 +8,14 @@ use crate::mem::{
     reserve_scope, Budget, KBox, KBytes, KChunks, KRc, KString, KVec, LimitId, MemError, MemResult,
     TryClone,
 };
-use crate::shell::{Shell, G_CUSTOM};
+use crate::shell::{Shell, G_CUSTOM, G_HOST_FS};
 use crate::util::{bytes_in, fmt_in, str_in, Env};
 use core::{cell::Cell, fmt::Write};
 
 mod expand;
 mod syntax;
 mod vm;
+pub(crate) use expand::BYTE_CHUNK;
 use syntax::{utf16_len, Ast};
 use vm::Vm;
 
@@ -210,7 +211,7 @@ pub struct Fiber {
     script: Option<KBytes>,
     program: Option<Program>,
     vm: Vm,
-    active: Option<KBox<dyn CmdFrame>>,
+    pub(crate) active: Option<KBox<dyn CmdFrame>>,
     overflow: Option<(u64, u64)>,
     raw_script: bool,
     pub(crate) stdin: KChunks,
@@ -228,7 +229,8 @@ pub struct Fiber {
     state: State,
     pub(crate) body: KChunks,
     call_env: Option<Env>,
-    fuel: u64,
+    fuel: Cell<u64>,
+    fuel_credit: Cell<u8>,
     exec_depth: u64,
     work: KRc<Cell<u64>>,
     result: ExecResult,
@@ -266,7 +268,7 @@ impl Fiber {
             stdout_bytes: false,
             env: KRc::try_new_in(Env::new_in(&scratch), &scratch).map_err(|(_, e)| e)?,
         };
-        let mut overlay = Env::new_in(&scratch);
+        let mut overlay = Env::new_in(&live);
         for &(name, value, _) in o.env {
             overlay.set(name, value, syntax::identifier(name))?;
         }
@@ -288,15 +290,22 @@ impl Fiber {
                 env.copy_from(&overlay)?;
                 let opt_cwd = o.cwd.filter(|p| !p.is_empty());
                 let resolved = opt_cwd
-                    .filter(|_| !o.env.is_empty() && overlay.get(b"PWD").is_none())
+                    .filter(|_| !shell.granted(G_HOST_FS) && !o.env.is_empty() && overlay.get(b"PWD").is_none())
                     .and_then(|path| shell.root.resolve(&shell.cwd, path).ok())
                     .filter(|path| shell.root.stat_normalized(path).is_ok());
                 let path = resolved.as_deref().or(opt_cwd).unwrap_or(&shell.cwd);
-                cwd = bytes_in(path, &live)?;
+                if path.starts_with(b"/") {
+                    cwd = bytes_in(path, &live)?;
+                } else {
+                    cwd.try_reserve_exact(shell.cwd.len() + 1 + path.len())?;
+                    cwd.try_extend_from_slice(shell.cwd.strip_suffix(b"/").unwrap_or(&shell.cwd))?;
+                    cwd.try_push(b'/')?;
+                    cwd.try_extend_from_slice(path)?;
+                }
                 if opt_cwd.is_some() {
                     env.set(
                         b"PWD",
-                        overlay.get(b"PWD").map_or(path, |pwd| &pwd.value),
+                        overlay.get(b"PWD").map_or(cwd.as_slice(), |pwd| &pwd.value),
                         true,
                     )?;
                 }
@@ -354,7 +363,8 @@ impl Fiber {
             epoch: 0,
             state: State::Ready,
             call_env: None,
-            fuel: 0,
+            fuel: Cell::new(0),
+            fuel_credit: Cell::new(0),
             exec_depth,
             work,
             result,
@@ -611,8 +621,28 @@ impl Fiber {
     }
 
     pub fn run(&mut self, fuel: u64) -> Step {
-        self.fuel = fuel;
+        self.fuel.set(fuel);
+        self.fuel_credit.set(0);
         self.advance()
+    }
+
+    fn take_fuel(&self) -> bool {
+        let Some(left) = self.fuel.get().checked_sub(1) else {
+            return false;
+        };
+        self.fuel.set(left);
+        self.fuel_credit.set(16);
+        true
+    }
+
+    /// A stage pays one unit up front. Longer stages spend another unit for
+    /// every 16 small operations, including each 256-byte chunk or field.
+    pub(crate) fn tick(&self) -> bool {
+        if self.fuel_credit.get() == 0 && !self.take_fuel() {
+            return false;
+        }
+        self.fuel_credit.set(self.fuel_credit.get() - 1);
+        true
     }
 
     pub fn resume(&mut self, epoch: u64, outcome: Outcome<'_>) -> Result<Step, CallError> {
@@ -688,10 +718,6 @@ impl Fiber {
             return self.end_fail(fail);
         }
         if self.active.is_some() {
-            if self.fuel == 0 {
-                return Step::OutOfFuel;
-            }
-            self.fuel -= 1;
             match self.resume_command(None) {
                 Ok(Some(step)) => return step,
                 Ok(None) => {}
@@ -803,14 +829,8 @@ impl Fiber {
                 self.last_exit = code;
                 None
             }
-            CmdPoll::Yield(frame) => {
-                self.active = Some(frame);
-                Some(Step::OutOfFuel)
-            }
-            CmdPoll::Host { frame, req } => {
-                self.active = Some(frame);
-                Some(self.host(Pending::Kernel, req))
-            }
+            CmdPoll::Yield => Some(Step::OutOfFuel),
+            CmdPoll::Host(req) => Some(self.host(Pending::Kernel, req)),
         }
     }
 
@@ -823,6 +843,9 @@ impl Fiber {
             },
             outcome,
         )?;
+        if !matches!(poll, CmdPoll::Done(_)) {
+            self.active = Some(frame);
+        }
         Ok(self.command_poll(poll))
     }
 
@@ -914,8 +937,17 @@ impl Fiber {
             Fail::CallDepth(func) => {
                 let cap = lim[I_CALL_DEPTH];
                 let func = core::str::from_utf8(&func).unwrap_or("?");
+                let mut suffix = Diagnostic::new();
+                let _ = writeln!(suffix, ": maximum recursion depth ({cap}) exceeded, increase executionLimits.maxCallDepth");
+                let suffix = core::str::from_utf8(suffix.bytes()).unwrap_or_default();
+                let available = self.out_cap.saturating_sub(self.out_total) as usize;
+                let func_cap = available.saturating_sub(b"bash: ".len() + suffix.len());
+                let func = &func[..func.floor_char_boundary(func.len().min(func_cap))];
+                let _ = write!(text, "bash: {func}{suffix}");
+                let message = core::str::from_utf8(text.bytes()).unwrap_or_default();
+                let message = &message[..message.floor_char_boundary(message.len().min(available))];
                 self.finish_early(126, Status::LimitExceeded, Some("maxCallDepth"),
-                    Some(format_args!("bash: {func}: maximum recursion depth ({cap}) exceeded, increase executionLimits.maxCallDepth\n")));
+                    Some(format_args!("{message}")));
                 return self.done_step();
             }
             Fail::ExecDepth => {
@@ -1033,8 +1065,11 @@ impl Fiber {
             limit.and_then(|name| str_in(name, &self.scratch).ok())
         });
         self.last_exit = exit;
-        // The result handle stays private until the fiber is terminal.
-        *KRc::get_mut(&mut self.result.env).expect("result is uniquely held while finishing") = env;
+        if let Some(slot) = KRc::get_mut(&mut self.result.env) {
+            *slot = env;
+        } else if let Ok(replacement) = reserve_scope(|| KRc::try_new_in(env, &self.scratch)) {
+            self.result.env = replacement;
+        }
         self.result.exit = exit;
         self.result.status = status;
         self.result.limit_name = limit_name;

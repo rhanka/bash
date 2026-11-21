@@ -28,6 +28,73 @@ fn run_done(f: &mut Fiber) -> ExecResult {
     }
 }
 
+#[test]
+fn finishing_replaces_a_shared_result_environment() {
+    let sh = shell(1, &[], 0, &[]);
+    let mut f = fib(&sh, "A=after");
+    let original = f.result.env.clone();
+    let result = run_done(&mut f);
+    assert!(original.get(b"A").is_none());
+    assert_eq!(result.env.get(b"A").unwrap().value.as_slice(), b"after");
+}
+
+#[test]
+fn relative_fiber_cwd_is_anchored_even_without_env() {
+    let sh = shell(1, &[], 0, &[]);
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts { cwd: Some(b"./sub"), script: b"echo $PWD", ..Opts::default() },
+    ).unwrap();
+    let result = run_done(&mut f);
+    assert_eq!(result.env.get(b"PWD").unwrap().value.as_slice(), b"/x/./sub");
+    assert_eq!(drain(&mut f, false), "/x/./sub\n");
+}
+
+#[test]
+fn one_fuel_unit_resumes_echo_with_partial_output() {
+    let sh = shell(1, &[], 0, &[]);
+    let text = "a".repeat(24 * 1024);
+    let script = std::format!("echo -e '{text}\\nend'");
+    let mut f = fib(&sh, &script);
+    let mut out = std::string::String::new();
+    let mut yielded_output = false;
+    for _ in 0..100 {
+        let step = f.run(1);
+        let chunk = drain(&mut f, false);
+        if let Step::Done(r) = step {
+            assert_eq!(r.exit, 0);
+            assert!(yielded_output);
+            out.push_str(&chunk);
+            assert_eq!(out, std::format!("{text}\nend\n"));
+            return;
+        }
+        assert!(matches!(step, Step::OutOfFuel));
+        yielded_output |= !chunk.is_empty();
+        out.push_str(&chunk);
+    }
+    panic!("echo did not finish");
+}
+
+#[test]
+fn path_lookup_resumes_inside_one_stage() {
+    let sh = shell(1, &[], 0, &[]);
+    let path = "missing:".repeat(1024) + "/bin";
+    let mut f = Fiber::spawn(
+        sh,
+        None,
+        &Opts {
+            script: b"echo resolved",
+            env: &[(b"PATH", path.as_bytes(), true)],
+            ..Opts::default()
+        },
+    ).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    assert_eq!(run_done(&mut f).exit, 0);
+    assert_eq!(drain(&mut f, false), "resolved\n");
+}
+
 fn drain(f: &mut Fiber, err: bool) -> std::string::String {
     let mut out = std::vec::Vec::new();
     loop {

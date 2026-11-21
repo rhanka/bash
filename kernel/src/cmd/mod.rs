@@ -2,7 +2,7 @@
 use crate::fiber::{Chan, Fail, Fiber, HostReq, Outcome};
 use crate::fs::Vfs;
 use crate::limits::Resolved;
-use crate::mem::{KBox, KBytes, KChunks};
+use crate::mem::{KBox, KBytes, KChunks, KVec};
 use crate::util::Env;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13,11 +13,8 @@ pub enum CommandKind {
 
 pub enum CmdPoll {
     Done(i32),
-    Yield(KBox<dyn CmdFrame>),
-    Host {
-        frame: KBox<dyn CmdFrame>,
-        req: HostReq,
-    },
+    Yield,
+    Host(HostReq),
 }
 
 pub trait CmdFrame {
@@ -32,7 +29,7 @@ pub struct CommandSpec {
     pub name: &'static str,
     pub kind: CommandKind,
     pub flags: &'static [&'static str],
-    pub start: fn(&mut CmdCtx<'_>, &[KBytes]) -> Result<CmdPoll, Fail>,
+    pub start: fn(&mut CmdCtx<'_>, KVec<KBytes>) -> Result<CmdPoll, Fail>,
 }
 
 pub struct CmdCtx<'a> {
@@ -41,6 +38,9 @@ pub struct CmdCtx<'a> {
 }
 
 impl CmdCtx<'_> {
+    pub fn suspend(&mut self, frame: KBox<dyn CmdFrame>) {
+        self.fiber.active = Some(frame);
+    }
     pub fn stdin(&mut self) -> &mut KChunks {
         &mut self.fiber.stdin
     }

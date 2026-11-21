@@ -9,7 +9,7 @@ import { stringLimit } from "./limits.js";
 import { FS_METHODS, Scope, settleWithin } from "./membrane.js";
 
 const CHUNK = 1 << 20;
-const FUEL = 100_000n;
+const FUEL = 2_048n;
 const YIELD_MS = 10;
 const SCRIPT_MAX_BYTES = 3 << 20;
 const FATAL_STDERR = "bash: internal error: sandbox instance failed\n";
@@ -91,14 +91,16 @@ export function anySignal(a, b) {
  * The exec generator.
  * @param {object} B internal state of the Bash
  * @param {string} script
- * @param {object} o normalized options: { env: [name, value][], replaceEnv, cwd, rawScript, stdin: Uint8Array, args: string[], signal, bypass, parent }
+ * @param {object} o normalized options: { env: [name, value][], envGiven, replaceEnv, cwd, rawScript, stdin: Uint8Array, args: string[], signal, bypass, parent }
  */
 export function* execLoop(B, script, o) {
   const inst = B.holder.instance;
   inst.check();
   const L = B.limits;
   // Pre-checks (7.3 step 1): nothing is lowered, no kernel call is made.
-  const strings = [...o.env.flat(), ...o.args, o.cwd ?? "", o.bypass ?? ""];
+  let cwd = o.cwd;
+  if (cwd && !cwd.startsWith("/")) cwd = `${B.initialCwd === "/" ? "" : B.initialCwd}/${cwd}`;
+  const strings = [...o.env.flat(), ...o.args, cwd ?? "", o.bypass ?? ""];
   const limit = stringLimit(strings, L.maxStringLength, B.headroom, o.env.length * 20 + o.args.length * 8);
   if (limit) return limitResult(B, limit, o.env);
 
@@ -123,11 +125,21 @@ export function* execLoop(B, script, o) {
   };
   const engine = inst.engine;
   try {
-    let cwd = o.cwd;
-    // An empty WIT env list also represents an omitted JS env option.
-    if (cwd && o.emptyEnvGiven && !B.userFs) {
-      const candidate = resolvePath(B.initialCwd, cwd);
-      if (candidate !== cwd && !stringLimit([candidate], L.maxStringLength, B.headroom)) {
+    let reason = cancelReason(x);
+    if (!reason && cwd && o.envGiven && !o.env.some(([name]) => name === "PWD")) {
+      const candidate = resolvePath("/", cwd);
+      if (B.userFs) {
+        const resolved = yield* serveExtension(x, async (scope) => {
+          const fs = scope.wrap(B.userFs, FS_METHODS);
+          if (fs.realpath) return fs.realpath(cwd);
+          if (fs.stat && candidate !== cwd && await fs.stat(candidate)) return candidate;
+        }, undefined);
+        reason = resolved.cancel;
+        const path = resolved.outcome;
+        if (typeof path === "string" && path.startsWith("/") &&
+            !stringLimit([path], L.maxStringLength, B.headroom)) cwd = path;
+      } else if (o.env.length === 0 && candidate !== cwd &&
+          !stringLimit([candidate], L.maxStringLength, B.headroom)) {
         const { vfs } = fsState(B.rootFs);
         const result = inst.call(() => vfs.op({ tag: "exists", val: utf8(candidate) }));
         if (result.tag === "ok" && result.val.val) cwd = candidate;
@@ -145,7 +157,8 @@ export function* execLoop(B, script, o) {
         bypassCustom: o.bypass,
       }),
     );
-    if (o.signal?.aborted) return finish(x, cancel(x, "aborted"));
+    reason ??= o.signal?.aborted ? "aborted" : undefined;
+    if (reason) return finish(x, cancel(x, reason));
     // stdin in chunks of at most 1 MiB, the last with `last = true`.
     const stdin = o.stdin;
     let pos = 0;
@@ -224,7 +237,9 @@ function finish(x, er) {
   const env = envToObject(er.env);
   let stderr = decodeUtf8(concat(x.err));
   if (x.err.length === 0) {
-    if (er.status === "limit-exceeded" && er.limitName) stderr = `bash: ${er.limitName} exceeded\n`;
+    if (er.status === "limit-exceeded" && er.limitName && er.limitName !== "maxCallDepth") {
+      stderr = `bash: ${er.limitName} exceeded\n`;
+    }
     if (er.status === "aborted" || er.status === "deadline") stderr = "bash: execution aborted\n";
   }
   const r = {
