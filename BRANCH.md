@@ -28,16 +28,19 @@ commands, driver loop, membrane, loaders). Spec: `spec/lots/L1b.md`.
   - `kernel/src/mem/mod.rs`, `kernel/src/mem/heap.rs` and `kernel/src/mem/ceiling.rs` under BR1b-EX1.
 
 ## Feedback Loop
-- **BR1b-EX1** — `mem::abi` re-exports the heap types and allocator entry points used by the binding
-  adapter. Its `cabi_realloc` entry tags incoming transfer blocks with a spare Wasm heap header bit.
-  Restore `ceiling.rs` to L1a-2 and use its dedicated reserve through `reserve_scope`.
+- **BR1b-EX1** — The crate-private `mem::abi` module re-exports the heap types and allocator entry
+  points used by the Wasm binding adapter. It is compiled only when that adapter is built. Its
+  `cabi_realloc` entry tags incoming transfer blocks with a spare Wasm heap header bit.
+  The adapter uses the L1a-2 ceiling and opens its dedicated reserve through `reserve_scope`.
   - Rationale: main hardened G6 (alloc paths allowed only in `kernel/src/mem/` and the declared bindings
     directory) and the bindings check (that directory holds exactly the generated `kernel.rs`). The hand-written
     glue (`kernel/src/glue/`) names the heap types of the generated traits, and the generated `_rt` module is
     private. Generated Rust-owned inputs and generated post-return cleanup deallocate through the global
     allocator, which must release the transfer charge carried by each tagged block.
-  - Impact: the L1a-2 heap keeps one reserve page for bounded diagnostics and drain copies. The transfer
-    account releases each tagged charge on free or when an ordinary Rust resize takes ownership.
+  - Impact: the L1a-2 reserve is used after ordinary allocation fails. Diagnostic tails are at most
+    256 bytes, limit names at most 128 UTF-8 bytes, and reserve copies at most 4 KiB for `cwd` and
+    16 KiB for drains, with a 1 KiB drain fallback. The transfer account releases each tagged charge
+    on free or when an ordinary Rust resize takes ownership.
   - Rollback: revert the ABI glue and its heap tag together. Remove `mem::abi` when the glue no longer uses it.
 
 ## Plan / Todo (lot-based)
