@@ -5,15 +5,22 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { repoRoot } from "./helpers.mjs";
-import { walk } from "../tools/lib.mjs";
+import { walk, components } from "../tools/lib.mjs";
 
 const UNSAFE = /\bunsafe\b/;
 const isComment = (l) => /^\s*\/\//.test(l);
 
+/** Bindings directories (relative to kernel/src/, with a trailing slash) declared in tools/components.json. */
+export function declaredBindingDirs(root = repoRoot) {
+  return Object.values(components(root))
+    .filter((d) => d.bindings)
+    .map((d) => d.bindings.dir.replace(/^kernel\/src\//, "").replace(/\/?$/, "/"));
+}
+
 /** Returns the problems found in one source file (`rel` is its path relative to kernel/src/). */
-export function unsafeProblems(rel, src) {
+export function unsafeProblems(rel, src, bindingDirs = declaredBindingDirs()) {
   const inMem = rel.startsWith("mem/");
-  const inBindings = rel.startsWith("bindings/");
+  const inBindings = bindingDirs.some((d) => rel.startsWith(d));
   const lines = src.split("\n");
   const problems = [];
   lines.forEach((line, i) => {
@@ -23,7 +30,9 @@ export function unsafeProblems(rel, src) {
       return;
     }
     // A declaration `unsafe fn` states a caller obligation, it is not an unsafe block.
-    if (inBindings || isComment(line) || /\bunsafe\s+fn\b/.test(line)) return;
+    if (inBindings || isComment(line)) return;
+    // A declaration `unsafe fn` states a caller obligation; an unsafe block on the same line is not one.
+    if (/\bunsafe\s+fn\b/.test(line) && !/\bunsafe\s*\{/.test(line.replace(/\bunsafe\s+fn\b/, ""))) return;
     // Same line, or the contiguous comment/attribute block right above.
     let ok = /SAFETY:/.test(line);
     for (let j = i - 1; !ok && j >= 0 && (isComment(lines[j]) || /^\s*#\[/.test(lines[j])); j--) {
@@ -45,7 +54,22 @@ test("the real kernel tree has no stray unsafe and every unsafe in mem has a SAF
 test("the check fails on unsafe outside mem", () => {
   assert.match(unsafeProblems("lib.rs", "fn f() { unsafe { g() } }")[0], /outside kernel\/src\/mem/);
   assert.match(unsafeProblems("parser/lex.rs", "// unsafe is mentioned")[0], /outside/);
-  assert.deepEqual(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}"), []);
+  assert.deepEqual(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}", ["bindings/"]), []);
+});
+
+test("bindings are exempt only when declared in components.json", () => {
+  assert.match(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}", [])[0], /outside/);
+  assert.match(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}")[0], /outside/, "no component declares bindings today");
+  assert.deepEqual(declaredBindingDirs(), []);
+});
+
+test("a one-line unsafe fn with an unsafe block needs a SAFETY comment", () => {
+  assert.match(unsafeProblems("mem/x.rs", "unsafe fn f() { unsafe { g() } }")[0], /without a preceding/);
+  assert.deepEqual(unsafeProblems("mem/x.rs", "// SAFETY: fine\nunsafe fn f() { unsafe { g() } }"), []);
+});
+
+test("the kernel denies unsafe operations inside unsafe fn", () => {
+  assert.match(readFileSync(join(repoRoot, "kernel", "src", "lib.rs"), "utf8"), /#!\[deny\(unsafe_op_in_unsafe_fn\)\]/);
 });
 
 test("the check fails on an unsafe block without a SAFETY comment", () => {
