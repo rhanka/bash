@@ -96,6 +96,39 @@ fn path_lookup_resumes_inside_one_stage() {
 }
 
 #[test]
+fn shared_prefix_lookup_pays_before_expanding_the_value() {
+    let sh = shell(1, &[], 0, &[]);
+    let prefix = "a".repeat(8192);
+    let name = prefix.clone() + "b";
+    let other = prefix + "a";
+    let script = std::format!("echo \"${name}\"");
+    let mut f = Fiber::spawn(sh, None, &Opts {
+        script: script.as_bytes(),
+        env: &[(other.as_bytes(), b"wrong", true), (name.as_bytes(), b"found", true)],
+        ..Opts::default()
+    }).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, false).is_empty());
+    assert_eq!(run_done(&mut f).exit, 0);
+    assert_eq!(drain(&mut f, false), "found\n");
+}
+
+#[test]
+fn a_relative_explicit_path_pays_for_cwd_before_resolving() {
+    let sh = shell(1, &[], 0, &[]);
+    let cwd = "/".to_owned() + &"sub/".repeat(16_384);
+    let mut f = Fiber::spawn(sh, None, &Opts {
+        script: b"./missing",
+        cwd: Some(cwd.as_bytes()),
+        ..Opts::default()
+    }).unwrap();
+    assert!(matches!(f.run(1), Step::OutOfFuel));
+    assert!(drain(&mut f, true).is_empty());
+    assert_eq!(run_done(&mut f).exit, 127);
+    assert_eq!(drain(&mut f, true), "bash: ./missing: No such file or directory\n");
+}
+
+#[test]
 fn pipeline_snapshot_yields_and_keeps_stage_assignments_isolated() {
     let sh = shell(1, &[("maxCommandCount", 3)], 0, &[]);
     let names: std::vec::Vec<_> = (0..64).map(|i| std::format!("VAR{i}")).collect();

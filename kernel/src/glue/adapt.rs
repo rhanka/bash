@@ -300,7 +300,11 @@ impl rt::Resource for ShellRes {
 }
 
 fn env_out(e: &Env) -> Result<Vec<T::EnvVar>, MemError> {
-    collect(e.v.iter(), |x| Ok(T::EnvVar { name: copy(&x.name)?, value: copy(&x.value)?, exported: x.exported }))
+    collect(e.iter(), |(name, entry)| env_var(name.bytes(), entry))
+}
+
+fn env_var(name: &[u8], entry: &crate::util::EnvValue) -> Result<T::EnvVar, MemError> {
+    Ok(T::EnvVar { name: copy(name)?, value: copy(&entry.value)?, exported: entry.exported })
 }
 
 fn env_in(e: &[T::EnvVar]) -> Result<Vec<(&[u8], &[u8], bool)>, T::KernelError> {
@@ -425,7 +429,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
                 name: lossy_text(name)?,
                 args: collect(args.iter(), |a| copy(a))?,
                 cwd: copy(cwd)?,
-                env: env_out(env)?,
+                env: collect(env.iter(), |(name, entry)| env_var(name, entry))?,
                 fds: Vec::new(),
                 input_len: *input_len,
                 xpg_echo: false,

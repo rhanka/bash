@@ -101,6 +101,19 @@ test("micro also reports the input byte limit when it is tighter than the string
   await expectLimit(shell, probe, "maxInputBytes", input(cap), "__stdin", { stdin: "x".repeat(cap + 1) });
 });
 
+test("oversized stdin preserves the live byte failure recorded at spawn", async () => {
+  const probe = statusProbe();
+  const shell = bash({ executionLimits: { maxLiveBytes: 8_192, maxInputBytes: 10 } }, probe.hooks);
+  await expectLimit(shell, probe, "maxLiveBytes", "bash: execution: live byte limit exceeded (8192 bytes)\n",
+    "echo " + "a".repeat(9_000), { stdin: "z".repeat(11) });
+});
+
+test("a blank script with oversized stdin returns the input limit", async () => {
+  const probe = statusProbe();
+  const shell = bash({ executionLimits: { maxInputBytes: 10 } }, probe.hooks);
+  await expectLimit(shell, probe, "maxInputBytes", input(10), " \t\n\u00a0", { stdin: "z".repeat(11) });
+});
+
 test("the kernel and the constructor reject a hardened override that exceeds its ceiling", () => {
   const options = { executionLimitProfile: "hardened", executionLimits: { maxOutputSize: 20 * mib } };
   assert.throws(() => new Bash(options), RangeError);
