@@ -1,0 +1,9 @@
+{
+  "id": "l2/echo-escape-stop",
+  "steps": [
+    {
+      "script": "echo -e 'before\\cafter'\necho done"
+    }
+  ],
+  "title": "Echo escape stop"
+}

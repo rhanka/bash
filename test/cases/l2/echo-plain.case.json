@@ -1,0 +1,9 @@
+{
+  "id": "l2/echo-plain",
+  "steps": [
+    {
+      "script": "echo\necho hello\necho   one   two   three"
+    }
+  ],
+  "title": "Echo plain"
+}
