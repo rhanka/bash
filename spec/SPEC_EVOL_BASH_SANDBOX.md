@@ -8,12 +8,15 @@ Conventions:
 - MUST / MUST NOT / SHOULD are normative. "Gate" means a check that fails `make check` or the release.
 - `JB:` = path under `tmp/refs/just-bash/packages/just-bash/` (reference clone, v3.6.0). Only
   reference-reading lanes open it (D20).
-- "Posed by" is `Owner` or `Fable 5.2 + Carbon (consensus)`. Track ids are decision aggregate ids in
-  `.track/events.jsonl`; "—" means the decision is recorded in the study and `BRANCH.md` only.
+- "Posed by" names the owner, the reviewers who agreed on the design, or both for a split decision.
+  Consensus entries through v1.5 use `Fable 5.2 + Carbon`. Annex J names `Astra + Carbon` for the Gate L2
+  design review. Track ids are decision aggregate ids in `.track/events.jsonl`. A dash means the decision
+  is recorded in the study and `BRANCH.md` only.
 - Lot ids are those of study section 7 and the Gate L2 follow-up lots in Annex J.
 - v1.1 reconciles the adversarial review of v1 (Annex J). v1.2 applies the owner answers of 15/11 on
   runtimes, tracing and defense-in-depth (section 3). v1.3 closes the review (R1-R5, Annex J); the lot plan
   is `plan/PLAN_BASH_SANDBOX_V1.md`. v1.4 applies the owner answers of 15/11 on names and host disk access (D26).
+- v1.5 closes the plan review by specifying `stpsh` script and interactive behaviour in D26.
 - v1.6 applies the 21/11 decisions on JS bindings, packaging and shared filesystem isolation.
   Annex H records the two decisions pending measurement.
 - A build lane reads this document without the reference: every behaviour it needs is stated here or in a
@@ -275,7 +278,8 @@ Conventions:
     kernel command, a superset of the reference's browser bundle.
   - **Default construction on both entries.** The packaged core may restore an eligible shell
     from its deterministic passive image via a private core export `__restore_default() -> i64`. Wasm
-    registers the Vfs and Shell through existing resource-new imports and returns their handles.
+    registers the Vfs and Shell through existing resource-new imports and returns their packed nonzero handles.
+    Zero signals a refused restore before image installation (L2c section 4).
     No snapshot pointers reside in JS. A pure predicate on validated options admits `{}` and a host-only
     logger. Non-default config, supplied filesystems/modules or internal overrides use ordinary setup.
     Browser staging preserves call order.
@@ -318,7 +322,7 @@ Conventions:
 - **Posed by.** Owner (constraints); Fable 5.2 + Carbon (gates and pins). **Track.**
   `01M7E9EB8FAAH8B4CX2V5VQ293`.
 - **Acceptance.** Gates G1-G8 pass on a clean worktree; a missing or mismatching tool hash fails the build.
-- **Binds.** L0.
+- **Binds.** L0, L2b, L2c.
 
 ### D18 — Published artefacts
 - **Decision.** The primary npm package `@sentropic/bash` contains the component, WIT, loader core,
@@ -373,7 +377,7 @@ Conventions:
   `01M7E9EB1WERJ0F7CPJ9QZQR1W`, `01M7FTJ9ZWD7NT9ABFGAX0WF9C`.
 - **Rationale.** Performance targets are owner-owned; they become gates only after L2 confirms them.
 - **Acceptance.** `make bench` produces the result table and JSON; the regression gate is active after L2.
-- **Binds.** L2, L12, L12b.
+- **Binds.** L2, L2b, L2c, L12, L12b.
 
 ### D23 — Divergence list
 - **Decision.** Annex I is the complete list of intended differences from the reference. Any other
@@ -399,7 +403,7 @@ Conventions:
 - **Posed by.** Fable 5.2 + Carbon (consensus). **Track.** —.
 - **Rationale.** The two largest unverified assumptions are tested by the three smallest sequential lots.
 - **Acceptance.** A written report per point, reviewed, before the next lots start.
-- **Binds.** L0, L2, L1c.
+- **Binds.** L0, L2, L2b, L2c, L1c.
 
 ### D25 — Evolution path: runtime companions `@sentropic/python` and `@sentropic/js`
 - **Decision.** After parity, `python3`/`python` and `js-exec`/`node` ship as companion packages,
@@ -497,7 +501,8 @@ Conventions:
   kernel-backed volume when an FS is supplied. L7b host adapters retain their separate execution store and
   asynchronous membrane.
 - **Rationale.** Users can share live files while bounding execution independently, or explicitly share
-  the instance overhead. The reference retains the caller's FS object and exposes no store selector.
+  the instance overhead. The reference retains the caller's FS object and exposes no store selector
+  (`JB:src/Bash.ts:373`).
 - **Posed by.** Owner, 21/11. **Track.** `01M7ZPBMNRHYJZZVQSA01N4H1S`.
 - **Acceptance.** Two shells on one standalone volume retain identity, direct write visibility and sync
   guest I/O in both modes. Test three stores in separate mode and one in shared mode. A trap in one
@@ -805,7 +810,7 @@ Order (commands: study 2.6):
 |---|---|---|
 | G1 zero import | `wasm-tools component wit` on the component | any import is listed |
 | G2 no bare import | scan of generated and facade JS, following the import graph | an import specifier is neither relative nor `node:`; the `./browser` entry reaches any `node:` module, `process.getBuiltinModule` or `createRequire`, even transitively; `node:` appears outside the Node adapters |
-| G3 two-build identity | two clean builds in different directories | component, core module, generated `js/*` or session driver bytes differ |
+| G3 two-build identity | two clean builds in different directories | bytes differ for any component, core module, generated `js/*`, session driver or shipped JS file, including minified JS in `@sentropic/bash` and `@sentropic/bash-jco` |
 | G4 component validity | `wasm-tools validate`; embedded world equals `wit/` | mismatch |
 | G5 one core module | file count of the glue output | more than one core module, or wasm inlined as base64 |
 | G6 zero crate, heap discipline | `Cargo.lock` inspection; import scan (D6.2) | a non-workspace package; an `alloc` container import outside `kernel::mem` and the generated binding module (which is committed, reviewed and allocates only through `cabi_realloc`) |
@@ -817,6 +822,7 @@ standard library; `wit-bindgen-cli` 0.63.0; `wasm-tools` 1.263.0; `@bytecodealli
 `typescript` (exact version fixed by the `tools/` lockfile in L0); optional Binaryen `version_132`;
 test-only `wac-cli` 0.12.0, `wasmtime` 50.0.1, Chrome for Testing (exact version and SHA-256 fixed in
 L19); oracle-only `just-bash` 3.6.0; fuzz-only `cargo-fuzz` on nightly. Justifications: study 2.6.
+L2c uses the lockfile's `oxc-minify` 0.151.0 to minify the shipped facade in each npm package.
 This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `make test` depends on
 `make build`.
 
@@ -826,7 +832,7 @@ This repository's `make check` builds the kernel (`*.wasm` is git-ignored), so `
 
 | Tier | just-bash surface | Ours |
 |---|---|---|
-| A | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, maxCallDepth, maxCommandCount, maxLoopIterations, commands, customCommands, sleep, network, fetch, processInfo, logger, trace, coverage})` | Same; profile names extended with `contain`, `micro` |
+| A | `new Bash({files, env, cwd, fs, executionLimits, executionLimitProfile, maxCallDepth, maxCommandCount, maxLoopIterations, commands, customCommands, sleep, network, fetch, processInfo, logger, trace, coverage})` | Also accepts `isolation` with values `"separate"` (default) or `"shared"` (D27), and profile names `contain` and `micro` |
 | A | `bash.exec(cmd, {env, replaceEnv, cwd, rawScript, stdin, stdinKind, signal, args})` -> `{stdout, stderr, exitCode, env, stdoutKind?}` | Same (D.2) |
 | A | `bash.fs`, `readFile`, `writeFile`, `getCwd`, `getEnv` (synchronous), `registerCommand` | Same |
 | A | `defineCommand`, `LazyCommand`, `createCommandContext`; context `fs`, `cwd`, `env`, `exportedEnv`, `assignShellVariable`, `stdin`, `limits`, `exec`, `origCommand`, `execWithInheritedStdin`, `fetch`, `sleep`, `signal`, `fileDescriptors`, `getRegisteredCommands`, `trace`, `coverage`, `xpgEcho` | Same, behind the membrane |
@@ -1039,7 +1045,7 @@ reported as an `upstream-defect` candidate instead of being matched.
 | S10 | The driver never evaluates sandbox data, never passes it to `import()`, `require`, `Function` or `RegExp`, and stores sandbox-keyed data only in `Map` or null-prototype objects | source scan + adversarial tests with `__proto__`, `constructor`, `prototype`, `toString` as env names, array keys, file names, header names and command names |
 | S11 | Clock, timezone, entropy, pid/uid, hostname and host env are virtual unless granted; the trace clock is never observable by a script | capability tests; a script run with `trace` on cannot distinguish two different trace-clock sequences |
 | S12 | A trap poisons the instance; no state is read from it afterwards | D8 tests |
-| S13 | The published package has no dependency and no install script | package-content test |
+| S13 | Both `@sentropic/bash` and `@sentropic/bash-jco` ship with zero dependencies and zero install scripts | package-content test on each tarball |
 | S14 | Shells sharing files keep distinct grants, custom commands, registry, env and shell budgets. In D27 shared mode the instance ceiling and trap domain are common | two-shell tests in both modes with different grants and limits |
 | S15 | Data parsers never reach outside their input: the XML reader has no DOCTYPE, external entity or entity expansion; YAML aliases are capped; `tar` extraction never writes through a symlinked parent, never creates special files, and stays under its target directory, including on host mounts | adversarial suites, fuzz targets (D21) |
 
@@ -1158,6 +1164,19 @@ with the companion packages when those expose a host-JS surface, where the prote
 | Gate L2 budgets (21/11) | minified split accepted, browser cap and optimizer pin open | Owner | D17/D24, Annex H: report 45,000/58,000 B arms and the approved/unapproved Binaryen paths |
 | Shared filesystem (21/11) | accepted | Owner | D5/D27, Annex D.1 and V9: both modes, synchronous in-memory mount transport in L7c (2.5 Strong) after L7b and before L7a |
 
+### PR #13 corrections to the v1.6 lot specs
+
+| Finding | Change |
+|---|---|
+| B1 | L2c §3–4 and Gate 2 expose a restore-only allocator helper, check the explicit default cap before configuration, and define the per-store latch, zero refusal result and live-store checks. |
+| M1 | L7c §5 and Gate 2 seed branded volumes through the owner Vfs with virtual timestamps and explicit modes, and align the public synchronous FS options. L2 §5.2 sets directories to `0o755` and stubs to `0o644`. |
+| M2 | L2b §5 and Gate 4 assign indirect parameter buffers to the callee and exercise guest-initiated resource drops through each matching destructor. |
+| M3 | L2c §5 and Gate 4 stage and verify both packages' declarations from root `types/**`. L7c Gate 6 checks `isolation` through both packages. |
+| M4 | L7c §5 and Gate 4 specify a same-epoch `headroom` refusal and exit 126 on request or response overflow, including directory listings. |
+| m1 | D27 holds the constructor provenance used by the L7c build brief. |
+| m2 | L2c §4 and Gate 1 use the first-party adapter for capture and for the ordinary allocator high-water control. |
+| m3 | Corrected the revision and decision credits, D17/D22/D24 lot links, the Annex C tool list and G3 coverage, the D.1 constructor, S13 package coverage and the Annex K total. |
+
 This version exceeds the 700-line target because the build room needs the inlined tables (B2).
 
 ## Annex K — Lot impact for the plan rung
@@ -1167,6 +1186,7 @@ taken from the review: the v1 parity base of the study is 169 points (180 includ
 and the post-parity L18); flag tables are costed at the tier of their command lot; the generic flag
 coverage hook is built once in L2; observability (logger, trace and coverage delivery) is a separate lot
 off the critical path; L11, L10b, L19 and L15b-1 carry their share; L16b is the network adapter inside
-`@sentropic/bash`. That plan totals 183.5 points before the 8.5 Strong points in Annex J. L2b and L2c
-account for 6 points to the Gate L2 rerun. L7c accounts for the other 2.5 points after L7b.
+`@sentropic/bash`. The plan's v1 parity total is 187 points. With the 8.5 Strong points in Annex J
+the total is 195.5. L2b and L2c account for 6 points to the Gate L2 rerun. L7c accounts for the other
+2.5 points after L7b.
 
