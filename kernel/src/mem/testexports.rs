@@ -26,6 +26,13 @@ fn layout(size: usize) -> Layout {
     Layout::from_size_align(size, 8).unwrap()
 }
 
+fn nonzero_layout(size: u32, align: u32) -> Option<Layout> {
+    if size == 0 {
+        return None;
+    }
+    Layout::from_size_align(size as usize, align as usize).ok()
+}
+
 /// Allocates `size` bytes into slot `i`; false when the allocator refuses.
 fn put(i: usize, size: usize) -> bool {
     // SAFETY: `size` is non-zero (callers pass at least 1) and the layout is valid.
@@ -109,8 +116,7 @@ fn churn(w: u32, target: usize) -> u32 {
     }
 }
 
-/// W3: eight buffers grown by `realloc` in steps of 1.5 times from 64 bytes up to the largest size that is
-/// at most 8 MiB (about 7.8 MiB), round-robin.
+/// W3: eight buffers grown by `realloc` in steps of 1.5 times from 64 bytes to exactly 8 MiB, round-robin.
 fn growing() -> u32 {
     let mut size = [64usize; 8];
     let mut ptr = [0usize; 8];
@@ -122,12 +128,9 @@ fn growing() -> u32 {
         }
     }
     let mut ok = true;
-    'outer: while size.iter().any(|&s| (s * 3).div_ceil(2) <= 8 << 20) {
+    'outer: while size[7] < 8 << 20 {
         for k in 0..8 {
-            let new = (size[k] * 3).div_ceil(2);
-            if new > 8 << 20 {
-                continue;
-            }
+            let new = (size[k] * 3).div_ceil(2).min(8 << 20);
             // SAFETY: `ptr[k]` is a live block of `size[k]` bytes with alignment 8.
             let q = unsafe { realloc(ptr[k] as *mut u8, layout(size[k]), new) } as usize;
             if q == 0 {
@@ -180,13 +183,14 @@ pub extern "C" fn t_run(w: u32, seed: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn t_full_return() -> u32 {
     let before = super::footprint();
-    let size = ((before - 65_536) / 100 * 99) as usize;
-    // SAFETY: valid non-zero layout.
-    let p = unsafe { alloc(layout(size)) };
+    let size = (before.saturating_sub(super::heap::RESERVE as u64) / 100 * 99) as u32;
+    let Some(l) = nonzero_layout(size, 8) else { return 0 };
+    // SAFETY: the layout has been validated and has a non-zero size.
+    let p = unsafe { alloc(l) };
     let ok = !p.is_null() && super::footprint() == before;
     if !p.is_null() {
         // SAFETY: `p` was just allocated with this layout.
-        unsafe { dealloc(p, layout(size)) };
+        unsafe { dealloc(p, l) };
     }
     u32::from(ok)
 }
@@ -194,15 +198,17 @@ pub extern "C" fn t_full_return() -> u32 {
 /// Pairs of `size`-byte allocate/free, `n` times (the speed gate).
 #[no_mangle]
 pub extern "C" fn t_pairs(n: u32, size: u32) -> u32 {
-    let l = layout(size as usize);
+    let Some(l) = nonzero_layout(size, 8) else { return 0 };
     let mut sum = 0usize;
     for _ in 0..n {
-        // SAFETY: valid non-zero layout; the block is freed right away with the same layout.
-        unsafe {
-            let p = alloc(l);
-            sum = sum.wrapping_add(p as usize);
-            dealloc(p, l);
+        // SAFETY: the layout has been validated and has a non-zero size.
+        let p = unsafe { alloc(l) };
+        if p.is_null() {
+            return 0;
         }
+        sum = sum.wrapping_add(p as usize);
+        // SAFETY: `p` was just allocated with this layout.
+        unsafe { dealloc(p, l) };
     }
     sum as u32
 }
@@ -235,26 +241,38 @@ pub extern "C" fn t_raise(bytes: u32) -> u32 {
 /// Raw allocation: the address, or 0.
 #[no_mangle]
 pub extern "C" fn t_alloc(size: u32, align: u32) -> u32 {
-    let Ok(l) = Layout::from_size_align(size as usize, align as usize) else { return 0 };
-    // SAFETY: the layout is valid and non-zero sized for the callers of this test hook.
+    let Some(l) = nonzero_layout(size, align) else { return 0 };
+    // SAFETY: the layout has been validated and has a non-zero size.
     unsafe { alloc(l) as usize as u32 }
 }
 
 #[no_mangle]
 pub extern "C" fn t_free(ptr: u32, size: u32, align: u32) {
+    let Some(l) = nonzero_layout(size, align) else { return };
+    if ptr == 0 {
+        return;
+    }
     // SAFETY: the caller passes a live block with exactly this size and alignment.
-    unsafe { dealloc(ptr as usize as *mut u8, Layout::from_size_align_unchecked(size as usize, align as usize)) };
+    unsafe { dealloc(ptr as usize as *mut u8, l) };
 }
 
 #[no_mangle]
 pub extern "C" fn t_realloc(ptr: u32, old: u32, align: u32, new: u32) -> u32 {
-    // SAFETY: the caller passes a live block with exactly this size and alignment, and a non-zero `new`.
-    unsafe { realloc(ptr as usize as *mut u8, Layout::from_size_align_unchecked(old as usize, align as usize), new as usize) as usize as u32 }
+    let Some(l) = nonzero_layout(old, align) else { return 0 };
+    let Some(next) = nonzero_layout(new, align) else { return 0 };
+    if ptr == 0 {
+        return 0;
+    }
+    // SAFETY: the caller passes a live block of layout `l` and the new size is validated.
+    unsafe { realloc(ptr as usize as *mut u8, l, next.size()) as usize as u32 }
 }
 
 /// Allocates `size`-byte blocks until the allocator refuses; returns how many it got (kept live in the slots).
 #[no_mangle]
 pub extern "C" fn t_fill(size: u32) -> u32 {
+    if nonzero_layout(size, 8).is_none() {
+        return 0;
+    }
     let mut n = 0;
     while n < SLOTS && put(n, size as usize) {
         n += 1;
@@ -273,7 +291,7 @@ pub extern "C" fn t_unfill() {
 /// ordinary request refused again after the scope closed.
 #[no_mangle]
 pub extern "C" fn t_reserve_probe(size: u32) -> u32 {
-    let l = layout(size as usize);
+    let Some(l) = nonzero_layout(size, 8) else { return 0 };
     let try_one = || {
         // SAFETY: valid non-zero layout; a block obtained is freed at once.
         let p = unsafe { alloc(l) };

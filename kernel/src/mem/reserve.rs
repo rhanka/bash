@@ -1,4 +1,4 @@
-//! The allocator reserve (spec L1a-2 4.6, 5.1): 64 KiB below the ceiling that ordinary allocations cannot
+//! The allocator reserve (spec L1a-2 4.6, 5.1): a dedicated 64 KiB page that ordinary allocations cannot
 //! use. Inside [`reserve_scope`] allocations may use it, so that a fiber that hit a limit can still build the
 //! message and exit code that report it.
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};

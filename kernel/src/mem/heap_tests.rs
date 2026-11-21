@@ -30,6 +30,7 @@ impl Pages for Fake {
         if self.refuse {
             return None;
         }
+        let starts_arena = self.used <= 1;
         let skip = if self.gap && self.used > 0 { 1 } else { 0 };
         if self.used + skip + n > self.pages {
             return None;
@@ -37,7 +38,7 @@ impl Pages for Fake {
         self.used += skip;
         let addr = self.base + self.used * PAGE;
         self.used += n;
-        if self.starts.is_empty() || addr != self.last_end {
+        if starts_arena || addr != self.last_end {
             self.starts.push(addr);
         }
         self.last_end = addr + n * PAGE;
@@ -49,10 +50,15 @@ const BIG: u64 = 1 << 40;
 
 /// Walks every region and checks the boundary-tag invariants; returns the sum of the in-use block sizes.
 fn validate(h: &Heap, f: &Fake) -> usize {
+    let (reserve, ordinary) = f.starts.split_at(f.starts.len().min(1));
+    validate_arena(&h.reserve, reserve) + validate_arena(&h.ordinary, ordinary)
+}
+
+fn validate_arena(h: &Arena, starts: &[usize]) -> usize {
     let mut in_use = 0;
     let mut free_total = 0;
     let mut free_count = 0;
-    for &start in &f.starts {
+    for &start in starts {
         let mut blk = start + HDR;
         let mut prev_free = false;
         loop {
@@ -161,8 +167,9 @@ fn alignment_size_and_reuse() {
         assert_ne!(p, 0);
         assert_eq!(p % 16, 0);
     }
-    assert!(b >= a + 24 && c >= b + 24, "min block payload is 24 bytes");
-    assert_eq!(h.footprint(), PAGE);
+    assert_eq!(b - a, 32, "a small allocation uses one minimum-size block");
+    assert_eq!(c - b, 32, "a 24-byte payload fits in one minimum-size block");
+    assert_eq!(h.footprint(), 2 * PAGE as u64);
     validate(&h, &f);
     h.dealloc(b);
     // A freed block of the same class is reused.
@@ -191,7 +198,7 @@ fn merging_returns_the_whole_heap() {
     assert_eq!(validate(&h, &f), 0);
     // One block spans the region: the largest request that fits does fit without growing.
     let fp = h.footprint();
-    let big = h.alloc(&mut f, fp - 2 * HDR - HDR, 16, BIG, true);
+    let big = h.alloc(&mut f, fp as usize - RESERVE - 3 * HDR, 16, BIG, false);
     assert_ne!(big, 0);
     assert_eq!(h.footprint(), fp);
 }
@@ -219,11 +226,49 @@ fn realloc_grows_and_shrinks_in_place_when_it_can() {
     check_fill(a4, 50, 7);
     validate(&h, &f);
     // Shrinking with a free neighbour merges the remainder into it.
-    let before = h.in_use;
+    let before = h.ordinary.in_use;
     let a5 = h.realloc(&mut f, a4, 400, 8, 64, BIG, false);
     assert_eq!(a5, a4);
-    assert!(h.in_use < before);
+    assert!(h.ordinary.in_use < before);
     validate(&h, &f);
+}
+
+#[test]
+fn large_realloc_retries_the_exact_size_at_the_ceiling() {
+    let mut f = Fake::new(4, false);
+    let mut h = Heap::new();
+    let ceiling = 4 * PAGE as u64;
+    let a = h.alloc(&mut f, 100, 8, ceiling, false);
+    fill(a, 100, 17);
+    let new_size = 3 * PAGE - 3 * HDR;
+    let p = h.realloc(&mut f, a, 100, 8, new_size, ceiling, false);
+    assert_eq!(p, a, "the exact size fits when the rounded capacity does not");
+    check_fill(p, 100, 17);
+    assert_eq!(h.footprint(), ceiling);
+    h.dealloc(p);
+    assert_eq!(validate(&h, &f), 0);
+}
+
+#[test]
+fn large_realloc_prefers_an_exact_adjacent_fit_to_rounded_growth() {
+    let mut f = Fake::new(8, false);
+    let mut h = Heap::new();
+    let a = h.alloc(&mut f, 100, 8, BIG, false);
+    fill(a, 100, 23);
+    let new_size = PAGE + 1;
+    let neighbour_size = block_size(new_size).unwrap() - block_size(100).unwrap() - HDR;
+    let neighbour = h.alloc(&mut f, neighbour_size, 8, BIG, false);
+    let blocker = h.alloc(&mut f, PAGE, 8, BIG, false);
+    assert_eq!(neighbour, a + block_size(100).unwrap());
+    assert_eq!(blocker, neighbour + block_size(neighbour_size).unwrap());
+    h.dealloc(neighbour);
+    let before = h.footprint();
+    assert_eq!(h.realloc(&mut f, a, 100, 8, new_size, BIG, false), a);
+    assert_eq!(h.footprint(), before);
+    check_fill(a, 100, 23);
+    h.dealloc(a);
+    h.dealloc(blocker);
+    assert_eq!(validate(&h, &f), 0);
 }
 
 #[test]
@@ -261,18 +306,69 @@ fn ceiling_bounds_the_footprint_and_the_reserve_holds_back_ordinary_requests() {
         }
         ps.push(p);
     }
-    assert!(h.footprint() as u64 <= ceiling);
-    assert!(h.in_use <= 7 * PAGE, "ordinary requests stay out of the reserve");
+    assert!(h.footprint() <= ceiling);
+    assert_eq!(h.reserve.in_use, 0, "ordinary requests stay out of the reserve");
     assert_eq!(h.alloc(&mut f, 4096, 8, ceiling, false), 0);
     let r = h.alloc(&mut f, 4096, 8, ceiling, true);
     assert_ne!(r, 0, "the reserve serves a request inside the scope");
-    assert!(h.footprint() as u64 <= ceiling);
+    assert!(h.footprint() <= ceiling);
     // Beyond the ceiling the reserve cannot help either.
     assert_eq!(h.alloc(&mut f, 4 * PAGE, 8, ceiling, true), 0);
     for p in ps {
         h.dealloc(p);
     }
     h.dealloc(r);
+    assert_eq!(validate(&h, &f), 0);
+}
+
+#[test]
+fn the_top_page_closes_at_a_representable_header() {
+    let top = usize::MAX - (PAGE - 1);
+    assert_eq!(region_end_header(top, PAGE as u64), Some(usize::MAX - (HDR - 1)));
+    assert_eq!(region_end_header(top, 2 * PAGE as u64), None);
+    assert_eq!(region_end_header(top, 0), None);
+}
+
+#[test]
+fn the_reserve_survives_the_engine_limit_and_closed_scope_reallocation() {
+    let mut f = Fake::new(8, false);
+    let mut h = Heap::new();
+    let small: Vec<_> = (0..4096).map(|_| h.alloc(&mut f, 16, 8, BIG, false)).collect();
+    assert!(small.iter().all(|&p| p != 0));
+    for &p in small.iter().step_by(2) {
+        h.dealloc(p);
+    }
+    let mut large = Vec::new();
+    loop {
+        let p = h.alloc(&mut f, 4096, 8, BIG, false);
+        if p == 0 {
+            break;
+        }
+        large.push(p);
+    }
+    assert_eq!(f.used, f.pages, "the engine limit is below the configured ceiling");
+    let footprint = h.footprint();
+    assert_eq!(h.footprint_high_water(), footprint);
+    let r = h.alloc(&mut f, 4096, 8, BIG, true);
+    assert_ne!(r, 0);
+    assert!(h.in_reserve(r));
+    fill(r, 4096, 11);
+    assert_eq!(h.realloc(&mut f, r, 4096, 8, 8192, BIG, false), 0);
+    check_fill(r, 4096, 11);
+    assert_eq!(h.realloc(&mut f, r, 4096, 8, 8192, BIG, true), r);
+    check_fill(r, 4096, 11);
+    for p in large {
+        h.dealloc(p);
+    }
+    let ordinary = h.realloc(&mut f, r, 8192, 8, 16384, BIG, false);
+    assert_ne!(ordinary, 0);
+    assert!(!h.in_reserve(ordinary));
+    check_fill(ordinary, 4096, 11);
+    h.dealloc(ordinary);
+    for &p in small.iter().skip(1).step_by(2) {
+        h.dealloc(p);
+    }
+    assert_eq!(h.footprint(), footprint);
     assert_eq!(validate(&h, &f), 0);
 }
 

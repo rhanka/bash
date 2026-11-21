@@ -28,6 +28,7 @@ test("gates 1 and 2: footprint bound and full return, per workload", () => {
     ratios[w] = ratio;
     console.log(`# ${NAMES[w]}: peak live ${peak} B, footprint high water ${hw} B, ratio ${ratio.toFixed(3)}`);
     assert.ok(peak >= 8 << 20, `${NAMES[w]} peak ${peak} is at least 8 MiB`);
+    if (w === 3) assert.equal(peak, 8 * (8 << 20), "all eight buffers reach exactly 8 MiB");
     if (w === 4) assert.ok(ratio <= 2.0, `W4 ratio ${ratio}`);
     else assert.ok(ratio <= 1.25, `${NAMES[w]} ratio ${ratio} must be at most 1.25`);
     // Gate 2.
@@ -83,6 +84,28 @@ test("gate 5: null, never trap", () => {
   assert.notEqual(x.t_alloc(64 << 20, 8), 0, "and the freed memory is reusable");
 });
 
+test("gate 5: the final wasm32 page is usable with arithmetic checks enabled", () => {
+  const x = instantiate(buildMemModule({ addressSpaceProbe: true })).exports;
+  assert.equal(x.t_configure(0xffffffff), 0);
+  const held = [];
+  for (const size of [128 << 20, 1 << 20, 32 << 10]) {
+    for (;;) {
+      const p = x.t_alloc(size, 16) >>> 0;
+      if (p === 0) break;
+      held.push([p, size]);
+      assert.ok(held.length < 512);
+    }
+  }
+  assert.equal(x.memory.buffer.byteLength, 2 ** 32);
+  assert.equal(x.t_footprint() >>> 0, x.t_footprint_hw() >>> 0);
+  assert.equal(x.t_alloc(32 << 10, 16), 0, "one more growth is refused");
+  for (const [p, size] of held) x.t_free(p, size, 16);
+  assert.equal(x.t_used(), 0);
+  const p = x.t_alloc(4096, 16);
+  assert.notEqual(p, 0, "top-page coalescing leaves the heap reusable");
+  x.t_free(p, 4096, 16);
+});
+
 test("gate 6: alignment and content preservation", () => {
   const x = fresh();
   for (const align of [1, 2, 4, 8, 16]) {
@@ -122,6 +145,51 @@ test("gate 7: the reserve serves requests inside reserve_scope only", () => {
   // bits: 0 refused, 1 served in scope, 2 nested served, 3 served after nested returned, 4 refused again
   assert.equal(x.t_reserve_probe(4096), 0b11111);
   assert.ok(x.t_footprint() <= 4 << 20);
+});
+
+test("gate 7: ordinary allocations cannot fragment the reserve", () => {
+  const ceiling = 8 * 65536;
+  const x = fresh(ceiling);
+  const small = Array.from({ length: 4096 }, () => x.t_alloc(16, 8));
+  assert.ok(small.every((p) => p !== 0));
+  for (let i = 0; i < small.length; i += 2) x.t_free(small[i], 16, 8);
+  assert.ok(x.t_fill(4096) > 0);
+  assert.equal(x.t_footprint(), ceiling);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(x.t_alloc(4096, 8), 0);
+    assert.equal(x.t_reserve_probe(4096), 0b11111, `scope ${i}, with nesting`);
+    assert.equal(x.t_footprint(), ceiling);
+  }
+  x.t_unfill();
+  for (let i = 1; i < small.length; i += 2) x.t_free(small[i], 16, 8);
+  assert.equal(x.t_used(), 0);
+  assert.equal(x.t_full_return(), 1);
+});
+
+test("test allocation hooks refuse empty, invalid and exhausted requests safely", () => {
+  const x = fresh(2 * 65536);
+  assert.equal(x.t_full_return(), 0, "an empty heap has nothing to return");
+  assert.equal(x.t_alloc(0, 8), 0);
+  assert.equal(x.t_pairs(1, 0), 0);
+  assert.equal(x.t_pairs(1, 0xffffffff), 0);
+  assert.equal(x.t_fill(0), 0);
+  assert.equal(x.t_reserve_probe(0), 0);
+  x.t_free(0, 64, 8);
+  assert.equal(x.t_realloc(0, 64, 8, 128), 0);
+  const p = x.t_alloc(64, 8);
+  assert.notEqual(p, 0);
+  new Uint8Array(x.memory.buffer)[p] = 42;
+  assert.equal(x.t_realloc(p, 64, 8, 0), 0);
+  assert.equal(x.t_realloc(p, 0, 8, 128), 0);
+  assert.equal(x.t_realloc(p, 64, 3, 128), 0);
+  assert.equal(x.t_realloc(p, 64, 8, 0xffffffff), 0);
+  assert.equal(new Uint8Array(x.memory.buffer)[p], 42);
+  assert.equal(x.t_used(), 64, "the rejected reallocations leave the block live");
+  assert.ok(x.t_fill(1024) > 0);
+  assert.equal(x.t_pairs(1, 4096), 0);
+  x.t_unfill();
+  x.t_free(p, 64, 8);
+  assert.equal(x.t_used(), 0);
 });
 
 test("gate 8: headroom accounting", () => {
