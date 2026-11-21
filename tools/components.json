@@ -1,0 +1,5 @@
+{
+  "components": {
+    "probe": { "crate": "sentropic-bash-probe", "witDir": "probe/wit", "world": "probe", "wasmOpt": false }
+  }
+}

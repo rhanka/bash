@@ -1,0 +1,8 @@
+{
+  "name": "sentropic-bash-build-tools",
+  "private": true,
+  "devDependencies": {
+    "@bytecodealliance/jco-transpile": "0.24.0",
+    "typescript": "7.0.2"
+  }
+}

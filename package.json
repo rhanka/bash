@@ -5,7 +5,27 @@
   "description": "A zero-dependency, WASM-first, security- and performance-focused bash sandbox (clean-room reimplementation with functional parity to vercel-labs/just-bash).",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./host/index.js"
+    },
+    "./browser": {
+      "types": "./types/browser.d.ts",
+      "default": "./host/browser.js"
+    }
+  },
+  "files": [
+    "host/",
+    "types/",
+    "wit/",
+    "dist/js/",
+    "dist/*.component.wasm",
+    "DIVERGENCES.md"
+  ],
   "dependencies": {},
   "devDependencies": {}
 }

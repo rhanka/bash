@@ -1,0 +1,178 @@
+package sentropic:bash@0.1.0-draft;
+
+interface types {
+  type bytes = list<u8>;
+
+  enum profile { micro, contain, hardened, normal }
+  record limit-override { name: string, value: u64 }
+  record limits { profile: profile, overrides: list<limit-override> }
+  flags grants { host-fs, network, real-clock, real-sleep, entropy, custom-commands }
+
+  record env-var { name: bytes, value: bytes, exported: bool }
+  record fd-entry { fd: u32, len: u64 }      // content pulled with read-call-input
+  record process-info { pid: u32, ppid: u32, uid: u32, gid: u32 }
+  record shell-config {
+    limits: limits,
+    grants: grants,
+    commands: option<list<string>>,       // none = every kernel command
+    custom-commands: list<string>,
+    env: list<env-var>,
+    cwd: option<bytes>,
+    process-info: option<process-info>,
+    default-layout: bool,
+    trace: bool,                          // collect trace events (D.6)
+    coverage: bool,                       // collect coverage hits (D.7)
+  }
+  record script-overflow { utf16-units: u64, utf8-bytes: u64 }
+  record exec-opts {
+    script: bytes,                         // at most 3 MiB; empty when script-overflow is set
+    script-overflow: option<script-overflow>,
+    args: list<bytes>,
+    env: list<env-var>,
+    replace-env: bool,
+    cwd: option<bytes>,
+    raw-script: bool,
+    bypass-custom: option<string>,         // run the built-in of that name, not the custom command
+  }
+  enum exec-status { completed, limit-exceeded, aborted, deadline }
+  record exec-result {
+    exit-code: s32,
+    status: exec-status,
+    limit-name: option<string>,
+    env: list<env-var>,
+  }
+
+  enum node-kind { file, directory, symlink }
+  record stat { kind: node-kind, size: u64, mode: u32, mtime-ms: s64, dev: u64, ino: u64 }
+  record dir-entry { name: bytes, kind: node-kind }
+  record walk-entry { path: bytes, info: stat }
+  enum fs-error-code { not-found, exists, not-directory, is-directory, not-empty, permission,
+                       invalid, link-loop, too-large, no-space, busy, cross-device, read-only,
+                       unsupported, io }
+  record fs-error { code: fs-error-code, path: bytes }
+
+  record read-req { path: bytes, offset: u64, len: u32 }
+  record write-req { path: bytes, data: bytes, offset: option<u64>,   // none = append
+                     truncate: bool, mode: option<u32>, mtime-ms: option<s64> }
+  record lazy-req { path: bytes, mode: u32, mtime-ms: option<s64> }
+  record create-req { path: bytes, mode: u32, directory: bool }
+  record mkdir-req { path: bytes, recursive: bool, mode: option<u32> }
+  record remove-req { path: bytes, recursive: bool, force: bool }
+  record pair-req { source: bytes, target: bytes, recursive: bool }
+  record chmod-req { path: bytes, mode: u32 }
+  record utimes-req { path: bytes, atime-ms: s64, mtime-ms: s64 }
+  record walk-req { root: bytes, max-depth: u32, max-entries: u32 }
+  variant fs-op {
+    stat(bytes), lstat(bytes), exists(bytes), read-link(bytes), real-path(bytes),
+    read-dir(bytes), read-dir-plus(bytes), walk(walk-req), all-paths,
+    read-file(read-req), write-file(write-req), write-lazy(lazy-req),
+    create-exclusive(create-req), mkdir(mkdir-req), remove(remove-req), copy(pair-req),
+    rename(pair-req), symlink(pair-req), hard-link(pair-req), chmod(chmod-req),
+    utimes(utimes-req),
+  }
+  variant fs-ok {
+    none, flag(bool), info(stat), path(bytes), data(bytes), paths(list<bytes>),
+    entries(list<dir-entry>), entries-plus(list<walk-entry>),
+  }
+  type fs-result = result<fs-ok, fs-error>;
+  record fs-batch-req { mount-id: u32, ops: list<fs-op> }
+  record changed-file { path: bytes, removed: bool }
+
+  record header { name: string, value: bytes }
+  record command-call { name: string, args: list<bytes>, cwd: bytes, env: list<env-var>,
+                        fds: list<fd-entry>, input-len: u64, xpg-echo: bool }
+  record fetch-req { method: string, url: string, headers: list<header>, input-len: u64,
+                     follow-redirects: bool, max-redirects: option<u32>,
+                     timeout-ms: u32, max-response-bytes: u64 }
+  record redirect-hop { url: string, status: u16, status-text: string, headers: list<header> }
+  record fetch-resp { status: u16, status-text: string, url: string, headers: list<header>,
+                      redirect-chain: list<redirect-hop> }
+  enum net-error-code { access-denied, method-not-allowed, redirect-denied, too-many-redirects,
+                        response-too-large, timeout, network }
+  record net-error { code: net-error-code, detail: bytes }
+  record clock-reading { wall-ms: s64, monotonic-ns: u64 }
+  variant host-req {
+    fs-batch(fs-batch-req), lazy-file(bytes), custom-command(command-call),
+    fetch(fetch-req), sleep(u64), clock, entropy(u32),
+    trace-clock,                          // monotonic time for trace durations only
+  }
+  variant host-outcome {
+    fs(list<fs-result>), data(bytes), command-exit(s32), fetched(fetch-resp),
+    clock(clock-reading), completed, denied, limit-exceeded(string),
+    net-failed(net-error), failed(bytes),
+  }
+  record pending-call { epoch: u64, req: host-req }
+  variant step { done(exec-result), out-of-fuel, host-call(pending-call) }
+  enum cancel-reason { aborted, deadline, limit }
+  enum out-channel { stdout, stderr, body }
+
+  enum kernel-error-code { not-configured, already-configured, ceiling, invalid-config,
+                           stale-epoch, bad-state, too-large, denied }
+  record kernel-error { code: kernel-error-code, detail: string }
+  record memory-usage { used: u64, ceiling: u64, high-water: u64 }
+
+  variant trace-value { number(f64), text(bytes) }
+  record trace-detail { key: string, value: trace-value }
+  record trace-event { category: string, name: string, duration-ms: f64,
+                       details: list<trace-detail> }
+
+  record oneshot-file { path: bytes, data: bytes, mode: u32 }
+  record oneshot-req { files: list<oneshot-file>, config: shell-config, opts: exec-opts,
+                       stdin: bytes, fuel: u64 }
+  record oneshot-result { outcome: exec-result, stdout: bytes, stderr: bytes,
+                          changed: list<oneshot-file>, removed: list<bytes> }
+}
+
+interface engine {
+  use types.{bytes, env-var, shell-config, exec-opts, exec-result, step, host-outcome, trace-event,
+             cancel-reason, out-channel, fs-op, fs-result, fs-error, changed-file,
+             kernel-error, memory-usage, oneshot-req, oneshot-result};
+
+  configure: func(memory-ceiling-bytes: u64) -> result<_, kernel-error>;     // once, first call
+  raise-ceiling: func(memory-ceiling-bytes: u64) -> result<_, kernel-error>; // monotonic
+  usage: func() -> memory-usage;
+  coverage-features: func() -> list<string>;   // identifier table; index = feature id
+
+  resource vfs {
+    create: static func(max-bytes: u64) -> result<vfs, kernel-error>;
+    op: func(req: fs-op) -> fs-result;
+    mount-vfs: func(path: bytes, source: borrow<vfs>) -> result<_, fs-error>;  // same instance
+    mount-host: func(path: bytes, mount-id: u32) -> result<_, fs-error>;       // "/" allowed
+    unmount: func(path: bytes) -> result<_, fs-error>;
+    take-dirty: func() -> list<changed-file>;
+    used-bytes: func() -> u64;
+  }
+
+  resource shell {
+    create: static func(root: borrow<vfs>, config: shell-config) -> result<shell, kernel-error>;
+    register-command: func(name: string) -> result<_, kernel-error>;
+    env: func() -> list<env-var>;
+    cwd: func() -> bytes;
+  }
+
+  resource fiber {
+    spawn: static func(owner: borrow<shell>, parent: option<borrow<fiber>>, opts: exec-opts)
+        -> result<fiber, kernel-error>;
+    write-stdin: func(chunk: bytes, last: bool) -> result<_, kernel-error>;
+    run: func(fuel: u64) -> step;
+    resume: func(epoch: u64, outcome: host-outcome) -> result<step, kernel-error>;
+    // valid only while the call of that epoch is pending:
+    read-call-input: func(epoch: u64, fd: u32, max: u32) -> result<bytes, kernel-error>;
+    push-call-data: func(epoch: u64, channel: out-channel, chunk: bytes)
+        -> result<_, kernel-error>;
+    assign-variable: func(epoch: u64, name: bytes, value: bytes, subscript: option<bytes>)
+        -> result<_, kernel-error>;
+    set-call-env: func(epoch: u64, env: list<env-var>) -> result<_, kernel-error>;
+    cancel: func(reason: cancel-reason) -> exec-result;
+    take-stdout: func(max: u32) -> bytes;
+    take-stderr: func(max: u32) -> bytes;
+    take-trace: func(max: u32) -> list<trace-event>;
+    take-coverage: func(max: u32) -> list<u16>;   // feature ids, in hit order
+  }
+
+  exec-oneshot: func(req: oneshot-req) -> result<oneshot-result, kernel-error>;
+}
+
+world kernel {
+  export engine;
+}
