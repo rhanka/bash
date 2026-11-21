@@ -1,0 +1,32 @@
+{
+  "case": "l2/path-resolution",
+  "caseHash": "fc94bfcfa6037c84319ded6529fb109404ebb5af2a1b034199fb6b9651993dc0",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "127",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 127,
+      "stderr": "bash: /nope: No such file or directory\nbash: /bin: Permission denied\nbash: /nonexec.sh: Permission denied\nbash: echo: command not found\n",
+      "stdout": "via-bin\nvia-usr-bin\n"
+    }
+  ]
+}

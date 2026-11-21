@@ -1,0 +1,12 @@
+{
+  "id": "l2/path-table",
+  "steps": [
+    {
+      "script": "echo a\nPATH=''\necho b\nPATH=/nowhere\necho c\nmissing_x"
+    },
+    {
+      "script": "PATH=''\necho d"
+    }
+  ],
+  "title": "Path table"
+}
