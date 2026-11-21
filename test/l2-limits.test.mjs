@@ -121,6 +121,28 @@ test("deep shell recursion saves its call frames on budgeted heap memory", async
   await usable(shell);
 });
 
+test("a recursion diagnostic uses only the remaining output budget", async () => {
+  const shell = new Bash({ executionLimits: { maxCallDepth: 1, maxOutputSize: 128 } });
+  const name = "f".repeat(1024);
+  const r = await shell.exec(`echo begin; ${name}() { ${name}; }; ${name}`);
+  assert.equal(r.exitCode, 126);
+  assert.equal(r.stdout, "begin\n");
+  const suffix = ": maximum recursion depth (1) exceeded, increase executionLimits.maxCallDepth\n";
+  assert.equal(r.stderr, "bash: " + name.slice(0, 128 - r.stdout.length - 6 - suffix.length) + suffix);
+  await usable(shell);
+});
+
+test("an exec overlay is charged to the fiber before it can be retained", async () => {
+  const shell = new Bash({ executionLimits: { maxLiveBytes: 8_192 } });
+  const payload = "x".repeat(9_000);
+  // An empty script previously kept an over-budget overlay in scratch for its early result.
+  const r = await shell.exec("", { env: { PAYLOAD: payload } });
+  assert.equal(r.exitCode, 126);
+  assert.match(r.stderr, /maxLiveBytes/);
+  assert.equal(r.env.PAYLOAD, payload);
+  await usable(shell);
+});
+
 test("the parser caps apply before the VM runs a stage", async () => {
   const shell = new Bash();
   const tokens = await shell.exec("echo x\n".repeat(33_334));

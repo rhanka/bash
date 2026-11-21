@@ -83,13 +83,16 @@ impl Env {
     }
 
     pub(crate) fn set_owned(&mut self, name: &[u8], value: KBytes, exported: bool) -> MemResult<()> {
+        self.replace_owned(name, value, exported).map(drop)
+    }
+
+    pub(crate) fn replace_owned(&mut self, name: &[u8], value: KBytes, exported: bool) -> MemResult<Option<(KBytes, bool)>> {
         if let Some(e) = self.v.iter_mut().find(|e| e.name.as_slice() == name) {
-            e.value = value;
-            e.exported = exported;
-            return Ok(());
+            return Ok(Some((core::mem::replace(&mut e.value, value), core::mem::replace(&mut e.exported, exported))));
         }
         let name = bytes_in(name, self.v.budget())?;
-        self.v.try_push(EnvEntry { name, value, exported })
+        self.v.try_push(EnvEntry { name, value, exported })?;
+        Ok(None)
     }
 
     pub fn copy_from(&mut self, source: &Self) -> MemResult<()> {

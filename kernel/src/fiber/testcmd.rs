@@ -94,8 +94,18 @@ impl Fiber {
             }
             C_FSALLOC => {
                 let (Some(path), Some(n)) = (args.first(), num(1)) else { return Some(self.t_bad(name)) };
-                self.last_exit = 0;
-                self.t_ok(self.shell.root.allocate_file(path, n).map_err(Fail::Mem))
+                match self.shell.root.allocate_file(path, n) {
+                    Ok(true) => {
+                        self.last_exit = 0;
+                        Flow::Next
+                    }
+                    Ok(false) => {
+                        self.last_exit = 1;
+                        let written = self.write_out(Chan::Stderr, b"__fsalloc: Is a directory\n");
+                        self.t_ok(written)
+                    }
+                    Err(e) => Flow::Fail(Fail::Mem(e)),
+                }
             }
             C_WORK => {
                 let Some(n) = num(0) else { return Some(self.t_bad(name)) };

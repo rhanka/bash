@@ -94,6 +94,55 @@ test("coverage uses stable ids and records flag occurrences in argument order", 
   }
 });
 
+test("relative exec working directories anchor to the shell and preserve PWD options", async () => {
+  const inspect = defineCommand("inspect", (_args, ctx) => ({ stdout: ctx.cwd, stderr: "", exitCode: 0 }));
+  const b = new Bash({ customCommands: [inspect] });
+  await b.fs.mkdir("/home/user/sub");
+  const relative = await b.exec("inspect", { cwd: "sub" });
+  assert.equal(relative.stdout, "/home/user/sub");
+  assert.equal(relative.env.PWD, "/home/user/sub");
+  const parent = await b.exec("../../bin/echo anchored", { cwd: "." });
+  assert.equal(parent.stdout, "anchored\n");
+  assert.equal(parent.env.PWD, "/home/user/.");
+  const uncollapsed = "/home/user/./sub";
+  assert.equal((await b.exec("inspect", { cwd: uncollapsed })).env.PWD, uncollapsed);
+  assert.equal((await b.exec("inspect", { cwd: "./sub", env: {} })).env.PWD, "/home/user/sub");
+  assert.equal((await b.exec("inspect", { cwd: "./sub", env: { KEY: "value" } })).env.PWD, "/home/user/sub");
+  assert.equal((await b.exec("inspect", { cwd: "./missing", env: {} })).env.PWD, "/home/user/./missing");
+  const explicit = await b.exec("inspect", { cwd: "./sub", env: { PWD: "logical" } });
+  assert.equal(explicit.stdout, uncollapsed);
+  assert.equal(explicit.env.PWD, "logical");
+  assert.equal(b.getCwd(), "/home/user");
+});
+
+test("empty exec env resolves cwd through the configured filesystem", async () => {
+  const paths = [];
+  const fs = {
+    async realpath(path) {
+      paths.push(path);
+      if (path === "/home/user/./link") return "/elsewhere";
+      throw new Error("path missing");
+    },
+  };
+  const inspect = defineCommand("inspect", (_args, ctx) => ({ stdout: ctx.cwd, stderr: "", exitCode: 0 }));
+  const b = new Bash({ fs, customCommands: [inspect] });
+  const omitted = await b.exec("inspect", { cwd: "./link" });
+  assert.equal(omitted.stdout, "/home/user/./link");
+  const explicit = await b.exec("inspect", { cwd: "./link", env: {} });
+  assert.equal(explicit.stdout, "/elsewhere");
+  assert.equal(explicit.env.PWD, "/elsewhere");
+  const missing = await b.exec("inspect", { cwd: "./missing", env: { KEY: "value" } });
+  assert.equal(missing.stdout, "/home/user/./missing");
+  assert.deepEqual(paths, ["/home/user/./link", "/home/user/./missing"]);
+});
+
+test("IFS splits on Unicode scalars across expansion chunks", async () => {
+  const text = "x".repeat(255);
+  const shell = new Bash();
+  const r = await shell.exec('echo $S "$S"', { env: { IFS: "é🚀βλЖのあΩø∞", S: text + "🚀élan∞fin" } });
+  assert.equal(r.stdout, text + "  lan fin " + text + "🚀élan∞fin\n");
+});
+
 test("a host call can resume between pipelines without leaking prefix assignments", async () => {
   const read = defineCommand("readstdin", (_args, ctx) => ({ stdout: ctx.stdin, stderr: "", exitCode: 0 }));
   const bash = new Bash({ customCommands: [read] });

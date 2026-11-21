@@ -261,7 +261,7 @@ export function createFacade(loader) {
         env,
         replaceEnv: options.replaceEnv,
         cwd: options.cwd || undefined,
-        emptyEnvGiven: options.env !== undefined && env.length === 0,
+        envGiven: options.env !== undefined,
         rawScript: options.rawScript,
         stdin,
         args: options.args ?? [],
