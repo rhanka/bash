@@ -1,6 +1,5 @@
 // One kernel instance: the instantiated component, its trap state and the hooks used by tests.
 import { instantiate as productionInstantiate } from "../../dist/js/kernel/kernel.js";
-import { shims as productionShims } from "../../dist/js/kernel/kernel.shims.js";
 import { KernelPoisonedError } from "./errors.js";
 
 /**
@@ -9,14 +8,14 @@ import { KernelPoisonedError } from "./errors.js";
  */
 export const INTERNAL = Symbol.for("@sentropic/bash.internal");
 
-/** Compiles the shim modules and hands the generated glue its core modules. */
+/** Resolves the main core and any shim modules requested by an injected adapter. */
 function coreModules(main, shims) {
   const cache = new Map();
   return (path) => {
     if (path.endsWith(".core.wasm")) return main;
     let m = cache.get(path);
     if (!m) {
-      const bytes = shims[path];
+      const bytes = shims?.[path];
       if (!bytes) throw new Error(`unknown core module ${path}`);
       m = new WebAssembly.Module(bytes);
       cache.set(path, m);
@@ -30,11 +29,12 @@ export class Instance {
   constructor(mainModule, hooks) {
     const impl = hooks?.kernel;
     const instantiate = impl?.instantiate ?? productionInstantiate;
-    const shims = impl?.shims ?? productionShims;
     this.hooks = hooks;
     this.poisoned = false;
     this.waiters = new Set();
-    const { engine, _util } = instantiate(coreModules(mainModule, shims), {});
+    const { engine, _util } = instantiate(coreModules(mainModule, impl?.shims), {}, undefined, {
+      onTrap: () => this.poison(),
+    });
     this.engine = engine;
     this.util = _util;
     hooks?.onEngine?.(this.engine);
@@ -60,10 +60,13 @@ export class Instance {
     try {
       this.util?.stop();
     } catch {
-      // The store is marked stopped before jco attempts cleanup.
+      // The instance is already poisoned even if an injected adapter fails to stop.
     }
-    for (const w of this.waiters) w();
+    const waiters = [...this.waiters];
     this.waiters.clear();
+    for (const wake of waiters) {
+      try { wake(); } catch { /* Continue notifying the pending fibers. */ }
+    }
   }
 
   /** Throws when the instance is poisoned. */
