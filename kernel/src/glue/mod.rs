@@ -11,6 +11,9 @@ pub mod rt;
 
 /// Allocation hook of the canonical ABI: every lowered value is allocated through `kernel::mem`, which
 /// traps rather than returning null (EVOL D6).
+///
+/// # Safety
+/// Called by the canonical ABI with its `realloc` contract, see `mem::cabi_realloc`.
 #[unsafe(export_name = "cabi_realloc")]
 pub unsafe extern "C" fn cabi_realloc(old_ptr: *mut u8, old_len: usize, align: usize, new_len: usize) -> *mut u8 {
     // SAFETY: the canonical ABI contract is exactly that of `mem::cabi_realloc`.
@@ -19,6 +22,9 @@ pub unsafe extern "C" fn cabi_realloc(old_ptr: *mut u8, old_len: usize, align: u
 
 /// `memcmp` for the core library: the wasm target links no C library, and `core` calls this for slice
 /// comparisons. A plain byte loop; `black_box` keeps the optimizer from turning it back into a call.
+///
+/// # Safety
+/// `a` and `b` must each be valid for reads of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     let mut i = 0;

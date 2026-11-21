@@ -1,4 +1,4 @@
-// Gate 12 of lot L1a-1: `unsafe` lives only in kernel/src/mem/ (and the binding module), and every use
+// Gate 12 of lot L1a-1: `unsafe` lives only in kernel/src/mem/, kernel/src/glue/ (and the generated bindings), and every use
 // there is preceded by a SAFETY comment.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -59,8 +59,9 @@ test("the check fails on unsafe outside mem", () => {
 
 test("bindings are exempt only when declared in components.json", () => {
   assert.match(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}", [])[0], /outside/);
-  assert.match(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}")[0], /outside/, "no component declares bindings today");
-  assert.deepEqual(declaredBindingDirs(), []);
+  assert.deepEqual(unsafeProblems("bindings/abi.rs", "unsafe fn f() {}"), [], "the kernel component declares kernel/src/bindings");
+  assert.deepEqual(declaredBindingDirs(), ["bindings/"]);
+  assert.match(unsafeProblems("glue/x.rs", "fn f() {\n    unsafe { g() };\n}")[0], /without a preceding/, "glue is hand-written: not exempt");
 });
 
 test("a one-line unsafe fn with an unsafe block needs a SAFETY comment", () => {
