@@ -9,7 +9,6 @@ import { toolsDir } from "../tools/lib.mjs";
 import { g1ZeroImport, g2NoBareImport, g4ComponentValidity } from "../tools/gates.mjs";
 import { INTERNAL, module } from "./kt.mjs";
 import { instantiate } from "../dist/test/js/kernel-test/kernel-test.js";
-import { shims } from "../dist/test/js/kernel-test/kernel-test.shims.js";
 
 test("gate 17: a default Bash never touches the host disk", () => {
   const dir = scratch("sentinel");
@@ -37,7 +36,7 @@ test("gate 20: the staging queue replays construction, registerCommand and synch
     env: { A: "1" },
     files: { "/work/a.txt": "from files" },
     customCommands: [hello],
-    [INTERNAL]: { kernel: { instantiate, shims }, moduleProvider: provider },
+    [INTERNAL]: { kernel: { instantiate }, moduleProvider: provider },
   });
   b.registerCommand(later);
   b.fs.writeFileSync("/work/b.txt", "from sync write");
