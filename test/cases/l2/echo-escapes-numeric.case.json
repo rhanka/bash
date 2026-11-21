@@ -1,0 +1,9 @@
+{
+  "id": "l2/echo-escapes-numeric",
+  "steps": [
+    {
+      "script": "echo -e '\\0101\\0102\\0\\07'\necho -e '\\x41\\x42\\x9\\xzz'\necho -e '\\u0043\\u03b1\\uz\\U0001f600\\U00110000\\Uz'"
+    }
+  ],
+  "title": "Echo escapes numeric"
+}

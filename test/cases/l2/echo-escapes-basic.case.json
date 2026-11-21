@@ -1,0 +1,9 @@
+{
+  "id": "l2/echo-escapes-basic",
+  "steps": [
+    {
+      "script": "echo -e 'a\\\\b\\nc\\td\\re\\af\\bg\\fh\\vi\\ej\\Ek\\q\\'"
+    }
+  ],
+  "title": "Echo escapes basic"
+}
