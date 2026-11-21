@@ -1,47 +1,10 @@
 # Gate L2
 
-**No-go (kernel miss).** After Option D, M1, M2, M3a, and M5 still exceed the kernel targets. Pause W4 and later build lots under PLAN section 5. Spec writing can continue while the owner reviews the targets, a slim build, and scope options. Shipped JS still exceeds the 60,000 B target.
+**No-go (kernel miss).** The shipping build exceeds the M1, M2, M3a, and M5 kernel budgets. Shipped JavaScript also exceeds the 60,000 B target. L2b owns the first-party glue. The build-lot pause under PLAN section 5 remains in effect.
 
-## Option D (guarded jco)
+## Revision and protocol
 
-The shipping minified kernel guards all 14 jco-transpile 0.24.0 probes with optional calls. The transpile step checks the count and the try/catch shapes in minified and unminified kernel glue. On Node 22.22.1, where `WebAssembly.promising` is undefined, the calls are skipped. When the API is present, jco still calls it and catches any exception.
-
-The unchanged driver ran with `node tools/measure-l2.mjs --variant committed` against the rebuilt package tree at `a307ff9d8d669863af497a843aacbde3228a2b2f` plus the Option D changes. The machine, tool versions, seeds, and protocol match the earlier runs below. Full samples are in `tmp/bench-l2/committed/results.json`.
-
-Timing cells show median / p95 / minimum in milliseconds. Size cells show raw / gzip bytes.
-
-| Metric | Target | Guarded minified | Result |
-|---|---:|---:|---|
-| M1 cold total | 25.0 (stretch 15.0) | 53.368487 / 61.622309 / 48.269563 | Miss |
-| M2 warm construction | 0.20 | 0.724484 / 1.975799 / 0.617442 | Miss |
-| M3a warm async exec | 0.07 | 0.095540 / 0.167595 / 0.089298 | Miss |
-| M5 RSS delta, B | 10,000,000 | 12,677,120 | Miss |
-| M6-wasm | 1,500,000 / 700,000 | 219,953 / 79,176 | Pass |
-| M6-js | 60,000 raw | 343,594 / 68,623 | Miss |
-
-Median cold construction fell from 62.938322 ms to 11.549190 ms. Median cold import was 31.857053 ms and first exec was 9.381220 ms. Warm sync exec was 0.092945 / 0.147647 / 0.088758 ms. The guard added 28 raw bytes and 4 gzip bytes to shipped JS.
-
-The provisional Annex H budgets still miss for browser-reachable JS (341,804 B raw against 45,000 B) and total gzip JS (68,623 B against 30,000 B).
-
-| Metric | Run medians in seed order |
-|---|---|
-| M1, ms | 53.746434 / 51.792751 / 53.368487 |
-| M2, ms | 0.724484 / 0.696992 / 0.737213 |
-| M3a, ms | 0.095540 / 0.097614 / 0.094267 |
-| M5, B | 12,677,120 / 12,587,008 / 12,742,656 |
-
-The full `make check` passed G1–G8, including G3 byte identity, K1, native Rust tests, bindings regeneration, and the Node suite with 233 passes, zero failures, and 9 existing TODOs. The packed Node and browser consumers and all 30 L2 oracle cases passed.
-
-## Verification before Option D
-
-- G1–G8, K1, native Rust tests, binding regeneration, and packed Node and browser consumers passed. Node reported 228 passes, zero failures, and 9 existing TODOs.
-- Oracle replay passed all 30 committed cases with zero failures, stale snapshots, exclusions, or uncovered cases. All four profile suites and the 10,000-deep recursion check passed.
-- The hardened ceiling test holds VFS bytes in two volumes, retains output, and allocates live buffers. It reaches the instance ceiling, returns exit 126 with the memory-ceiling diagnostic, and executes echo ok on the same shell.
-- The Rust include! registry builds on Rust 1.96. G3 reproduced the core, component, and JS in separate source trees.
-
-## Environment and protocol
-
-| Field | Value |
+| Field | Measured value |
 |---|---|
 | OS kernel | Linux 7.0.0-43-generic |
 | CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
@@ -49,114 +12,90 @@ The full `make check` passed G1–G8, including G3 byte identity, K1, native Rus
 | Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
 | wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
 | Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
-| Git | f3d319328e20f916056973d2c3d47d2e949599b6 with the L2 working tree, dirty = true |
-| Child environment | LC_ALL=C, TZ=UTC, TMPDIR=$PWD/tmp/bench-l2/tmp, npm_config_cache=$PWD/tmp/npmcache, offline npm |
+| Git | `b2563ca2783d6ffb42ae08f5ea2d9dcd211dba81` plus the PR #11 remediation changes, `dirty = true` |
+| Loader Wasm SHA-256 | `42a505a374300bae1cf1e3ed5a0388166ceb76a8230bb0670d759e20d676234a` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
 
-Each candidate passed an echo hi assertion in a fresh child. The boundary workload asserted the noop result. Each of three runs scheduled 30 rounds of fresh Node ESM children. Each round shuffled an empty baseline, an import-only child, and an import-plus-construction-plus-first-exec child. Seeds were 0x6c320001, 0x6c320002, 0x6c320003. Cold timings exclude starting Node. Each run subtracts the median baseline RSS from the median RSS after first exec.
+Each candidate passes an `echo hi` assertion before sampling. Each of three repetitions uses 30 seeded rounds. Each round shuffles fresh baseline, import-only, and import-plus-construction-plus-first-exec processes. The seeds are `0x6c320001`, `0x6c320002`, and `0x6c320003`. Cold timings exclude Node process startup. M5 subtracts the median baseline RSS from the median first-exec RSS in each repetition.
 
-Each warm run used a separate child, 20 discarded iterations per workload, and at least 1,000 timed iterations over at least 2,000 ms. Async and sync echo hi each reuse one warm shell. The noop command incurs one host-call/resume crossing. Timings use performance.now(). The median interpolates the middle values and p95 uses nearest rank. Each summary statistic is the median of its three run values.
+M2, M3a, M3aSync, and M_host each use their own process per repetition. Each process discards 20 warmup iterations and measures at least 1,000 iterations over at least 2,000 ms. Async and sync echo each reuse one shell. The host-call process checks the noop result before warmup. Timings use `performance.now()`, an interpolated median, and nearest-rank p95. Each reported statistic is the median of the three repetition values.
 
-Size measurements use gzip level 9 separately for each file. JS file names come from offline npm pack --dry-run --json. Reference values come from the spec benchmark table. This lane replayed the committed oracle snapshots.
+The prior Option D timing series shared a warm process across workloads. The values below come from the corrected process layout. Measurements use the worktree containing the remediation because this lane has read-only Git metadata.
 
 ## Timing and memory
 
-Millisecond cells show median / p95 / minimum. The minified candidate ships.
+Timing cells show median / p95 / minimum in milliseconds. The reference values come from the L2 specification.
 
-| Metric | just-bash 3.6.0 | Target | Unminified | Minified |
-|---|---:|---:|---:|---:|
-| M1 cold total | 118.8 | 25.0 (stretch 15.0) | 123.002678 / 132.620836 / 119.008115 | 103.522521 / 111.511246 / 98.454853 |
-| M1 import (cold-full) | — | — | 32.133271 / 35.542798 / 30.231221 | 30.885244 / 35.488102 / 27.904810 |
-| M1 construction | — | — | 81.831046 / 90.913666 / 79.068791 | 62.938322 / 68.072621 / 59.739877 |
-| M1 first exec | — | — | 9.380706 / 10.736478 / 9.090379 | 9.388020 / 11.727602 / 8.664407 |
-| M1 import-only child | — | — | 31.733769 / 36.139140 / 30.030914 | 30.882163 / 33.942954 / 27.979721 |
-| M2 warm construction | 0.37 | 0.20 | 72.162789 / 80.507219 / 68.588987 | 51.941174 / 58.356323 / 48.818452 |
-| M3a warm async exec | 0.35 | 0.07 | 0.094779 / 0.167325 / 0.089929 | 0.096682 / 0.176713 / 0.090881 |
-| M3a warm sync exec | — | — | 0.093015 / 0.162095 / 0.089428 | 0.093897 / 0.162346 / 0.090230 |
-| M_host warm custom call | — | — | 0.220150 / 0.435550 / 0.178727 | 0.221667 / 0.420121 / 0.179418 |
+| Metric | just-bash 3.6.0 | Target | Unminified | Shipping minified | Shipping result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (stretch 15.0) | 55.669383 / 63.372313 / 50.742769 | 51.894006 / 57.738879 / 47.960591 | Miss |
+| M1 import (cold-full) | — | — | 33.278524 / 39.770234 / 30.132963 | 30.431610 / 35.849955 / 28.033270 | — |
+| M1 construction | — | — | 11.621100 / 14.401931 / 10.834445 | 11.107985 / 13.307430 / 10.447065 | — |
+| M1 first exec | — | — | 9.936995 / 12.703113 / 9.369667 | 9.612259 / 11.338523 / 9.016392 | — |
+| M1 import-only child | — | — | 33.555875 / 37.299613 / 30.103958 | 30.123199 / 34.484423 / 27.842150 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.704210 / 1.976711 / 0.602755 | 0.718914 / 1.825015 / 0.611622 | Miss |
+| M3a warm async exec | 0.35 | 0.07 | 0.077426 / 0.156645 / 0.070843 | 0.072847 / 0.143981 / 0.068409 | Miss |
+| M3a warm sync exec | — | — | 0.075232 / 0.151936 / 0.068639 | 0.073985 / 0.146546 / 0.068829 | — |
+| M_host warm custom call | — | — | 0.169103 / 0.366360 / 0.146265 | 0.172580 / 0.379535 / 0.145344 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 13,293,568 | 12,812,288 | Miss |
 
-| Metric | just-bash 3.6.0 | Target | Unminified | Minified |
-|---|---:|---:|---:|---:|
-| M5 RSS delta, B | 35,500,000 | 10,000,000 | 13,348,864 | 12,888,064 |
+### Repetition medians
 
-### Three runs
-
-Timing cells give the three run medians in seed order. Raw JSON retains every child result and iteration, sample counts, and each run's p95 and minimum.
-
-| Metric | Unminified runs 1–3 | Minified runs 1–3 |
+| Metric | Unminified runs 1–3 | Shipping minified runs 1–3 |
 |---|---:|---:|
-| M1 cold total | 123.002678, 122.912459, 123.877920 | 103.900963, 102.032892, 103.522521 |
-| M1 import (cold-full) | 31.496747, 32.133271, 32.930175 | 31.000887, 30.270979, 30.885244 |
-| M1 construction | 82.000259, 81.831046, 81.781508 | 63.206761, 62.313165, 62.938322 |
-| M1 first exec | 9.384648, 9.338227, 9.380706 | 9.388020, 9.013665, 9.606866 |
-| M1 import-only child | 31.733769, 31.323080, 32.545902 | 31.483510, 29.255527, 30.882163 |
-| M2 warm construction | 70.667373, 72.481318, 72.162789 | 52.111669, 50.625082, 51.941174 |
-| M3a warm async exec | 0.095686, 0.094779, 0.094017 | 0.097564, 0.096612, 0.096682 |
-| M3a warm sync exec | 0.093747, 0.093015, 0.092193 | 0.095740, 0.093897, 0.093406 |
-| M_host warm custom call | 0.206569, 0.220150, 0.224568 | 0.219178, 0.230363, 0.221667 |
-| M5, B | 13,541,376 / 13,348,864 / 13,324,288 | 13,203,456 / 12,888,064 / 12,613,632 |
-
-Unminified baseline RSS medians were 57,376,768 / 57,577,472 / 57,499,648 B. Full-process RSS medians were 70,918,144 / 70,926,336 / 70,823,936 B. Warm iteration counts were M2 warm construction 1,000/1,000/1,000, M3a warm async exec 18,706/18,347/18,456, M3a warm sync exec 19,967/18,882/19,497, M_host warm custom call 7,941/7,288/7,240.
-
-Minified baseline RSS medians were 57,176,064 / 57,473,024 / 57,618,432 B. Full-process RSS medians were 70,379,520 / 70,361,088 / 70,232,064 B. Warm iteration counts were M2 warm construction 1,000/1,000/1,000, M3a warm async exec 18,049/17,357/17,696, M3a warm sync exec 19,072/19,156/19,131, M_host warm custom call 7,632/6,860/7,560.
-
-### Cost profile
-
-Cold import took 30.885244 ms, construction 62.938322 ms, and first exec 9.388020 ms. In a separate warm construction probe on the unminified build, medians were 72.437651 ms in generated initialization, 0.201769 ms in core Wasm instantiation, and 0.771322 ms calling configure, VFS creation and shell layout. A Node CPU profile concentrated samples in the generated _initGenerator. L2 classifies the constructor and cold-start thresholds as kernel metrics even when generated JS drives the cost.
-
-A warm exec probe measured 0.104807 ms end to end and 0.090409 ms in measured engine calls, including marshalling and kernel execution. The gate timings use the uninstrumented driver.
-
-The fresh-process RSS probe for the selected glue build gave phase medians of 57,544,704 B before import, 67,471,360 B after import, 69,568,512 B after construction, and 70,070,272 B after first exec. Gate M5 uses separate baseline children.
+| M1 cold total | 55.669383 / 55.180461 / 56.557815 | 51.390223 / 52.142483 / 51.894006 |
+| M1 import (cold-full) | 32.793216 / 33.278524 / 33.924775 | 30.431610 / 30.722151 / 30.236241 |
+| M1 construction | 11.621100 / 11.459857 / 11.691749 | 11.107985 / 11.039275 / 11.343358 |
+| M1 first exec | 10.135874 / 9.918216 / 9.936995 | 9.448330 / 9.942536 / 9.612259 |
+| M1 import-only child | 32.484949 / 33.555875 / 33.777938 | 30.123199 / 30.065501 / 31.022026 |
+| M2 warm construction | 0.704210 / 0.703966 / 0.718733 | 0.723202 / 0.703283 / 0.718914 |
+| M3a warm async exec | 0.078297 / 0.076133 / 0.077426 | 0.074370 / 0.072847 / 0.072466 |
+| M3a warm sync exec | 0.077375 / 0.073749 / 0.075232 | 0.072356 / 0.075542 / 0.073985 |
+| M_host warm custom call | 0.169103 / 0.166563 / 0.173617 | 0.171563 / 0.172966 / 0.172580 |
+| M5 RSS delta, B | 13,510,656 / 13,244,416 / 13,293,568 | 12,707,840 / 12,812,288 / 12,941,312 |
 
 ## Artifact sizes
 
-Pairs give raw / gzip bytes. Both glue variants share the same Wasm build. The measured minified host and generated kernel directory matched the shipping build byte for byte.
+Each pair gives raw / gzip bytes. The driver lists packaged JavaScript by running offline `npm pack --dry-run --json` in each candidate tree. It applies gzip level 9 to each file separately. Both candidates share the same Wasm build.
 
-| Wasm artifact | Both candidates |
-|---|---:|
-| Loader core (M6-wasm) | 219,953 / 79,176 |
-| Linked core | 225,759 / 81,878 |
-| Component | 250,214 / 87,088 |
+| Wasm artifact | Raw / gzip bytes | Result |
+|---|---:|---|
+| Loader core (M6-wasm) | 229,104 / 83,193 | Pass |
+| Linked core | 234,910 / 85,918 | — |
+| Component | 259,365 / 91,153 | — |
 
-M6-wasm targets 1,500,000 B raw and 700,000 B gzip.
-
-| Shipped JS group | Unminified | Minified |
+| Shipped JS group | Unminified | Shipping minified |
 |---|---:|---:|
-| Generated glue | 565,129 / 63,041 | 273,308 / 45,163 |
+| Generated glue | 565,157 / 63,043 | 273,336 / 45,167 |
 | Registry | 54 / 74 | 54 / 74 |
-| Other browser-reachable entry code | 68,414 / 22,529 | 68,414 / 22,529 |
+| Other browser-reachable entry code | 69,135 / 22,681 | 69,135 / 22,681 |
 | Node-only | 1,790 / 853 | 1,790 / 853 |
-| All shipped JS (M6-js) | 635,387 / 86,497 | 343,566 / 68,619 |
+| All shipped JS (M6-js) | 636,136 / 86,651 | 344,315 / 68,775 |
 
-Retain minification. It lowered M1 by 19.480157 ms, and the minified release passed G1–G8 and the full test suite.
-
-The provisional Annex H browser-reachable entry including glue and registry is 633,597 / 341,776 B raw against 45,000 B. Node-only JS is 1,790 B against 40,000 B. Total gzip is 86,497 / 68,619 B against 30,000 B. The owner retains the JS budget decision.
+The minified build stays selected. It reduced median cold start by 3.775377 ms in this series. The Annex H provisional browser-reachable budget is 45,000 B raw against 634,346 / 342,525 B unminified / minified. Node-only JS is within 40,000 B raw. Both whole-package gzip totals exceed 30,000 B.
 
 ### wasm-opt
 
-Gain unmeasured. Binaryen 132.0.0 is present as a transpiler dependency. The offline lane has no approved optimizer pin. Feature flags, raw and gzip deltas, and timing deltas are unmeasured. The build keeps wasmOpt disabled.
+**Not measured.** The owner decision on the Binaryen optimizer pin is pending. `--variant wasm-opt` emits this status and writes it to `tmp/bench-l2/wasm-opt/results.json`. Optimization flags, size deltas, and timing deltas are pending. The build leaves `wasmOpt` disabled.
 
 ### v1 size projection
 
-The additions are planning estimates in bytes. The shell and VFS row covers the remaining interpreter, expansion, and filesystem work. Command rows count shared runners and their parsers once.
+The additions are planning estimates in bytes. Command rows count shared runners and parsers once.
 
 | Kernel contribution | Raw bytes | Gzip bytes |
 |---|---:|---:|
-| L2 loader core, measured | 219,953 | 79,176 |
+| L2 loader core, measured | 229,104 | 83,193 |
 | L3–L6 language and VFS | 400,000 | 160,000 |
 | Tier-1 commands | 280,000 | 112,000 |
 | awk, sed and jq | 400,000 | 160,000 |
 | yq formats | 230,000 | 92,000 |
 | Archives and compression | 180,000 | 72,000 |
-| Projected v1 loader core | 1,709,953 | 675,176 |
+| Projected v1 loader core | 1,719,104 | 679,193 |
 
-Recommend owner review of a Cargo-feature slim profile. The projected raw size exceeds 1,500,000 B. Measure generated instantiation independently when evaluating a smaller command set.
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B.
 
-## Handover
+## Verification
 
-- The contain and normal command-count tests use a bounded call tree to execute over 100,000 stages with fewer than 100,000 tokens. The flat-list recipe reaches the parser cap first. A separate test checks that cap.
-- Deadline tests advance the driver clock across each profile's unchanged deadline. Profile values range from 10 seconds to one hour.
-- Candidate upstream defects are filesystem quota exceptions, lone surrogates from echo -e Unicode escapes, and whole-output byte decoding when any sequence is invalid. L2 returns a quota result (exit 126), emits U+FFFD for lone surrogates, and decodes each valid UTF-8 sequence. For echo -e with bytes C3 A9 FF, the reference gives Ã©ÿ and L2 gives éÿ.
-- The reference's first lazy command can fail with coverage and default defenseInDepth, which blocks the dynamic import of node:module. The coverage oracle uses defenseInDepth: false.
-- L2 merges before L7b. L7b owns the rebase touchpoints in section 3.1 and uses COMMAND_NAMES for its host-backed stubs.
-- Raw samples are in tmp/bench-l2/unminified/results.json and tmp/bench-l2/minified/results.json. The constructor, exec and RSS diagnostic is in tmp/l2-diagnostic.json.
-- Rebuild with npm_config_cache=$PWD/tmp/npmcache make build. Use node tools/measure-l2.mjs --variant committed to measure the package tree, or --variant unminified and --variant minified to regenerate either candidate.
+- `make check` passed G1–G8, K1, native Rust tests, bindings regeneration, the packed consumers, and the Node suite with 246 passes and 9 existing TODOs.
+- The 30 committed L2 oracle cases passed. Child-process regressions enforce bounded wall time for the large assignment tree, the long PATH search, and the large IFS split.
+- Raw samples are in `tmp/bench-l2/committed/results.json` and `tmp/bench-l2/unminified/results.json`. The reference timings use the L2 specification. This lane replayed the committed oracle snapshots.
