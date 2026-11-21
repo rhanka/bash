@@ -16,7 +16,7 @@ export async function transpileComponent(componentPath, outDir) {
     base64Cutoff: 0,
     validLiftingOptimization: true,
     tlaCompat: false,
-    minify: false,
+    minify: true,
     wasiShim: false,
     nodejsCompat: false,
     optimize: false,

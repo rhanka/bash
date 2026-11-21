@@ -45,11 +45,15 @@ export class Holder {
   /** Resolves with the instance, creating it (and replaying the staged operations) if needed. */
   ensure() {
     if (this.instance) return Promise.resolve(this.instance);
-    this.pending ??= (async () => {
-      const mod = await (this.hooks?.moduleProvider ? this.hooks.moduleProvider() : this.loader.asyncModule());
+    this.pending ??= Promise.resolve().then(
+      () => this.hooks?.moduleProvider ? this.hooks.moduleProvider() : this.loader.asyncModule(),
+    ).then((mod) => {
       if (!this.instance) this.attach(mod);
       return this.instance;
-    })();
+    }, (error) => {
+      this.pending = null;
+      throw error;
+    });
     return this.pending;
   }
 }

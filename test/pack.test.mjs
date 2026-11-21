@@ -65,7 +65,7 @@ test("the tarball holds exactly the expected files and installs offline", () => 
   assert.equal(i.status, 0, i.stderr);
   writeFileSync(
     join(consumer, "main.mjs"),
-    'import { Bash, pipelineProbe } from "@sentropic/bash";\nconsole.log(pipelineProbe().ping(1));\nconst r = await new Bash().exec("");\nconsole.log(r.exitCode, JSON.stringify(r.stdout), JSON.stringify(r.stderr));\n',
+    'import { Bash, pipelineProbe } from "@sentropic/bash";\nconsole.log((await pipelineProbe()).ping(1));\nconst r = await new Bash().exec("");\nconsole.log(r.exitCode, JSON.stringify(r.stdout), JSON.stringify(r.stderr));\n',
   );
   const r = spawnSync("node", ["main.mjs"], { cwd: consumer, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
