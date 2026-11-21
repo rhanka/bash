@@ -4,7 +4,12 @@ import { PROFILES } from "../limits.js";
 
 const U32_MAX = 0xffffffff;
 const MIB = 1 << 20;
-const TRANSFER_BUDGET = 64 * MIB;
+const LOWER_BUDGET = 64 * MIB;
+const MAX_ONESHOT_BYTES = Math.max(...Object.values(PROFILES).map(({ oneshot }) => oneshot));
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const functionSource = Object.toString;
+const objectConstructorSource = functionSource.call(Object);
 const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
 const arrayKind = Object.getOwnPropertyDescriptor(typedArray, Symbol.toStringTag).get;
 const arrayLength = Object.getOwnPropertyDescriptor(typedArray, "length").get;
@@ -40,6 +45,18 @@ function object(value, path) {
   }
 }
 
+function plainRecord(value, path) {
+  object(value, path);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === null || prototype === Object.prototype) return;
+  // Plain records from another realm have that realm's Object.prototype.
+  const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor")?.value;
+  if (typeof constructor !== "function" || functionSource.call(constructor) !== objectConstructorSource ||
+      constructor.prototype !== prototype) {
+    throw badType(path, "a plain record");
+  }
+}
+
 function field(value, key, path, optional) {
   if (Object.hasOwn(value, key)) return value[key];
   if (!optional) throw badType(path, "present");
@@ -61,11 +78,11 @@ function listArray(type) {
 }
 
 export class Codec {
-  constructor({ core, borrow, own, lowerBudget = TRANSFER_BUDGET, liftBudget = TRANSFER_BUDGET, oneshotBytes }) {
+  constructor({ core, borrow, own, lowerBudget = LOWER_BUDGET, liftBudget, oneshotBytes }) {
     this.core = core;
     this.borrow = borrow;
     this.own = own;
-    this.lowerBudget = lowerBudget;
+    this.lowerBudget = oneshotBytes === undefined ? lowerBudget : MAX_ONESHOT_BYTES - oneshotBytes;
     this.liftBudget = liftBudget;
     this.oneshotBytes = oneshotBytes;
   }
@@ -93,7 +110,7 @@ export class Codec {
         if (typeof value !== "string") throw badType(path, "a string");
         if (value.length > this.lowerBudget) throw badRange(path);
         this.charge(utf8Length(value), path, maxBytes);
-        return new TextEncoder().encode(value);
+        return utf8Encoder.encode(value);
       }
       case "list": {
         const ArrayType = listArray(type);
@@ -116,30 +133,25 @@ export class Codec {
       }
       case "record": {
         object(value, path);
-        const stageField = ({ key, type: child, maxBytes: cap }) => {
+        return type.fields.map(({ key, type: child, maxBytes: cap }) => {
           const label = path + "." + key;
           const staged = this.stage(child, field(value, key, label, child.kind === "option"), label, cap);
           if (this.oneshotBytes !== undefined && type.name === "limits" && key === "profile") {
-            this.lowerBudget = PROFILES[child.labels[staged]].oneshot - this.oneshotBytes;
+            // Files precede config in WIT. Keep their charges when the profile narrows the cap.
+            this.charge(MAX_ONESHOT_BYTES - PROFILES[child.labels[staged]].oneshot, label);
           }
           return staged;
-        };
-        if (this.oneshotBytes !== undefined && type.name === "oneshot-req") {
-          // Select the profile budget before copying files. Keep the staged tuple in WIT order.
-          const config = type.fields.find(({ key }) => key === "config");
-          const staged = stageField(config);
-          return type.fields.map((member) => member === config ? staged : stageField(member));
-        }
-        return type.fields.map(stageField);
+        });
       }
       case "enum": return indexOf(type.labels, value, path);
       case "flags": {
-        object(value, path);
+        plainRecord(value, path);
         let flags = 0;
         for (const key of Reflect.ownKeys(value)) {
           const bit = type.labels.indexOf(key);
           if (bit === -1) throw badType(path, "an object with known flag names");
           const enabled = value[key];
+          if (enabled === undefined) continue;
           if (typeof enabled !== "boolean") throw badType(path + "." + key, "a boolean");
           if (enabled) flags += 2 ** bit;
         }
@@ -185,7 +197,11 @@ export class Codec {
   }
 
   allocate(size, align) {
-    if (!size) return 0;
+    if (size === 0) {
+      // Rust requires a non-null, aligned pointer even for an empty sequence.
+      this.view(align, 0, 0, align);
+      return align;
+    }
     if (!Number.isSafeInteger(size) || size < 0 || size > U32_MAX) throw trap("invalid allocation size");
     const ptr = unsigned32(this.core.cabi_realloc(0, 0, align, size));
     if (ptr === 0) throw trap("allocator returned null");
@@ -280,11 +296,12 @@ export class Codec {
     const stride = element?.size ?? 1;
     const data = this.view(ptr, count, stride, element?.align ?? 1);
     const size = count * Math.max(1, stride);
-    if (size > this.liftBudget || size > maxBytes) throw trap("result exceeds the transfer budget");
-    this.liftBudget -= size;
+    const budget = this.liftBudget ?? data.byteLength;
+    if (size > budget || size > maxBytes) throw trap("result exceeds the transfer budget");
+    this.liftBudget = budget - size;
     if (type.kind === "string" || element.kind === "u8") {
       const bytes = new Uint8Array(data.buffer, ptr, count);
-      return type.kind === "string" ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes)
+      return type.kind === "string" ? utf8Decoder.decode(bytes)
         : new Uint8Array(bytes);
     }
     if (element.kind === "u16") {

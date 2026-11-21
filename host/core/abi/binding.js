@@ -3,8 +3,10 @@ import { KernelPoisonedError } from "../errors.js";
 import { Codec, trap, unsigned32 } from "./codec.js";
 import { camelCase, functions, namespace, resourceKinds } from "./layout.js";
 
-export function instantiateEngine(getCoreModule, { onTrap } = {}, coreName = "kernel.core.wasm") {
-  return linkEngine((imports) => new WebAssembly.Instance(getCoreModule(coreName), imports).exports, { onTrap });
+export function instantiateEngine(getCoreModule, instantiateCore, options, coreName) {
+  const wasm = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;
+  const instantiate = instantiateCore ?? ((module, imports) => new wasm.Instance(module, imports));
+  return linkEngine((imports) => instantiate(getCoreModule(coreName), imports).exports, { onTrap: options?.onTrap });
 }
 
 /** Links core exports. The linker and registry are injectable for deterministic ABI fixtures. */
@@ -19,6 +21,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
   let busy = false;
   let inGuest = false;
   let stopped = false;
+  let ceiling;
   let core;
 
   function stop() {
@@ -155,7 +158,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
 
       try {
         const oneshotBytes = fn.name === "exec-oneshot" ? fn.params.size : undefined;
-        const codec = new Codec({ core, borrow, own: liftOwner, oneshotBytes });
+        const codec = new Codec({ core, borrow, own: liftOwner, liftBudget: ceiling, oneshotBytes });
         const receiverArg = method ? { value: this } : undefined;
         let staged;
         try {
@@ -187,6 +190,10 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
         }
         if (!fn.unwrap) return result;
         if (result.tag === "err") throw result.val;
+        if (fn.name === "configure" || fn.name === "raise-ceiling") {
+          // Cap aggregate copies at the accepted ceiling, within the wasm32 address space.
+          ceiling = Math.min(Number(staged[0]), 2 ** 32);
+        }
         return result.val;
       } finally {
         for (const wrapper of borrowed) wrappers.get(wrapper).borrows--;
@@ -197,14 +204,19 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
   }
 
   core = link({ ["[export]" + namespace]: intrinsics });
+  const types = {};
   return {
+    types,
+    "sentropic:bash/types@0.1.0-draft": types,
     engine,
+    [namespace]: engine,
     _util: {
       stop() {
         if (stopped) return;
         checkEntry();
         stop();
       },
+      async whenIdle() {},
     },
   };
 }

@@ -100,8 +100,8 @@ async function buildEngineBinding(name, component, jsDir) {
     const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
     writeFileSync(join(jsDir, name + ".js"),
       "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
-      "export function instantiate(getCoreModule, options) {\n" +
-      "  return instantiateEngine(getCoreModule, options, " + JSON.stringify(coreName) + ");\n}\n");
+      "export function instantiate(getCoreModule, _imports, instantiateCore, options) {\n" +
+      "  return instantiateEngine(getCoreModule, instantiateCore, options, " + JSON.stringify(coreName) + ");\n}\n");
     console.log(`ABI oracle ${name} jco-transpile ${JCO_VERSION} Option D: 14 guarded probes, core SHA-256 ${hash}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
