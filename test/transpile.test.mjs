@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { scratch } from "./helpers.mjs";
 import { guardPromisingProbes, writeFiles } from "../tools/transpile.mjs";
-import { instantiate } from "../dist/js/kernel/kernel.js";
-import { shims } from "../dist/js/kernel/kernel.shims.js";
+import { instantiate } from "../dist/test/js/oracle/kernel/kernel.js";
+import { shims } from "../dist/test/js/oracle/kernel/kernel.shims.js";
 
 test("generated files are written inside the output directory", () => {
   const out = scratch("transpile");
@@ -62,19 +62,21 @@ for (const minify of [false, true]) {
   });
 }
 
-test("shipped kernel glue contains exactly 14 guarded probes and no unguarded calls", () => {
-  const source = readFileSync(new URL("../dist/js/kernel/kernel.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /\.promising\s*\(/);
-  assert.equal([...source.matchAll(/\.promising\?\.\(/g)].length, 14);
-  assert.equal([...source.matchAll(/\bpromising\b/g)].length, 14);
+test("each engine oracle contains exactly 14 guarded probes and no unguarded calls", () => {
+  for (const name of ["kernel", "kernel-test"]) {
+    const source = readFileSync(new URL(`../dist/test/js/oracle/${name}/${name}.js`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /\.promising\s*\(/);
+    assert.equal([...source.matchAll(/\.promising\?\.\(/g)].length, 14);
+    assert.equal([...source.matchAll(/\bpromising\b/g)].length, 14);
+  }
 });
 
 const encode = (text) => new TextEncoder().encode(text);
 const decode = (bytes) => new TextDecoder().decode(bytes);
-const core = readFileSync(new URL("../dist/js/kernel/kernel.core.wasm", import.meta.url));
+const core = readFileSync(new URL("../dist/test/js/oracle/kernel/kernel.core.wasm", import.meta.url));
 
 for (const mode of ["throws", "returns a wrapper"]) {
-  test(`shipped kernel exports work when WebAssembly.promising ${mode}`, async () => {
+  test(`oracle kernel exports work when WebAssembly.promising ${mode}`, async () => {
     const probes = [];
     const promising = function (fn) {
       probes.push({ receiver: this, fn });

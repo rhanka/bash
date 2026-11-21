@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Builds the components: core module, component, validation, JavaScript bindings.
 // Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { repoRoot, components, coreImports, foreignImports, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
-import { transpileComponent } from "./transpile.mjs";
+import { transpileComponent, JCO_VERSION } from "./transpile.mjs";
+import { verifyEngineAbi } from "./abi-check.mjs";
 
 const argv = process.argv.slice(2);
 const opt = (name, dflt) => {
@@ -73,6 +74,40 @@ function buildComponent(c, def, core) {
   }
 }
 
+async function buildEngineBinding(name, component, jsDir) {
+  const oracle = join(out, "test", "js", "oracle", name);
+  await transpileComponent(component, oracle, { minify: name === "kernel" });
+
+  const scratch = mkdtempSync(join(out, "test", "unbundle-"));
+  const coreName = name + ".core.wasm";
+  try {
+    run(wasmTools, ["component", "unbundle", "--module-dir", scratch, component, "-o", join(scratch, "component.wasm")]);
+    const modules = readdirSync(scratch).filter((file) => file.startsWith("unbundled-module"));
+    if (modules.length !== 1) throw new Error(name + " does not have exactly one loader core");
+    const core = join(scratch, modules[0]);
+    verifyEngineAbi(repoRoot, component, core, wasmTools);
+    const hash = sha256File(core);
+    if (hash !== sha256File(join(oracle, coreName))) throw new Error(name + " oracle loader core hash differs");
+
+    rmSync(jsDir, { recursive: true, force: true });
+    mkdirSync(jsDir, { recursive: true });
+    copyFileSync(core, join(jsDir, coreName));
+    for (const file of walk(oracle, (file) => file.endsWith(".d.ts"))) {
+      const target = join(jsDir, relative(oracle, file));
+      mkdirSync(join(target, ".."), { recursive: true });
+      copyFileSync(file, target);
+    }
+    const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
+    writeFileSync(join(jsDir, name + ".js"),
+      "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
+      "export function instantiate(getCoreModule, options) {\n" +
+      "  return instantiateEngine(getCoreModule, options, " + JSON.stringify(coreName) + ");\n}\n");
+    console.log(`ABI oracle ${name} jco-transpile ${JCO_VERSION} Option D: 14 guarded probes, core SHA-256 ${hash}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /** Reads the literal CommandSpec records consumed by kernel/build.rs. */
 export function scanCommandFiles(dir) {
   const names = new Set();
@@ -109,7 +144,8 @@ async function main() {
     const core = buildCore(c, def);
     const comp = buildComponent(c, def, core);
     const jsDir = join(outDirOf(def), "js", c);
-    await transpileComponent(comp, jsDir, { minify: c === "kernel" });
+    if (c === "kernel" || c === "kernel-test") await buildEngineBinding(c, comp, jsDir);
+    else await transpileComponent(comp, jsDir);
     if (c === "kernel") {
       const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
       writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");

@@ -2,7 +2,6 @@
 // options of the facade, and exposes recording helpers.
 import { readFileSync } from "node:fs";
 import { instantiate } from "../dist/test/js/kernel-test/kernel-test.js";
-import { shims } from "../dist/test/js/kernel-test/kernel-test.shims.js";
 import { Bash, InMemoryFs } from "@sentropic/bash";
 
 export const INTERNAL = Symbol.for("@sentropic/bash.internal");
@@ -12,7 +11,7 @@ export { Bash, InMemoryFs };
 
 /** Internal options selecting the test kernel. `extra` adds hooks (`onEngine`, `onHostCall`, `ceilingBytes`...). */
 export function internal(extra = {}) {
-  return { kernel: { instantiate, shims, module }, ...extra };
+  return { kernel: { instantiate, module }, ...extra };
 }
 
 /** Bash options on the test kernel. */
