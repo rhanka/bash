@@ -1,0 +1,15 @@
+{
+  "id": "l2/empty-and-comment",
+  "steps": [
+    {
+      "script": ""
+    },
+    {
+      "script": "   \n\t  "
+    },
+    {
+      "script": "# comment only\n"
+    }
+  ],
+  "title": "Empty and comment"
+}

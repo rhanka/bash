@@ -1,0 +1,13 @@
+{
+  "id": "l2/normalize-multiline",
+  "steps": [
+    {
+      "script": "    echo indented\n  echo '\n    keep single indent'\n  echo \"\n    keep double indent\""
+    },
+    {
+      "rawScript": true,
+      "script": "  echo '\n    raw single'"
+    }
+  ],
+  "title": "Normalize multiline"
+}
