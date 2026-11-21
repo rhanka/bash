@@ -1,0 +1,12 @@
+{
+  "env": {
+    "X": "world"
+  },
+  "id": "l2/quoting-single-double",
+  "steps": [
+    {
+      "script": "echo 'single $X \\\" \\\\'\necho \"double $X \\\" \\\\ \\$ \\` \\a\"\necho $\"locale $X\""
+    }
+  ],
+  "title": "Quoting single double"
+}
