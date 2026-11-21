@@ -74,7 +74,7 @@ test("browser compilation retries after failure and accepts wasm served with ano
     await assert.rejects(b.readFile("/staged"), WebAssembly.CompileError);
     assert.equal(fetched, 1);
     const core = readFileSync(new URL("../dist/js/kernel/kernel.core.wasm", import.meta.url));
-    const good = new Response(core, { headers: { "Content-Type": "Application/Wasm" } });
+    const good = new Response(core, { headers: { "Content-Type": "application/octet-stream" } });
     await Bash.precompile(Promise.resolve(good));
     assert.equal(await b.readFile("/staged"), "replayed");
   } finally {
