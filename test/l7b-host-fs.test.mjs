@@ -360,7 +360,8 @@ test("the facade seeds layout and custom command stubs in synchronous host files
   const withCustomCwd = bash({ fs: custom, cwd: "/workspace" });
   assert.equal(withCustomCwd.getEnv().HOME, "/");
   assert.deepEqual(order.slice(0, 5), ["/bin", "/usr/bin", "/dev", "/dev/fd", "/dev/null"]);
-  assert.equal(order.at(-1), "/workspace");
+  assert.ok(order.indexOf("/workspace") > order.indexOf("/proc/self/fd/2"));
+  assert.match(order.at(-1), /^\/(usr\/)?bin\//);
   assert.throws(() => bash({ fs: { ...custom, mkdirSync() { throw new Error("EIO: mkdir"); } } }), { message: "EIO: mkdir" });
 }));
 

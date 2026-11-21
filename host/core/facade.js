@@ -212,7 +212,7 @@ export function createFacade(loader) {
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
       if (hasFiles) addFiles(rootFs, options.files, B.initialCwd);
-      seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, commands);
+      seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
       for (const c of customs) this.#register(B, c, false);
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
