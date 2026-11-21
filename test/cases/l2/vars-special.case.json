@@ -1,0 +1,9 @@
+{
+  "id": "l2/vars-special",
+  "steps": [
+    {
+      "script": "echo z=$0 q=$? n=$# p=$$ pp=$PPID u=$UID eu=$EUID v=$BASH_VERSION f=$- b=$!\necho first second\necho last=$_ q=$?"
+    }
+  ],
+  "title": "Vars special"
+}
