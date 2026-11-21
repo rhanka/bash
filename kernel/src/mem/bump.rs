@@ -32,11 +32,13 @@ impl BumpState {
         loop {
             let cur = self.cur.load(Relaxed);
             let end = self.end.load(Relaxed);
-            if let Some(start) = cur.checked_add(align - 1).map(|a| a & !(align - 1)) {
-                if let Some(new_cur) = start.checked_add(size) {
-                    if new_cur <= end {
-                        self.cur.store(new_cur, Relaxed);
-                        return start;
+            if end != 0 {
+                if let Some(start) = cur.checked_add(align - 1).map(|a| a & !(align - 1)) {
+                    if let Some(new_cur) = start.checked_add(size) {
+                        if new_cur <= end {
+                            self.cur.store(new_cur, Relaxed);
+                            return start;
+                        }
                     }
                 }
             }
@@ -49,6 +51,11 @@ impl BumpState {
             }
             let Some(old_pages) = src.grow(want) else { return 0 };
             self.pages.store(total + want, Relaxed);
+            if old_pages == 0 {
+                // Page 0 starts at address 0, which is the refusal value: leave it unused and ask again
+                // (the pages already obtained count against the ceiling, so this terminates).
+                continue;
+            }
             let old_addr = old_pages * PAGE;
             if old_addr != end {
                 // Someone else grew the memory: the new region is not contiguous with the old one.
@@ -70,10 +77,15 @@ impl BumpState {
     /// shrinks in place.
     pub(crate) fn realloc<P: Pages>(&self, src: &P, addr: usize, old: usize, align: usize, new: usize, ceiling: u64) -> (usize, bool) {
         if addr.checked_add(old) == Some(self.cur.load(Relaxed)) {
+            let prev_end = self.end.load(Relaxed);
             self.cur.store(addr, Relaxed);
             let got = self.alloc(src, new, align, ceiling);
             if got == 0 {
-                self.cur.store(addr + old, Relaxed);
+                // Restore the old top only if no grow happened meanwhile: after a discontiguous grow,
+                // `[cur, end)` would otherwise span pages this allocator does not own.
+                if self.end.load(Relaxed) == prev_end {
+                    self.cur.store(addr + old, Relaxed);
+                }
                 return (0, false);
             }
             return (got, got != addr);
@@ -228,6 +240,48 @@ mod tests {
         assert_ne!(b.alloc(&m, 10, 1, BIG), 0);
         assert_eq!(b.alloc(&m, PAGE, 1, BIG), 0);
         assert_ne!(b.alloc(&m, 10, 1, BIG), 0);
+    }
+
+    /// A memory that is grown by a foreign party between our grows: each grow skips one foreign page.
+    struct Gappy {
+        pages: Cell<usize>,
+        left: Cell<usize>,
+    }
+
+    impl Pages for Gappy {
+        fn grow(&self, n: usize) -> Option<usize> {
+            if self.left.get() == 0 {
+                return None;
+            }
+            self.left.set(self.left.get() - 1);
+            let old = self.pages.get() + 1; // one foreign page was added first
+            self.pages.set(old + n);
+            Some(old)
+        }
+    }
+
+    #[test]
+    fn a_failed_realloc_after_a_discontiguous_grow_does_not_span_foreign_pages() {
+        let m = Gappy { pages: Cell::new(1), left: Cell::new(2) };
+        let b = BumpState::new();
+        let a = b.alloc(&m, 16, 8, BIG);
+        assert_ne!(a, 0);
+        // Growing the last block needs two grows (the first discontiguous), the second one is refused.
+        let (r, moved) = b.realloc(&m, a, 16, 8, 2 * PAGE + 16, BIG);
+        assert_eq!((r, moved), (0, false));
+        // The foreign page 3 must stay outside the free range [cur, end).
+        let (cur, end) = (b.cur.load(Relaxed), b.end.load(Relaxed));
+        assert!(cur >= 4 * PAGE && cur < end, "the free range [{cur}, {end}) spans the foreign page");
+    }
+
+    #[test]
+    fn page_zero_is_never_handed_out() {
+        let m = fake(0, 100);
+        let b = BumpState::new();
+        let a = b.alloc(&m, 8, 8, BIG);
+        assert_ne!(a, 0);
+        let z = fake(0, 100);
+        assert_ne!(BumpState::new().alloc(&z, 0, 1, BIG), 0, "a zero-size request on a fresh state");
     }
 
     #[test]
