@@ -1,7 +1,7 @@
 //! `KBox`: a fallible owning pointer charged to a budget (spec 5.6).
 use super::budget::Budget;
 use super::error::{MemError, MemResult};
-use alloc::alloc::{alloc, dealloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, Layout};
 use core::mem::{size_of, ManuallyDrop};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};

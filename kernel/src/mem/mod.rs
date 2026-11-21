@@ -8,6 +8,9 @@
 //! * Transfer hook: [`cabi_realloc`], [`transfer_free`].
 //!
 //! The module is single-threaded by design: its types are neither `Send` nor `Sync`.
+// The alloc crate is declared here, inside kernel/src/mem/, and reached by the submodules as `super::alloc`.
+extern crate alloc;
+
 #[cfg(any(target_arch = "wasm32", test))]
 mod bump;
 mod boxed;

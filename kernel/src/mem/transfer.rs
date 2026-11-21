@@ -1,6 +1,6 @@
 //! Transfer hook of the canonical ABI (spec 5.8). A function only in this lot: not exported from the wasm
 //! module, and no headroom accounting (L1a-2 adds it here and in `transfer_free`).
-use alloc::alloc::{alloc, dealloc, realloc, Layout};
+use super::alloc::alloc::{alloc, dealloc, realloc, Layout};
 
 fn trap() -> ! {
     #[cfg(target_arch = "wasm32")]
