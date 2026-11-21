@@ -1,0 +1,34 @@
+{
+  "case": "l10a/file-lifecycle",
+  "caseHash": "2a50552ad777b3a967c981e6ba15eaf3b5436e2d8b1e57f138acfeb269465997",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {
+    "/a/keep.txt": {
+      "content": {
+        "base64": "Y2hhbmdlZA=="
+      },
+      "kind": "file",
+      "mode": 420
+    },
+    "/a/new.txt": {
+      "content": {
+        "base64": "ZnJlc2g="
+      },
+      "kind": "file",
+      "mode": 420
+    },
+    "/a/old.txt": null
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    }
+  ]
+}

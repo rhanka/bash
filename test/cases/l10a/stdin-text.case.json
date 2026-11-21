@@ -1,0 +1,13 @@
+{
+  "id": "l10a/stdin-text",
+  "steps": [
+    {
+      "script": "stdin",
+      "stdin": "line one\nsnow ☃\n"
+    }
+  ],
+  "tags": [
+    "stdin"
+  ],
+  "title": "Stdin given as text"
+}

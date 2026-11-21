@@ -1,0 +1,43 @@
+{
+  "case": "l10a/env-change",
+  "caseHash": "f1100e459162e04c40553323337d4560bb1ca7a0079fdfba3af891232f82fb57",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "A": "1",
+        "B": "2",
+        "C": "3"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "A": "1",
+        "B": "2",
+        "C": "3",
+        "D": "4",
+        "E": "5"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "F": "6",
+        "G": "7"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "files": {
+    "/data/in.txt": "alpha\n"
+  },
+  "id": "l10a/two-steps-files",
+  "steps": [
+    {
+      "script": "cat /data/in.txt\nwrite /data/out.txt beta"
+    },
+    {
+      "script": "cat /data/out.txt\ncat /data/in.txt"
+    }
+  ],
+  "tags": [
+    "files",
+    "steps"
+  ],
+  "title": "Two steps share one filesystem"
+}

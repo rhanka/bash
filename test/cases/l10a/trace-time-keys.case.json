@@ -1,0 +1,18 @@
+{
+  "capture": {
+    "trace": true
+  },
+  "id": "l10a/trace-time-keys",
+  "steps": [
+    {
+      "script": "trace find summary readdirCalls=2 readdirTimeMs=0 statCalls=5 otherTimeMs=0\ntrace find searchPath resultsFound=3"
+    },
+    {
+      "script": "trace custom note count=1"
+    }
+  ],
+  "tags": [
+    "trace"
+  ],
+  "title": "Trace events with time keys"
+}

@@ -1,0 +1,18 @@
+{
+  "case": "l10a/stdin-bytes",
+  "caseHash": "e5abe2737292e0daa21a230dfcccc50c9cc2b12848488dff99a66384e6895e67",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "ÿþA"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "l10a/stderr",
+  "steps": [
+    {
+      "script": "err oops\necho ok\nerr again"
+    }
+  ],
+  "tags": [
+    "output"
+  ],
+  "title": "Stderr is kept apart from stdout"
+}

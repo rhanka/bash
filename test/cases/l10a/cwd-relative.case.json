@@ -1,0 +1,19 @@
+{
+  "cwd": "/work",
+  "id": "l10a/cwd-relative",
+  "profile": "normal",
+  "steps": [
+    {
+      "script": "write rel.txt here\ncat rel.txt"
+    },
+    {
+      "cwd": "/elsewhere",
+      "script": "write other.txt there"
+    }
+  ],
+  "tags": [
+    "cwd",
+    "files"
+  ],
+  "title": "Relative paths resolve against the working directory"
+}

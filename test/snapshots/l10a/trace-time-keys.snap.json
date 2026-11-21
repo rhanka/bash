@@ -1,0 +1,50 @@
+{
+  "case": "l10a/trace-time-keys",
+  "caseHash": "8d27a380f29c08d22e248fb6090fadb480852fd6861ceb0e17bd77f208ffa446",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": ""
+    }
+  ],
+  "trace": [
+    {
+      "category": "find",
+      "details": {
+        "otherTimeMs": null,
+        "readdirCalls": 2,
+        "readdirTimeMs": null,
+        "statCalls": 5
+      },
+      "name": "summary"
+    },
+    {
+      "category": "find",
+      "details": {
+        "resultsFound": 3
+      },
+      "name": "searchPath"
+    },
+    {
+      "category": "custom",
+      "details": {
+        "count": 1
+      },
+      "name": "note"
+    }
+  ]
+}

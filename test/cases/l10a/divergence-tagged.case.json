@@ -1,0 +1,13 @@
+{
+  "divergence": "V2",
+  "id": "l10a/divergence-tagged",
+  "steps": [
+    {
+      "script": "echo differs on purpose"
+    }
+  ],
+  "tags": [
+    "divergence"
+  ],
+  "title": "A case exercising an intended difference"
+}

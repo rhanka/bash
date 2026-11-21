@@ -1,0 +1,12 @@
+{
+  "id": "l10a/unknown-command",
+  "steps": [
+    {
+      "script": "nope"
+    }
+  ],
+  "tags": [
+    "exit"
+  ],
+  "title": "Unknown command gives 127"
+}
