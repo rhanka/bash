@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+// Builds the components: core module, component, validation, JavaScript bindings.
+// Usage: node tools/build.mjs [--component <name>|all] [--out dist] [--check-bindings]
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { repoRoot, components, run, tryRun, sha256File, toolBin, walk } from "./lib.mjs";
+import { bindingsProblems } from "./bindings.mjs";
+import { transpileComponent } from "./transpile.mjs";
+
+const argv = process.argv.slice(2);
+const opt = (name, dflt) => {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : dflt;
+};
+const only = opt("--component", "all");
+const out = resolve(repoRoot, opt("--out", "dist"));
+const checkBindings = argv.includes("--check-bindings");
+const all = components();
+const names = only === "all" ? Object.keys(all) : [only];
+for (const n of names) if (!all[n]) throw new Error(`unknown component ${n}`);
+
+const wasmTools = toolBin("wasm-tools");
+
+function report(path) {
+  const size = statSync(path).size;
+  console.log(`artefact ${relative(repoRoot, path)} ${size} ${sha256File(path)}`);
+}
+
+function buildCore(c, def) {
+  const rustflags = [
+    "-C link-self-contained=no",
+    "-C link-arg=--no-entry",
+    "-C link-arg=--skip-wit-component",
+    `--remap-path-prefix=${repoRoot}=.`,
+  ].join(" ");
+  const target = join(out, "target");
+  run("cargo", ["build", "--release", "--locked", "--offline", "--target", "wasm32-wasip2", "-p", def.crate], {
+    cwd: repoRoot,
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC", RUSTFLAGS: rustflags, CARGO_TARGET_DIR: target, CARGO_ENCODED_RUSTFLAGS: undefined },
+  });
+  const built = join(target, "wasm32-wasip2", "release", def.crate.replace(/-/g, "_") + ".wasm");
+  const core = join(out, `${c}.core.wasm`);
+  run("cp", [built, core]);
+  const magic = readFileSync(core).subarray(0, 8).toString("hex");
+  if (magic !== "0061736d01000000") throw new Error(`${core} is not a core module (magic ${magic})`);
+  return core;
+}
+
+function buildComponent(c, def, core) {
+  if (def.wasmOpt) throw new Error("wasm-opt is not pinned yet (decided at L2)");
+  const tmp = mkdtempSync(join(out, "embed-"));
+  try {
+    const embedded = join(tmp, "embedded.wasm");
+    const witDir = join(repoRoot, def.witDir);
+    run(wasmTools, ["component", "embed", witDir, "--world", def.world, core, "-o", embedded]);
+    const comp = join(out, `${c}.component.wasm`);
+    run(wasmTools, ["component", "new", embedded, "-o", comp]);
+    run(wasmTools, ["validate", comp]);
+    const magic = readFileSync(comp).subarray(0, 8).toString("hex");
+    if (magic !== "0061736d0d000100") throw new Error(`${comp} is not a component (magic ${magic})`);
+    return comp;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const f = tryRun("node", [join(repoRoot, "tools", "fetch-tools.mjs"), "--offline"], { cwd: repoRoot });
+  if (f.status !== 0) {
+    process.stderr.write(f.stdout + f.stderr);
+    throw new Error("tools are not verified; run node tools/fetch-tools.mjs");
+  }
+  if (checkBindings) return verifyBindings();
+  mkdirSync(out, { recursive: true });
+  // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
+  if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
+  for (const c of names) {
+    const def = all[c];
+    const core = buildCore(c, def);
+    const comp = buildComponent(c, def, core);
+    const jsDir = join(out, "js", c);
+    await transpileComponent(comp, jsDir);
+    report(core);
+    report(comp);
+    for (const p of walk(jsDir)) report(p);
+  }
+}
+
+function verifyBindings() {
+  let bad = false;
+  for (const c of names) {
+    const b = all[c].bindings;
+    if (!b) {
+      console.log(`bindings ${c}: none committed (hand-written glue)`);
+      continue;
+    }
+    for (const p of bindingsProblems(repoRoot, c, b, toolBin("wit-bindgen"))) {
+      console.log(p);
+      bad = true;
+    }
+  }
+  if (bad) process.exit(1);
+  console.log("bindings: OK");
+}
+
+main().catch((e) => {
+  console.error(`build failed: ${e.message}`);
+  if (e.stderr) console.error(e.stderr);
+  process.exit(1);
+});

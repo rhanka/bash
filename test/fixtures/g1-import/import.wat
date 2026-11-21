@@ -1,0 +1,3 @@
+(component
+  (import "x" (func))
+)
