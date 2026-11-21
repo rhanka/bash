@@ -62,15 +62,15 @@ Replace the bootstrap with the L2 shell, command registry, and `echo`. Replay th
 - L2 merges before L7b. L7b owns the rebase and uses COMMAND_NAMES for host-backed command stubs.
 - The include! registry passes G3 on Rust 1.96. G3 includes the relocated test-only JS.
 - Hardened ceiling exhaustion returned exit 126 with stderr and a usable instance.
-- Retain minification. It lowered M1 by 19.480157 ms, and the minified release passed G1–G8 and the full test suite.
-- Raw / gzip JS group sizes, unminified then minified
-  - Generated glue 565,129 / 63,041 B and 273,308 / 45,163 B.
+- The shipping minified build passed G1–G8 and the full test suite.
+- Raw / gzip JS group sizes, unminified then shipping minified
+  - Generated glue 565,157 / 63,043 B and 273,336 / 45,167 B.
   - Registry 54 / 74 B and 54 / 74 B.
-  - Other browser-reachable entry code 68,414 / 22,529 B and 68,414 / 22,529 B.
+  - Other browser-reachable entry code 69,135 / 22,681 B and 69,135 / 22,681 B.
   - Node-only 1,790 / 853 B and 1,790 / 853 B.
-  - All shipped JS (M6-js) 635,387 / 86,497 B and 343,566 / 68,619 B.
-- Binaryen 132.0.0 is unpinned. Optimization flags and gain are unmeasured. wasmOpt stays disabled.
+  - All shipped JS (M6-js) 636,136 / 86,651 B and 344,315 / 68,775 B.
+- Binaryen 132.0.0 is unpinned for core optimization. The driver reports wasm-opt as not measured. Optimization flags and gain are pending. wasmOpt stays disabled.
 - Upstream-defect candidates are VFS quota exceptions, lone-surrogate echo escapes, and mixed valid and invalid UTF-8 output.
 - Coverage snapshots use defenseInDepth: false because the reference can block the first lazy command import.
 - The parser token cap requires a function call tree to reach the contain and normal command caps. The deadline suite advances the driver clock while retaining the profile values.
-- No-go (kernel miss). See plan/reports/GATE_L2.md for the measurement tables and owner handoff.
+- No-go (kernel miss). L2b owns the first-party glue. See plan/reports/GATE_L2.md for the current measurements.
