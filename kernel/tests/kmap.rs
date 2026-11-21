@@ -169,6 +169,32 @@ fn padded_pair_bound() {
     assert_eq!(b.used(), 0);
 }
 
+fn clear_after_panicking_drop() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    struct Value(bool);
+
+    impl Drop for Value {
+        fn drop(&mut self) {
+            assert!(!self.0, "entry destructor panic");
+        }
+    }
+
+    let b = root(16, BIG);
+    let mut m = KMap::new_in(&b);
+    for k in 0..17 {
+        assert!(m.try_insert(k, Value(true)).unwrap().is_none());
+    }
+    assert!(m.node_count() > 1, "exercise a tree with an internal root");
+
+    assert!(catch_unwind(AssertUnwindSafe(|| m.clear())).is_err());
+    assert_eq!((m.len(), m.node_count()), (0, 0));
+    assert!(m.try_insert(42, Value(false)).unwrap().is_none());
+    assert!(m.keys().copied().eq([42]));
+    assert!(m.remove(&42).is_some());
+    assert!(m.is_empty());
+}
+
 #[test]
 fn kmap() {
     let base = start();
@@ -178,4 +204,6 @@ fn kmap() {
     ownership(base);
     padded_pair_bound();
     assert_eq!(usage().used, base, "no leak");
+    // Run last because the interrupted destructor leaves the old tree allocated.
+    clear_after_panicking_drop();
 }
