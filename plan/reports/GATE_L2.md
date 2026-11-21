@@ -1,8 +1,38 @@
 # Gate L2
 
-**No-go (kernel miss).** M1, M2, M3a, M5 exceeded the kernel targets. Pause W4 and later build lots under PLAN section 5. Spec writing can continue while the owner reviews the targets, a slim build, and scope options. Shipped JS also exceeded the 60,000 B target.
+**No-go (kernel miss).** After Option D, M1, M2, M3a, and M5 still exceed the kernel targets. Pause W4 and later build lots under PLAN section 5. Spec writing can continue while the owner reviews the targets, a slim build, and scope options. Shipped JS still exceeds the 60,000 B target.
 
-## Verification
+## Option D (guarded jco)
+
+The shipping minified kernel guards all 14 jco-transpile 0.24.0 probes with optional calls. The transpile step checks the count and the try/catch shapes in minified and unminified kernel glue. On Node 22.22.1, where `WebAssembly.promising` is undefined, the calls are skipped. When the API is present, jco still calls it and catches any exception.
+
+The unchanged driver ran with `node tools/measure-l2.mjs --variant committed` against the rebuilt package tree at `a307ff9d8d669863af497a843aacbde3228a2b2f` plus the Option D changes. The machine, tool versions, seeds, and protocol match the earlier runs below. Full samples are in `tmp/bench-l2/committed/results.json`.
+
+Timing cells show median / p95 / minimum in milliseconds. Size cells show raw / gzip bytes.
+
+| Metric | Target | Guarded minified | Result |
+|---|---:|---:|---|
+| M1 cold total | 25.0 (stretch 15.0) | 53.368487 / 61.622309 / 48.269563 | Miss |
+| M2 warm construction | 0.20 | 0.724484 / 1.975799 / 0.617442 | Miss |
+| M3a warm async exec | 0.07 | 0.095540 / 0.167595 / 0.089298 | Miss |
+| M5 RSS delta, B | 10,000,000 | 12,677,120 | Miss |
+| M6-wasm | 1,500,000 / 700,000 | 219,953 / 79,176 | Pass |
+| M6-js | 60,000 raw | 343,594 / 68,623 | Miss |
+
+Median cold construction fell from 62.938322 ms to 11.549190 ms. Median cold import was 31.857053 ms and first exec was 9.381220 ms. Warm sync exec was 0.092945 / 0.147647 / 0.088758 ms. The guard added 28 raw bytes and 4 gzip bytes to shipped JS.
+
+The provisional Annex H budgets still miss for browser-reachable JS (341,804 B raw against 45,000 B) and total gzip JS (68,623 B against 30,000 B).
+
+| Metric | Run medians in seed order |
+|---|---|
+| M1, ms | 53.746434 / 51.792751 / 53.368487 |
+| M2, ms | 0.724484 / 0.696992 / 0.737213 |
+| M3a, ms | 0.095540 / 0.097614 / 0.094267 |
+| M5, B | 12,677,120 / 12,587,008 / 12,742,656 |
+
+The full `make check` passed G1–G8, including G3 byte identity, K1, native Rust tests, bindings regeneration, and the Node suite with 233 passes, zero failures, and 9 existing TODOs. The packed Node and browser consumers and all 30 L2 oracle cases passed.
+
+## Verification before Option D
 
 - G1–G8, K1, native Rust tests, binding regeneration, and packed Node and browser consumers passed. Node reported 228 passes, zero failures, and 9 existing TODOs.
 - Oracle replay passed all 30 committed cases with zero failures, stale snapshots, exclusions, or uncovered cases. All four profile suites and the 10,000-deep recursion check passed.
