@@ -22,11 +22,40 @@ export async function transpileComponent(componentPath, outDir, { minify = false
     optimize: false,
   });
   if (result.imports.length !== 0) throw new Error(`component has imports: ${result.imports.join(", ")}`);
+  if (name === "kernel") {
+    const glue = Buffer.from(result.files["kernel.js"]).toString("utf8");
+    result.files["kernel.js"] = guardPromisingProbes(glue, { minify });
+  }
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   writeFiles(outDir, result.files);
   embedShims(outDir, name);
   return readdirSync(outDir).sort();
+}
+
+// jco-transpile 0.24.0 probes synchronous canonical ABI helpers and discards the wrapper.
+// On engines without JSPI, skip the call so the generator does not catch 14 TypeErrors.
+export function guardPromisingProbes(source, { minify = false } = {}) {
+  const drift = (detail) => new Error(`jco promising probe drift in kernel.js: ${detail}. Review the generated glue and update the guard`);
+  const count = [...source.matchAll(/\.promising\b/g)].length;
+  if (count !== 14) throw drift(`expected 14 references, found ${count}`);
+
+  // The minifier aliases the WebAssembly instance and uses backticks for export names.
+  if (minify && !source.includes("let r=n?.shim?.globals?.WebAssembly??globalThis.WebAssembly;")) {
+    throw drift("WebAssembly alias changed");
+  }
+  const postReturn = minify
+    ? /try\{r\.promising\((n\[`cabi_post_[^`\n]+`\])\)\}catch\{\1\}/g
+    : /\n\t\ttry \{\n\t\t\tWebAssembly\.promising\((exports1\["cabi_post_[^"\n]+"\])\);\n\t\t\} catch \{\n\t\t\t\1;\n\t\t\}/g;
+  const realloc = minify
+    ? /try\{r\.promising\(n\.cabi_realloc\)\}catch\{\}/g
+    : /\n\t\ttry \{\n\t\t\tWebAssembly\.promising\(exports1\.cabi_realloc\);\n\t\t\} catch \{\}/g;
+  for (const [pattern, expected, kind] of [[postReturn, 13, "post-return"], [realloc, 1, "realloc"]]) {
+    const matches = [...source.matchAll(pattern)].length;
+    if (matches !== expected) throw drift(`expected ${expected} ${kind} probes in the pinned try/catch shape, found ${matches}`);
+    source = source.replace(pattern, (probe) => probe.replace(".promising(", ".promising?.("));
+  }
+  return source;
 }
 
 /** Writes generated files under outDir; a name that resolves outside it is refused. */
