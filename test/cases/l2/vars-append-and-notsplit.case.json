@@ -1,0 +1,9 @@
+{
+  "id": "l2/vars-append-and-notsplit",
+  "steps": [
+    {
+      "script": "S='a   b'\nT=$S\nT+=' c'\necho \"$T\"\necho $T"
+    }
+  ],
+  "title": "Vars append and notsplit"
+}
