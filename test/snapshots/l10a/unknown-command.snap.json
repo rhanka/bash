@@ -1,0 +1,18 @@
+{
+  "case": "l10a/unknown-command",
+  "caseHash": "23fd71a25962e3c4c7859d0ba777e692d40a57493d62d0a46a86a4fe4517e3e5",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 127,
+      "stderr": "mock: nope: command not found\n",
+      "stdout": ""
+    }
+  ]
+}

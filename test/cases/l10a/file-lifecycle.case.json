@@ -1,0 +1,20 @@
+{
+  "files": {
+    "/a/keep.txt": "keep",
+    "/a/old.txt": "old",
+    "/a/same.txt": {
+      "content": "same",
+      "mode": 384
+    }
+  },
+  "id": "l10a/file-lifecycle",
+  "steps": [
+    {
+      "script": "write /a/new.txt fresh\nwrite /a/keep.txt changed\nrm /a/old.txt"
+    }
+  ],
+  "tags": [
+    "files"
+  ],
+  "title": "File created, modified and removed"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "l10a/nonzero-exit",
+  "steps": [
+    {
+      "script": "echo before\nexit 3\necho after"
+    }
+  ],
+  "tags": [
+    "exit"
+  ],
+  "title": "Exit stops the step with its code"
+}

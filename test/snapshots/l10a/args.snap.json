@@ -1,0 +1,18 @@
+{
+  "case": "l10a/args",
+  "caseHash": "5c9535ccc4de262198f8c8f931d2e3494362b78304c890abf643b66908d89008",
+  "engine": {
+    "name": "mock",
+    "version": "1"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {},
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "a b\nc\n\n"
+    }
+  ]
+}
