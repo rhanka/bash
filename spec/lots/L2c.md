@@ -35,6 +35,8 @@ browser-engine timings. A slim profile or a new threshold requires an owner deci
 ```
 host/**                       (default selection, shared facade, entry and loader)
 kernel/src/glue/**            (internal snapshot/capture hooks if required)
+kernel/src/mem/mod.rs         (crate-visible restore entry into the private allocator)
+kernel/src/mem/ceiling.rs     (read-only freshness check on the private configuration and usage state)
 kernel/src/mem/heap.rs        (allocator-owned checked page growth for restore only)
 tools/**                      (snapshot, build stages, gate/pack walkers, measurement)
 packages/bash-jco/**          (companion manifest and staging inputs)
@@ -56,8 +58,9 @@ name.
 
 1. **Capture the real default.** Build the exact production linked core with its release flags and command
    registry. Instantiate a fresh store, save its initialized memory (including nonzero data segments), page
-   count, mutable globals and table state. Through the normal ABI perform `configure(268435456n)`,
-   `Vfs.create(134217728n)` and `Shell.create` with the validated, ordinary `contain` default config. Use its
+   count, mutable globals and table state. Drive capture through L2b's first-party adapter, using its production
+   lowering and allocation order for `configure(268435456n)`, `Vfs.create(134217728n)` and `Shell.create`
+   with the validated, ordinary `contain` default config. Use its
    actual environment, grants, default process info, physical layout and command files. Retain both owned
    resources. Capture zero fibers or pending host calls. Host time, entropy, process IDs and build paths
    must never enter the image.
@@ -77,15 +80,24 @@ name.
    from a core intrinsic, as it does for normal creation.
 4. **Private core ABI.** `__restore_default() -> i64` is a one-shot export of the loader core, invisible to the
    WIT. Only enter on a fresh, unused store before `configure`, allocation or any other mutating guest call.
-   Protect the restore entry against a repeated or late invocation before any memory writes. Check the exact
-   initial page count and final byte size against the default ceiling. Grow by exactly the required pages
-   through the allocator-owned page primitive (EVOL D6), check the result, apply `memory.init` ranges, drop the
-   passive segment. Call the existing `[resource-new]vfs` and `[resource-new]shell` imports, in that order, with
-   this image's own live representations. Pack the returned u32 handles (Vfs low 32, Shell high 32) in the i64.
-   JS unpacks the unsigned bit pattern, verifies two distinct live handles of the right kinds, claims each
-   exactly once with L2b's ownership/finalizer machinery, and populates fresh Holder/FS/Bash state. Initial
-   handle IDs are local to the table. Never manufacture a wrapper from an address or reuse a template wrapper. A
-   failed restore discards the store as one unit. No eager fallback in a partly restored instance.
+   Before changing state, require `!RESTORE_ENTERED`, `!CONFIGURED`, `USED == 0`, pristine allocation
+   high-water and the exact initial page count. With non-wrapping arithmetic, check that the build's final
+   page count fits the 268,435,456 B default cap and that all image ranges fit those pages. A failed
+   preflight returns `0i64` with memory, handles and latch untouched.
+   Keep `RESTORE_ENTERED` in a per-store mutable global outside the captured image. Set it once after preflight
+   and before `memory.grow` or `memory.init`. From glue, call a restore-only `pub(crate)` helper exposed by
+   `crate::mem`. Its allocator-owned page primitive checks the final linear-memory byte size against the
+   explicit 268,435,456 B default cap and grows exactly the required pages. Ordinary pre-`configure`
+   allocations retain the 1 MiB `BOOTSTRAP_CEILING`. A refused growth returns `0i64` with the latch set,
+   before any image write or handle registration. After successful growth apply the ranges with `memory.init`
+   and drop the passive segment. Call the existing `[resource-new]vfs` and `[resource-new]shell` imports,
+   in that order, with this image's own live representations. Pack the nonzero u32 handles in the i64
+   (Vfs low 32, Shell high 32). JS checks for `0n` before unpacking both halves as unsigned. On success it
+   verifies two distinct live handles of the right kinds, claims each exactly once with L2b's ownership/finalizer
+   machinery, and populates fresh Holder/FS/Bash state. Initial handle IDs are local to the table.
+   Never manufacture a wrapper from an address or reuse a template wrapper. A
+   failed constructor discards its fresh store as one unit. A `0i64` refusal is a normal return, so a late
+   probe on a live store leaves it usable. A trap during image installation or handle registration follows D8.
 5. **Select on validated options.** Internal pure `isDefaultSnapshotConfig(normalized) -> boolean` uses only the
    already validated, single-read configuration. It requires `contain`, the standard ceiling, zero overrides
    including aliases, default layout/cwd, no supplied FS/files/env/commands/customCommands/processInfo, no
@@ -114,8 +126,11 @@ name.
 
 - `import { Bash } from "@sentropic/bash"` and `"@sentropic/bash/browser"` select first-party by default.
   `"@sentropic/bash-jco"` and `"@sentropic/bash-jco/browser"` select Option D explicitly. Match the
-  corresponding public runtime exports, TS declarations and supported Node `require` behavior. Each package
-  installs alone offline. Build the facade from one source graph with a binding-specific entry at build time. Exclude the alternative binding from each tarball. No runtime selector/dependency or postinstall build.
+  corresponding public runtime exports, TS declarations and supported Node `require` behavior. Stage declarations
+  for both tarballs directly from the root `types/**` tree at pack time. The companion has no separately
+  maintained `.d.ts` files. Each package installs alone offline. Build the facade from one source graph with
+  a binding-specific entry at build time. Exclude the alternative binding from each tarball. No runtime
+  selector/dependency or postinstall build.
 - Stage readable sources as deterministic, minified shipped ESM using the lockfile's `oxc-minify`. Factor shared
   code into one browser-safe module per package. Preserve externally observable names/types, error classes and
   symbol methods. Keep the actual synchronous deferred lookup of `node:fs` / `node:url` via
@@ -203,24 +218,31 @@ the following inclusive kernel thresholds.
 separately on the green release artifacts.
 
 1. **Snapshot.** Two independent G3 builds give identical snapshot core, component, binding and packaged JS
-   bytes. Compare restored versus ordinary setup for env/export order, cwd, command names, physical
-   bytes/stat/mode/inodes in both stub directories, dirty state, quota, allocator usage/ceiling/high-water,
-   first write/delete and first echo. A synthetic initialized nonzero word reset to zero survives restoration.
+   bytes. Compare restored versus ordinary setup through the same first-party binding for env/export order,
+   cwd, command names, physical bytes/stat/mode/inodes in both stub directories, dirty state, quota,
+   allocator usage/ceiling/high-water, first write/delete and first echo. A synthetic initialized nonzero word
+   reset to zero survives restoration.
    Exercise post-return and explicit disposal of both owners. No raw representation/offset sidecar in either
    pack.
 2. **Isolation.** Two restores produce two distinct memories and branded handle tables, with zero spare stores.
    Mutation or real test-instrumented trap in one leaves the other usable. Inject the trap in a restore-capable
-   test build without enabling the production fast path for arbitrary test hooks. A second restore and a restore
-   after ordinary initialization refuse before mutation. Failing setup exposes zero usable half-created shells.
+   test build without enabling the production fast path for arbitrary test hooks. Verify a fresh restore can
+   grow past the 1 MiB bootstrap ceiling. A second restore and a restore after ordinary initialization both
+   return `0n` with identical page count, memory bytes and handle table before and after. The next ordinary
+   call succeeds. Also check refusal immediately after `configure`, while `USED` is still zero. Force a page
+   growth refusal in a fresh fixture. Assert `0n`, zero image writes and zero resource registrations. A retry
+   on that core attempts no growth. Failing construction exposes zero usable half-created shells.
 3. **Predicate and loaders.** Count 1 restore and 0 ordinary setup calls for each eligible configuration on Node
    and the packaged default browser URL after precompile. For each disqualifier in section 4, count 0 restores
    and confirm normal semantics or the constructor error. Include logger delivery, filtered commands, a small
    ceiling, invalid option, staged writes before compilation and caller-supplied modules with and without the
    helper. After precompile `execSync("echo hi")` returns exit 0 through either entry.
 4. **Packages and guard.** Install each of the two packed files independently in an empty consumer, exercise
-   Node ESM/CJS, browser precompile/async/sync, and `tsc --noEmit`. Zero third-party dependencies or install
-   scripts, identical component and WIT hashes, G1–G8/K1 pass. In both guard shapes test JSPI absent, present
-   and throwing, and a changed count/shape fixture that fails generation. Replay 30/30 cases through each
+   Node ESM/CJS, browser precompile/async/sync, and `tsc --noEmit`. Compare each installed Node/browser
+   declaration and its relative imports byte for byte with the corresponding root `types/**` files.
+   Zero third-party dependencies or install scripts, identical component and WIT hashes, G1–G8/K1 pass.
+   In both guard shapes test JSPI absent, present and throwing, and a changed count/shape fixture that fails
+   generation. Replay 30/30 cases through each
    package. All four limit profiles and the L2b differential suite pass.
 5. **Gate logic and measurements.** Test the verdict function at equality and just over each bound, including
    each browser-cap interval, a simultaneous kernel/JS miss, and a red correctness suite. Attach the three run
