@@ -187,12 +187,21 @@ test("post-return releases the transfer charge for an input echoed in an error",
 
 test("the ceiling cannot be configured below the heap's existing footprint", () => {
   const { engine } = new Instance(module, internal());
-  const initial = thrown(() => engine.Vfs.create(4096n));
+  // Lowering the script grows the ordinary arena before the call reaches the configuration check.
+  const initial = thrown(() => engine.execOneshot({ files: [], config: config(), opts: opts(" ".repeat(90_000)), stdin: enc(""), fuel: 1n }));
   assert.deepEqual(initial, { code: "not-configured", detail: "configure was not called" });
   assert.equal(engine.usage().used, 0n);
-  assert.equal(thrown(() => engine.configure(32_768n)).code, "invalid-config");
+  assert.equal(thrown(() => engine.configure(2n * 65_536n)).code, "invalid-config");
+  engine.configure(3n * 65_536n);
+  assert.equal(engine.usage().ceiling, 3n * 65_536n);
+});
+
+test("a cold engine rejects a ceiling without room for an ordinary Wasm page", () => {
+  const { engine } = new Instance(module, internal());
+  assert.equal(thrown(() => engine.configure(65_536n)).code, "invalid-config");
   engine.configure(2n * 65_536n);
-  assert.equal(engine.usage().ceiling, 2n * 65_536n);
+  const vfs = engine.Vfs.create(4096n);
+  assert.deepEqual(vfs.op({ tag: "exists", val: enc("/") }), { tag: "ok", val: { tag: "flag", val: true } });
 });
 
 test("the ABI reserve keeps pending stdout drainable near the Wasm ceiling", () => {
@@ -241,7 +250,7 @@ test("a limit result includes its name and diagnostic after ordinary heap growth
   fiber.pushCallData(epoch, "body", new Uint8Array(140_000));
   assert.equal(engine.usage().used - before, 140_000n);
   assert.equal(fill("/fill2", 130_000n).tag, "ok");
-  // The one-byte input fits, but the body cannot grow. Diagnostics run before the body is released.
+  // The one-byte input fits, but the body cannot grow.
   fiber.pushCallData(epoch, "body", enc("x"));
   const result = fiber.resume(epoch, { tag: "command-exit", val: 0 });
   assert.equal(result.tag, "done");
@@ -249,6 +258,75 @@ test("a limit result includes its name and diagnostic after ordinary heap growth
   assert.equal(result.val.exitCode, 126);
   assert.equal(dec(fiber.takeStderr(100)), "bash: memory-ceiling exceeded\n");
   assert.equal(result.val.limitName, "memory-ceiling");
+});
+
+test("cancel preserves large stderr and its diagnostic near the Wasm ceiling", () => {
+  const ceiling = 10n << 20n;
+  const { engine } = new Instance(module, internal());
+  engine.configure(ceiling);
+  const vfs = engine.Vfs.create(ceiling);
+  const c = config(["foo"]);
+  c.limits = {
+    profile: "micro",
+    overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 500_000n })),
+  };
+  const shell = engine.Shell.create(vfs, c);
+  const fiber = engine.Fiber.spawn(shell, undefined, opts("__err 50000\n__out 200000\nfoo"));
+  assert.equal(fiber.run(5n).tag, "host-call");
+  // The ordinary arena can no longer grow stderr, which is also too large for amortized
+  // growth into the reserve page.
+  const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
+  assert.equal(fill("/fill", ceiling - 350_000n).tag, "ok");
+  assert.equal(fiber.cancel("aborted").status, "aborted");
+  const chunks = [];
+  for (;;) {
+    const bytes = fiber.takeStderr(1 << 20);
+    if (bytes.length === 0) break;
+    chunks.push(bytes);
+  }
+  const output = Buffer.concat(chunks);
+  const diagnostic = "bash: execution aborted\n";
+  assert.equal(output.length, 50_000 + diagnostic.length);
+  assert.equal(dec(chunks.at(-1)), diagnostic);
+  assert.equal(output.toString(), "a".repeat(50_000) + diagnostic);
+});
+
+test("host-supplied limit names are bounded at a UTF-8 character boundary", () => {
+  const { engine } = withEngine();
+  const vfs = engine.Vfs.create(4096n);
+  const c = config(["foo"]);
+  c.grants.realSleep = true;
+  const shell = engine.Shell.create(vfs, c);
+  const prefix = "a".repeat(127);
+  for (const script of ["foo", "__sleep 1"]) {
+    const fiber = engine.Fiber.spawn(shell, undefined, opts(script));
+    const call = fiber.run(5n);
+    assert.equal(call.tag, "host-call");
+    const result = fiber.resume(call.val.epoch, { tag: "limit-exceeded", val: prefix + "é" + "x".repeat(300) });
+    assert.equal(result.tag, "done");
+    assert.equal(result.val.status, "limit-exceeded");
+    assert.equal(result.val.limitName, prefix);
+    assert.equal(dec(fiber.takeStderr(1024)), `bash: ${prefix} exceeded\n`);
+  }
+});
+
+test("shell cwd copies are bounded only when the full ordinary copy is refused", () => {
+  const ceiling = 10n << 20n;
+  const { engine } = new Instance(module, internal());
+  engine.configure(ceiling);
+  const vfs = engine.Vfs.create(ceiling);
+  const c = config();
+  c.limits = {
+    profile: "micro",
+    overrides: ["maxFileSystemBytes", "maxLiveBytes", "maxOutputSize"].map((name) => ({ name, value: 500_000n })),
+  };
+  c.cwd = enc("/" + "a".repeat(99_999));
+  const shell = engine.Shell.create(vfs, c);
+  assert.deepEqual(shell.cwd(), c.cwd);
+  const fill = (path, offset) => vfs.op({ tag: "write-file", val: { path: enc(path), data: new Uint8Array(0), offset, truncate: true } });
+  assert.equal(fill("/fill", ceiling - 280_000n).tag, "ok");
+  assert.equal(fill("/fill2", 95_000n).tag, "ok");
+  assert.deepEqual(shell.cwd(), c.cwd.subarray(0, 4096));
 });
 
 test("gate 18: InMemoryFs methods, and ENOSYS for the ones not backed yet", async () => {

@@ -90,7 +90,6 @@ pub(crate) enum Fail {
     Output,
     Input,
     Mem(MemError),
-    Named(KString),
 }
 
 #[derive(Clone, Copy)]
@@ -141,6 +140,21 @@ impl Out {
     }
 }
 
+// Terminal messages are bounded by the fixed text, a 128-byte limit name or a decimal number.
+struct Diagnostic {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+impl Write for Diagnostic {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len + s.len();
+        self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
 pub struct Fiber {
     pub(crate) shell: KRc<Shell>,
     pub(crate) live: Budget,
@@ -152,6 +166,7 @@ pub struct Fiber {
     stdout: Out,
     stdout_bytes: bool,
     stderr: Out,
+    stderr_tail: Out,
     script: KBytes,
     pos: usize,
     checked: bool,
@@ -233,6 +248,7 @@ impl Fiber {
             stdout: Out::new(&out_budget),
             stdout_bytes: false,
             stderr: Out::new(&out_budget),
+            stderr_tail: Out::new(&scratch),
             stdin: KBytes::new_in(&live),
             body: KBytes::new_in(&live),
             kept: KVec::new_in(&live),
@@ -325,10 +341,20 @@ impl Fiber {
         self.stdout.consume(n)
     }
     pub fn stderr_chunk(&self, max: usize) -> &[u8] {
-        self.stderr.chunk(max)
+        let [pending, tail] = self.stderr_chunks();
+        let bytes = if pending.is_empty() { tail } else { pending };
+        &bytes[..bytes.len().min(max)]
     }
     pub fn stderr_consume(&mut self, n: usize) {
-        self.stderr.consume(n)
+        let pending = self.stderr.chunk(n).len();
+        self.stderr.consume(pending);
+        if n > pending {
+            let tail = self.stderr_tail.chunk(n - pending).len();
+            self.stderr_tail.consume(tail);
+        }
+    }
+    pub(crate) fn stderr_chunks(&self) -> [&[u8]; 2] {
+        [self.stderr.chunk(usize::MAX), self.stderr_tail.chunk(usize::MAX)]
     }
 
     // ---------------------------------------------------------------- stateful calls
@@ -382,7 +408,7 @@ impl Fiber {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn fail_abi_transfer(&mut self) {
-        self.finish(126, Status::LimitExceeded, Some("memory-ceiling"));
+        self.finish(126, Status::LimitExceeded, Some("memory-ceiling"), None);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -442,6 +468,17 @@ impl Fiber {
     pub fn resume(&mut self, epoch: u64, o: Outcome<'_>) -> Result<Step, CallError> {
         let p = self.check_call(epoch)?;
         self.st = St::Ready;
+        if let Some(f) = self.stdin_fail.take() {
+            return Ok(self.end_fail(f));
+        }
+        if let Outcome::LimitExceeded(name) = o {
+            let name = &name[..name.floor_char_boundary(128)];
+            self.finish(
+                126, Status::LimitExceeded, Some(name),
+                Some(format_args!("bash: {name} exceeded\n")),
+            );
+            return Ok(self.done_step());
+        }
         match self.complete(p, o) {
             Ok(()) => {}
             Err(CompleteError::BadOutcome) => {
@@ -465,7 +502,9 @@ impl Fiber {
                 Err(_) => Step::Done(ExecResult {
                     exit: r.exit,
                     status: r.status,
-                    limit_name: reserve_scope(|| r.limit_name.try_clone()).ok().flatten(),
+                    limit_name: r.limit_name.try_clone()
+                        .or_else(|_| reserve_scope(|| r.limit_name.try_clone()))
+                        .ok().flatten(),
                     env: Env::new_in(&self.scratch),
                     stdout_bytes: r.stdout_bytes,
                 }),
@@ -496,7 +535,7 @@ impl Fiber {
             }
             let Some((a, b)) = self.next_line() else {
                 let exit = self.last_exit;
-                self.finish(exit, Status::Completed, None);
+                self.finish(exit, Status::Completed, None, None);
                 return self.done_step();
             };
             if self.fuel == 0 {
@@ -516,7 +555,7 @@ impl Fiber {
                 }
                 Flow::Exit => {
                     let exit = self.last_exit;
-                    self.finish(exit, Status::Completed, None);
+                    self.finish(exit, Status::Completed, None, None);
                     return self.done_step();
                 }
                 Flow::Fail(f) => return self.end_fail(f),
@@ -607,9 +646,6 @@ impl Fiber {
     // ---------------------------------------------------------------- answers
 
     fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<(), CompleteError> {
-        if let Some(f) = self.stdin_fail.take() {
-            return Err(CompleteError::Fail(f));
-        }
         match p {
             Pending::Custom => match o {
                 Outcome::CommandExit(n) => self.last_exit = n,
@@ -621,7 +657,6 @@ impl Fiber {
                     self.last_exit = 1;
                     self.write_out(Chan::Stderr, msg).map_err(CompleteError::Fail)?;
                 }
-                Outcome::LimitExceeded(name) => return Err(CompleteError::Fail(Fail::Named(str_in(name, &self.scratch).map_err(|e| CompleteError::Fail(Fail::Mem(e)))?))),
                 _ => return Err(CompleteError::BadOutcome),
             },
             Pending::Test(code, aux) => self.complete_test(code, aux, o)?,
@@ -643,65 +678,78 @@ impl Fiber {
             }
         };
         if self.overflow.is_some() || bytes > cap || units > cap {
-            let _ = self.say(Chan::Stderr, |s| write!(s, "bash: script input size limit exceeded ({cap} bytes)\n"));
-            self.finish(126, Status::LimitExceeded, Some("maxSourceBytes"));
+            self.finish(
+                126, Status::LimitExceeded, Some("maxSourceBytes"),
+                Some(format_args!("bash: script input size limit exceeded ({cap} bytes)\n")),
+            );
             return Some(self.done_step());
         }
         if units > 1_000_000 {
-            let _ = self.say(Chan::Stderr, |s| write!(s, "bash: syntax error: Parse error at 1:1: Input too large: {units} bytes exceeds limit of 1000000\n"));
-            self.finish(2, Status::Completed, None);
+            self.finish(
+                2, Status::Completed, None,
+                Some(format_args!("bash: syntax error: Parse error at 1:1: Input too large: {units} bytes exceeds limit of 1000000\n")),
+            );
             return Some(self.done_step());
         }
         None
     }
 
     fn end_fail(&mut self, f: Fail) -> Step {
-        let name: &str;
-        let mut dynamic: Option<KString> = None;
         match f {
             Fail::Output => {
-                name = "maxOutputSize";
                 let cap = self.out_cap;
-                let _ = self.say_unchecked(|s| write!(s, "bash: pipeline: total output size exceeded (>{cap} bytes), increase executionLimits.maxOutputSize\n"));
+                self.finish(
+                    126, Status::LimitExceeded, Some("maxOutputSize"),
+                    Some(format_args!("bash: pipeline: total output size exceeded (>{cap} bytes), increase executionLimits.maxOutputSize\n")),
+                );
             }
-            Fail::Input => {
-                name = "maxInputBytes";
-                let _ = self.say_unchecked(|s| s.try_push_str("bash: maxInputBytes exceeded\n").map_err(|_| core::fmt::Error));
-            }
+            Fail::Input => self.finish(
+                126, Status::LimitExceeded, Some("maxInputBytes"),
+                Some(format_args!("bash: maxInputBytes exceeded\n")),
+            ),
             Fail::Mem(e) => {
-                name = match e {
+                let name = match e {
                     MemError::Limit(id) => limits::name_of(id),
                     _ => "memory-ceiling",
                 };
-                let _ = self.say_unchecked(|s| write!(s, "bash: {name} exceeded\n"));
+                self.finish(126, Status::LimitExceeded, Some(name), Some(format_args!("bash: {name} exceeded\n")));
             }
-            Fail::Named(n) => {
-                let _ = self.say_unchecked(|s| write!(s, "bash: {} exceeded\n", n.as_str()));
-                name = "";
-                dynamic = Some(n);
-            }
-        }
-        match dynamic {
-            Some(n) => self.finish_named(126, Status::LimitExceeded, Some(n)),
-            None => self.finish(126, Status::LimitExceeded, Some(name)),
         }
         self.done_step()
     }
 
     /// Formats and appends without the output cap (diagnostics of a limit that was just hit).
-    fn say_unchecked(&mut self, f: impl FnOnce(&mut KString) -> core::fmt::Result) -> MemResult<()> {
-        reserve_scope(|| {
-            let s = fmt_in(&self.scratch, f)?;
-            self.stderr.buf.try_extend_from_slice(s.as_str().as_bytes())
-        })
+    fn say_unchecked(&mut self, message: core::fmt::Arguments<'_>) {
+        let mut text = Diagnostic { bytes: [0; 256], len: 0 };
+        if text.write_fmt(message).is_err() {
+            return;
+        }
+        let bytes = &text.bytes[..text.len];
+        let stderr = &mut self.stderr.buf;
+        if stderr.try_reserve_exact(bytes.len()).and_then(|_| stderr.try_extend_from_slice(bytes)).is_err() {
+            // Keep the ordinary stderr buffer in its arena. Only the exact diagnostic can use the reserve.
+            let tail = bytes_in(bytes, &self.scratch)
+                .or_else(|_| reserve_scope(|| bytes_in(bytes, &self.scratch)));
+            if let Ok(tail) = tail {
+                self.stderr_tail.buf = tail;
+            }
+        }
     }
 
-    fn finish(&mut self, exit: i32, status: Status, limit: Option<&str>) {
-        let name = limit.and_then(|n| reserve_scope(|| str_in(n, &self.scratch)).ok());
-        self.finish_named(exit, status, name);
-    }
-
-    fn finish_named(&mut self, exit: i32, status: Status, limit_name: Option<KString>) {
+    fn finish(&mut self, exit: i32, status: Status, limit: Option<&str>, diagnostic: Option<core::fmt::Arguments<'_>>) {
+        // Release execution buffers before allocating diagnostics and result fields.
+        self.script = KBytes::new_in(&self.scratch);
+        self.stdin = KBytes::new_in(&self.scratch);
+        self.body = KBytes::new_in(&self.scratch);
+        self.kept = KVec::new_in(&self.scratch);
+        self.call_env = None;
+        self.stdin_fail = None;
+        if let Some(message) = diagnostic {
+            self.say_unchecked(message);
+        }
+        let limit_name = limit.and_then(|name| {
+            str_in(name, &self.scratch).or_else(|_| reserve_scope(|| str_in(name, &self.scratch))).ok()
+        });
         self.last_exit = exit;
         let mut env = match self.env.try_clone() {
             Ok(e) => e,
@@ -712,13 +760,6 @@ impl Fiber {
         let _ = env.set(b"?", code.as_str().as_bytes(), false);
         self.result = Some(ExecResult { exit, status, limit_name, env, stdout_bytes: self.stdout_bytes });
         self.st = St::Done;
-        // Release what the exec held, so that the instance stays usable.
-        self.script = KBytes::new_in(&self.scratch);
-        self.stdin = KBytes::new_in(&self.scratch);
-        self.body = KBytes::new_in(&self.scratch);
-        self.kept = KVec::new_in(&self.scratch);
-        self.call_env = None;
-        self.stdin_fail = None;
     }
 
     pub fn cancel(&mut self, reason: CancelReason) -> ExecResult {
@@ -737,8 +778,7 @@ impl Fiber {
             CancelReason::Deadline => (Status::Deadline, 124, None),
             CancelReason::Limit => (Status::LimitExceeded, 126, Some("limit")),
         };
-        let _ = self.say_unchecked(|s| s.try_push_str("bash: execution aborted\n").map_err(|_| core::fmt::Error));
-        self.finish(exit, status, name);
+        self.finish(exit, status, name, Some(format_args!("bash: execution aborted\n")));
     }
 }
 

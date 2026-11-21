@@ -59,15 +59,27 @@ where
     Ok(out)
 }
 
-// After a refusal, return a smaller bounded chunk from the reserve. Each chunk is lifted and
-// released before the next call.
+fn copy_bounded(bytes: &[u8], max: usize) -> Result<Vec<u8>, MemError> {
+    let bytes = &bytes[..bytes.len().min(max)];
+    copy(bytes).or_else(|_| mem::reserve_scope(|| copy(bytes)))
+}
+
+// Each chunk is lifted and released before the next call. Try a smaller chunk when the reserve
+// has no room for the usual fallback.
 fn drain_copy(bytes: &[u8]) -> Result<Vec<u8>, MemError> {
     let bytes = &bytes[..bytes.len().min(1 << 20)];
-    copy(bytes).or_else(|_| mem::reserve_scope(|| copy(&bytes[..bytes.len().min(16 << 10)])))
+    copy(bytes).or_else(|_| copy_bounded(bytes, 16 << 10)).or_else(|_| copy_bounded(bytes, 1024))
+}
+
+fn diagnostic_text(text: &str) -> Result<String, MemError> {
+    copy_text(text).or_else(|_| {
+        let text = &text[..text.floor_char_boundary(256)];
+        mem::reserve_scope(|| copy_text(text))
+    })
 }
 
 fn kerr(code: T::KernelErrorCode, detail: &str) -> T::KernelError {
-    T::KernelError { code, detail: mem::reserve_scope(|| copy_text(detail)).unwrap_or_default() }
+    T::KernelError { code, detail: diagnostic_text(detail).unwrap_or_default() }
 }
 
 fn mem_err(e: MemError) -> T::KernelError {
@@ -108,8 +120,9 @@ impl E::Guest for Kernel {
     type Fiber = FiberRes;
 
     fn configure(memory_ceiling_bytes: u64) -> Result<(), T::KernelError> {
-        if !CONFIGURED.load(Relaxed) && memory_ceiling_bytes < mem::footprint() {
-            return Err(kerr(T::KernelErrorCode::InvalidConfig, "ceiling below the allocator footprint"));
+        // The dedicated reserve and ordinary arena each need at least one Wasm page.
+        if !CONFIGURED.load(Relaxed) && memory_ceiling_bytes < mem::footprint().max(2 * 65_536) {
+            return Err(kerr(T::KernelErrorCode::InvalidConfig, "ceiling below the allocator minimum or current footprint"));
         }
         match mem::configure(memory_ceiling_bytes) {
             Ok(()) => {
@@ -336,7 +349,7 @@ impl E::GuestShell for ShellRes {
     }
 
     fn cwd(&self) -> Vec<u8> {
-        copy(&self.0.cwd).or_else(|_| mem::reserve_scope(|| copy(&self.0.cwd))).unwrap_or_default()
+        copy(&self.0.cwd).or_else(|_| copy_bounded(&self.0.cwd, 4096)).unwrap_or_default()
     }
 }
 
@@ -366,7 +379,7 @@ fn result_header(r: &fiber::ExecResult) -> T::ExecResult {
     };
     T::ExecResult {
         exit_code: r.exit, status: status_out(r.status),
-        limit_name: name.and_then(|name| mem::reserve_scope(|| copy_text(name)).ok()),
+        limit_name: name.and_then(|name| diagnostic_text(name).ok()),
         env: Vec::new(),
         stdout_kind: if r.stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
     }
@@ -383,7 +396,7 @@ fn transfer_limit(stdout_bytes: bool) -> T::ExecResult {
     T::ExecResult {
         exit_code: 126,
         status: T::ExecStatus::LimitExceeded,
-        limit_name: mem::reserve_scope(|| copy_text("memory-ceiling")).ok(),
+        limit_name: diagnostic_text("memory-ceiling").ok(),
         env: Vec::new(),
         stdout_kind: if stdout_bytes { T::StdoutKind::Bytes } else { T::StdoutKind::Text },
     }
@@ -623,7 +636,11 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
         }
     };
     let stdout = copy(f.stdout_chunk(usize::MAX)).map_err(mem_err)?;
-    let stderr = copy(f.stderr_chunk(usize::MAX)).map_err(mem_err)?;
+    let [pending, diagnostic] = f.stderr_chunks();
+    let mut stderr = Vec::new();
+    stderr.try_reserve_exact(pending.len() + diagnostic.len()).map_err(|_| mem_err(MemError::Ceiling))?;
+    stderr.extend_from_slice(pending);
+    stderr.extend_from_slice(diagnostic);
     let mut changed = Vec::new();
     let mut removed: Vec<Vec<u8>> = Vec::new();
     if let Ok(Ok_::Paths(paths)) = vfs.op(Op::AllPaths) {

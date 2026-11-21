@@ -273,10 +273,6 @@ impl Fiber {
                 self.last_exit = 1;
                 self.write_out(Chan::Stderr, m).map_err(fail)
             }
-            (_, Outcome::LimitExceeded(n)) => {
-                let name = str_in(n, &self.scratch).map_err(|e| CompleteError::Fail(Fail::Mem(e)))?;
-                Err(CompleteError::Fail(Fail::Named(name)))
-            }
             _ => Err(CompleteError::BadOutcome),
         }
     }
