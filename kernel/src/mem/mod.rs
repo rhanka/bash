@@ -9,6 +9,12 @@
 //! * Accounting: [`footprint`], [`headroom`], [`reserve_scope`].
 //! * Transfer hook: [`cabi_realloc`], [`transfer_free`].
 //!
+//! The canonical-ABI heap types are internal to the Wasm bindings.
+//!
+//! ```compile_fail
+//! use sentropic_bash_kernel::mem::abi::Vec;
+//! ```
+//!
 //! The module is single-threaded by design: its types are neither `Send` nor `Sync`.
 // The alloc crate is declared here, inside kernel/src/mem/, and reached by the submodules as `super::alloc`.
 extern crate alloc;
@@ -16,7 +22,8 @@ extern crate alloc;
 /// The heap types the generated canonical-ABI traits are written in (`Vec`, `String`, the allocator
 /// entry points). Only `kernel/src/glue/` reaches them, through this one door; everything else uses the
 /// fallible containers of this module.
-pub mod abi {
+#[cfg(all(target_arch = "wasm32", not(feature = "mem-test-exports")))]
+pub(crate) mod abi {
     pub use super::alloc::alloc::{alloc, dealloc, Layout};
     pub use super::alloc::string::String;
     pub use super::alloc::vec;
@@ -27,7 +34,6 @@ pub mod abi {
     ///
     /// # Safety
     /// The arguments must satisfy `mem::cabi_realloc`'s contract.
-    #[cfg(all(target_arch = "wasm32", not(feature = "mem-test-exports")))]
     pub(crate) unsafe fn cabi_realloc(old: *mut u8, old_len: usize, align: usize, new_len: usize) -> *mut u8 {
         use super::heap::WasmHeap;
         if old_len != 0 {
