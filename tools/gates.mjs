@@ -2,7 +2,7 @@
 // null on success, "SKIPPED (...)" when skipped, or a failure reason string.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { components, lockProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
+import { components, lockProblem, npmProblem, nonRegularEntries, lockResolution, pins, pinsProblem, readJson, run, sha256File, toolBin, toolProblem, tryRun, walk } from "./lib.mjs";
 import { bindingsProblems } from "./bindings.mjs";
 
 const wasmToolsOf = (ctx) => toolBin("wasm-tools", ctx.toolsDir, ctx.root);
@@ -28,77 +28,302 @@ export function g1ZeroImport(ctx) {
 }
 
 // ---------------------------------------------------------------------------------------------- G2
+//
+// SCOPE OF G2. G2 is a best-effort STATIC GUARD against ACCIDENTAL imports and capability use in OUR OWN
+// code (host/, dist/js/, types/). It is NOT a sandbox against adversarial source: a regex-based scanner of
+// JavaScript cannot be made sound, and no rule here is a security boundary. Where it cannot classify a
+// construct reliably it FAILS CLOSED (reports an error) instead of guessing. The ENFORCEMENT is the runtime
+// layer: tests run with --disallow-code-generation-from-strings (tools/run-tests.mjs) and under a module
+// resolve hook that refuses bare specifiers and node: imports (tools/test-hooks.mjs).
 
-// Whitespace between tokens, including both comment forms, so a comment cannot split a token pair.
-const W = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*)*`;
-// A braced name list: quoted names (ES2022) may hold any character, including } ( ) and comment markers.
-const NAMES = String.raw`\{(?:"[^"]*"|'[^']*'|[^}"'])*\}`;
-const CLAUSE = String.raw`(?:${NAMES}|[\w$*,\s])*?`;
-const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:${CLAUSE}${W}\bfrom${W})?(['"])([^'"\n]+)\1`, "g");
-const DYNAMIC_LITERAL = new RegExp(String.raw`\bimport${W}\(${W}(['"])([^'"` + "`" + String.raw`\n$\\]*)\1${W}\)`, "g");
-const DYNAMIC_ANY = new RegExp(String.raw`\bimport${W}\(`, "g");
+// Whitespace between tokens. Applied to comment-stripped text only, so a literal cannot bridge statements.
+const W = String.raw`\s*`;
+const LT = String.raw`\r\n\u2028\u2029`;
+// A quoted name (ES2022 module export names): escapes allowed, no line terminator.
+const QNAME = String.raw`(?:"(?:[^"\\${LT}]|\\.)*"|'(?:[^'\\${LT}]|\\.)*')`;
+// A braced name list; quoted names may hold any character, including } ( ) and comment markers.
+const NAMES = String.raw`\{(?:${QNAME}|[^}"'])*\}`;
+const CLAUSE = String.raw`(?:${NAMES}|\bas${W}${QNAME}|[\w$*,\s])*?`;
+// A specifier holds no backslash and no line terminator.
+const STATIC_IMPORT = new RegExp(String.raw`\b(?:import|export)${W}(?:${CLAUSE}${W}\bfrom${W})?(['"])([^'"\\${LT}]+)\1`, "g");
+const DYNAMIC_LITERAL = new RegExp(String.raw`(?<![.$\w#])import${W}\(${W}(['"])([^'"` + "`" + String.raw`$\\${LT}]*)\1${W}\)`, "g");
+// The keyword rules below run on `code` (literals blanked), so they can neither be hidden by nor fire on a literal.
+const DYNAMIC_ANY = /(?<![.$\w#])import\s*\(/g;
+const IMPORT_KEYWORD = /(?<![.$\w#])import\b(?!\s*\.\s*meta\b)(?!\s*\()/g;
+const EXPORT_FROM = /(?<![.$\w#])export\s*(?:\*(?:\s*as\s*(?:[\w$]+|"\s*"|'\s*'))?|\{[^}]*\})\s*from\b/g;
 
-/** Replaces JS comments by a space, leaving string and template literals and regex literals intact. */
-export function stripComments(src) {
-  let out = "";
+// A keyword before a slash (or a bracket) means a regex literal (or an array literal) follows, not a division.
+const REGEX_KEYWORDS = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "delete", "throw", "new", "instanceof", "yield", "await", "default", "extends", "const", "let", "var"]);
+const HEADER_WORDS = new Set(["if", "while", "for", "with"]);
+const isWordChar = (c) => /[\w$]/.test(c) || (c > "\u007f" && !/\s/.test(c));
+const isLT = (c) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
+const blank = (t) => " ".repeat(t.length);
+
+/** One pass over a script. Returns { src, code, unicodeEscape, error, strings, computed }.
+ * src: the source with comments replaced by a space. code: src with the body of string, template and regex
+ * literals blanked to spaces (same length as src, so positions in both agree), so identifier rules cannot
+ * fire on literal text. unicodeEscape: a backslash appears in code position. error: a construct the scanner
+ * could not classify reliably (unterminated literal or comment, ambiguous slash); G2 fails closed on it.
+ * strings: [{ at, escaped }] string literals; computed: [{ at, kind }] with kind "access" for expr[...] and
+ * "key" for a computed object or destructuring key, at the position of the "[" in src.
+ * Line terminators are \r \n U+2028 U+2029. */
+export function scanSource(input) {
+  const n = input.length;
   let i = 0;
-  let prev = ""; // last significant character, to tell a regex literal from a division
-  const n = src.length;
-  while (i < n) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === "/" && d === "*") {
-      const e = src.indexOf("*/", i + 2);
-      i = e < 0 ? n : e + 2;
-      out += " ";
-    } else if (c === "/" && d === "/") {
-      const e = src.indexOf("\n", i);
-      i = e < 0 ? n : e;
-      out += " ";
-    } else if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < n && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      prev = c;
-    } else if (c === "/" && (prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev))) {
-      let j = i + 1;
-      let cls = false;
-      while (j < n && src[j] !== "\n" && (cls || src[j] !== "/")) {
-        if (src[j] === "\\") j++;
-        else if (src[j] === "[") cls = true;
-        else if (src[j] === "]") cls = false;
-        j++;
+  let src = "";
+  let code = "";
+  let unicodeEscape = false;
+  let error = null;
+  const strings = [];
+  const computed = [];
+  const fail = (m) => {
+    error ??= m;
+  };
+  const emit = (text, shown = text) => {
+    src += text;
+    code += shown;
+  };
+  function template() {
+    emit("`");
+    i++;
+    while (i < n && input[i] !== "`") {
+      if (input[i] === "\\") {
+        const t = input.slice(i, i + 2);
+        emit(t, blank(t));
+        i += 2;
+      } else if (input[i] === "$" && input[i + 1] === "{") {
+        emit("${");
+        i += 2;
+        codeMode(true);
+        if (input[i] === "}") {
+          emit("}");
+          i++;
+        } else fail("unterminated template expression");
+      } else {
+        emit(input[i], " ");
+        i++;
       }
-      out += src.slice(i, j + 1);
-      i = j + 1;
-      prev = "/";
-    } else {
-      out += c;
-      i++;
-      if (!/\s/.test(c)) prev = c;
     }
+    if (i < n) emit("`");
+    else fail("unterminated template literal");
+    i++;
   }
-  return out;
+  function codeMode(nested) {
+    const stack = []; // "(h" header paren, "(" , "[" , "{"
+    let rx = true; // is a "/" here a regex start (an operand is expected)?
+    let afterBrace = false;
+    let dot = false; // the last token was "." or "#": a following word is a property name, not a keyword
+    let word = "";
+    let word2 = "";
+    let last = ""; // the last punctuation character, when the last token was one
+    const token = (nextRx, ch = "") => {
+      last = ch;
+      rx = nextRx;
+      afterBrace = false;
+      dot = false;
+      word2 = word;
+      word = "";
+    };
+    while (i < n) {
+      const c = input[i];
+      const d = input[i + 1];
+      if (c === "/" && d === "*") {
+        const e = input.indexOf("*/", i + 2);
+        if (e < 0) fail("unterminated block comment");
+        i = e < 0 ? n : e + 2;
+        emit(" ");
+      } else if (c === "/" && d === "/") {
+        let e = i;
+        while (e < n && !isLT(input[e])) e++;
+        i = e;
+        emit(" ");
+      } else if (c === '"' || c === "'") {
+        let j = i + 1;
+        let escaped = false;
+        while (j < n && input[j] !== c && !isLT(input[j])) {
+          if (input[j] === "\\") {
+            escaped = true;
+            j += input[j + 1] === "\r" && input[j + 2] === "\n" ? 3 : 2;
+          } else j++;
+        }
+        if (j >= n || input[j] !== c) {
+          fail("unterminated string literal");
+          j = Math.min(j, n) - 1;
+        }
+        const text = input.slice(i, j + 1);
+        strings.push({ at: src.length, escaped, body: text.slice(1, -1) });
+        emit(text, c + blank(text.slice(2)) + c);
+        i = j + 1;
+        token(false);
+      } else if (c === "`") {
+        template();
+        token(false);
+      } else if (c === "/") {
+        if (!rx && afterBrace) {
+          fail('cannot classify a "/" after "}" (block end or object literal): regex or division');
+          i++;
+          emit("/");
+          token(true);
+        } else if (!rx) {
+          emit("/");
+          i++;
+          token(true);
+        } else {
+          let j = i + 1;
+          let cls = false;
+          let closed = false;
+          while (j < n && !isLT(input[j])) {
+            if (input[j] === "\\") j++;
+            else if (input[j] === "[") cls = true;
+            else if (input[j] === "]") cls = false;
+            else if (input[j] === "/" && !cls) {
+              closed = true;
+              break;
+            }
+            j++;
+          }
+          if (!closed) {
+            fail("unterminated regular expression literal");
+            j = Math.min(j, n) - 1;
+          }
+          const text = input.slice(i, j + 1);
+          emit(text, "/" + blank(text.slice(2)) + "/");
+          i = j + 1;
+          token(false);
+        }
+      } else if (isWordChar(c)) {
+        let j = i + 1;
+        while (j < n && isWordChar(input[j])) j++;
+        const w = input.slice(i, j);
+        emit(w);
+        i = j;
+        const kw = !dot && REGEX_KEYWORDS.has(w);
+        const keep = word;
+        token(kw);
+        word = dot ? "" : w;
+        word2 = keep;
+      } else if (/\s/.test(c)) {
+        emit(c);
+        i++;
+      } else if (c === "(") {
+        const header = !dot && (HEADER_WORDS.has(word) || (word === "await" && word2 === "for"));
+        stack.push(header ? "(h" : "(");
+        emit(c);
+        i++;
+        token(true);
+      } else if (c === ")") {
+        const top = stack.pop();
+        emit(c);
+        i++;
+        token(top === "(h");
+      } else if (c === "[") {
+        const top = stack[stack.length - 1];
+        if (!rx) computed.push({ at: src.length, kind: "access" });
+        else if (top === "{" && (last === "{" || last === ",")) computed.push({ at: src.length, kind: "key" });
+        stack.push("[");
+        emit(c);
+        i++;
+        token(true);
+      } else if (c === "]") {
+        stack.pop();
+        emit(c);
+        i++;
+        token(false);
+      } else if (c === "{") {
+        stack.push("{");
+        emit(c);
+        i++;
+        token(true, "{");
+      } else if (c === "}") {
+        if (nested && stack.length === 0) return;
+        stack.pop();
+        emit(c);
+        i++;
+        token(false);
+        afterBrace = true;
+      } else if ((c === "+" || c === "-") && d === c) {
+        emit(c + d);
+        i += 2;
+        token(rx);
+      } else if (c === ".") {
+        if (d === "." && input[i + 2] === ".") {
+          emit("...");
+          i += 3;
+          token(true);
+        } else {
+          emit(c);
+          i++;
+          token(false);
+          dot = true;
+        }
+      } else if (c === "#") {
+        emit(c);
+        i++;
+        token(false);
+        dot = true;
+      } else {
+        if (c === "\\") unicodeEscape = true;
+        emit(c);
+        i++;
+        token(true, c);
+      }
+    }
+    if (nested) fail("unterminated template expression");
+  }
+  codeMode(false);
+  return { src, code, unicodeEscape, error, strings, computed };
 }
 
-/** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
+/** Replaces JS comments by a space, leaving string, template and regex literals intact. */
+export function stripComments(input) {
+  return scanSource(input).src;
+}
+
+/** Returns { specifiers, nonLiteralDynamic, unparsed, src, code, unicodeEscape, error, strings, computed }.
+ * unparsed is a message when an `import` keyword (other than import.meta and import()) or an
+ * `export ... from` was found in code that the specifier regexes did not account for: G2 fails closed on it. */
 export function scanImports(raw) {
-  const src = stripComments(raw);
+  const scan = scanSource(raw);
+  const { src, code } = scan;
   const specifiers = [];
-  for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
-  for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
-  const nonLiteralDynamic = [...src.matchAll(DYNAMIC_ANY)].length > [...src.matchAll(DYNAMIC_LITERAL)].length;
-  return { specifiers, nonLiteralDynamic, src };
+  const covered = new Set();
+  for (const m of src.matchAll(STATIC_IMPORT)) {
+    specifiers.push(m[2]);
+    covered.add(m.index);
+  }
+  const literal = new Set();
+  for (const m of src.matchAll(DYNAMIC_LITERAL)) {
+    specifiers.push(m[2]);
+    literal.add(m.index);
+  }
+  const nonLiteralDynamic = [...code.matchAll(DYNAMIC_ANY)].some((m) => !literal.has(m.index));
+  let unparsed = null;
+  for (const m of code.matchAll(IMPORT_KEYWORD)) if (!covered.has(m.index)) unparsed ??= "an import statement whose specifier could not be parsed";
+  for (const m of code.matchAll(EXPORT_FROM)) if (!covered.has(m.index)) unparsed ??= "an export ... from whose specifier could not be parsed";
+  return { specifiers, nonLiteralDynamic, unparsed, ...scan };
 }
 
 // Constructs that reach a module, a code evaluator or a node API by a route the import scan cannot see.
 const FORBIDDEN = [
-  [new RegExp(String.raw`\brequire${W}\(`), "require()"],
-  [new RegExp(String.raw`\beval${W}\(`), "eval()"],
+  [/<!--|-->/, "an HTML-like comment marker"],
+  [/(?<![.$\w#])require\s*\(/, "require()"],
+  [/(?<![.$\w#])eval\s*\(/, "eval()"],
   [/\bFunction\b/, "the Function constructor"],
-  [new RegExp(String.raw`\b(?:globalThis|global|self|window|process)${W}(?:\?\.)?${W}\[`), "a bracket lookup on a global object"],
+  [/\b(?:globalThis|global|self|window|process)\s*(?:\?\.)?\s*\[/, "a bracket lookup on a global object"],
+  [/\b(?:eval|require|Function|AsyncFunction|GeneratorFunction|Reflect)\b/, "a banned bare identifier (eval, require, Function, AsyncFunction, GeneratorFunction, Reflect)"],
+  [/\.\s*constructor\b/, ".constructor"],
+  [/[{,]\s*constructor\s*[,}:=]/, "a destructured constructor"],
 ];
+// Rules that read the comment-stripped source, where a literal key is still visible.
+const FORBIDDEN_SRC = [[/\[\s*(["'`])constructor\1\s*\]/, "a [\"constructor\"] lookup"]];
+// hand-written host/ only (never dist/js): no dynamic route to a global or to an arbitrary property.
+const HOST_IDENTIFIERS = [
+  [/(?<![.$\w#])(?:globalThis|global|self|window)\b/, "a global object identifier (globalThis, global, self, window)"],
+];
+const HOST_LITERAL_ACCESS = /^\[\s*(?:\d+|"[^"\\\r\n\u2028\u2029]*"|'[^'\\\r\n\u2028\u2029]*')\s*\]/;
+// The one legitimate use in generated jco glue (dist/js only): a literal-key read from the component state
+// object. A literal key cannot reach an arbitrary property, so it is removed before the identifier scan.
+const GENERATED_ALLOWED = [/(?<![.$\w#])Reflect\.get\(cstate, "callingSyncExport"\)/g];
 const NODE_ONLY = [
   [/\bgetBuiltinModule\b/, "getBuiltinModule"],
   [/\bcreateRequire\b/, "createRequire"],
@@ -119,6 +344,20 @@ function oddEntries(ctx, dirs) {
   return null;
 }
 
+/** Key-position strings: a quoted property key that holds an escape, or is "constructor". */
+function keyProblem({ src, strings }) {
+  for (const s of strings) {
+    if (!s.escaped && s.body !== "constructor") continue;
+    const prev = src.slice(0, s.at).trimEnd().slice(-1);
+    const after = src.slice(s.at + s.body.length + 2).trimStart()[0];
+    const key = (prev === "{" || prev === ",") && after === ":";
+    if (prev === "[" && s.escaped) return "a backslash escape inside a bracket-key string";
+    if (key && s.escaped) return "a backslash escape inside a quoted property key";
+    if (key && s.body === "constructor") return 'a quoted "constructor" key (destructuring)';
+  }
+  return null;
+}
+
 export function g2NoBareImport(ctx) {
   const hostDir = join(ctx.root, "host");
   const jsDir = join(ctx.out, "js");
@@ -129,10 +368,28 @@ export function g2NoBareImport(ctx) {
   // Scripts: every file of host/ and dist/js/. A relative specifier must reach a regular script file in them.
   function checkScript(f, inNodeDir) {
     const rel = relative(ctx.root, f);
-    const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
+    let text = readFileSync(f, "utf8");
+    if (inside(jsDir, f)) for (const a of GENERATED_ALLOWED) text = text.replace(a, "0");
+    const scan = scanImports(text);
+    const { specifiers, nonLiteralDynamic, unparsed, src, code, unicodeEscape, error } = scan;
+    if (/<!--|-->/.test(code)) return `${rel}: uses an HTML-like comment marker`;
+    if (error) return `${rel}: ${error} (fail closed)`;
+    if (unparsed) return `${rel}: ${unparsed} (fail closed)`;
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
-    for (const [re, what] of FORBIDDEN) if (re.test(src)) return `${rel}: uses ${what}`;
+    if (unicodeEscape) return `${rel}: backslash escape outside a string literal`;
+    for (const [re, what] of FORBIDDEN) if (re.test(code)) return `${rel}: uses ${what}`;
+    for (const [re, what] of FORBIDDEN_SRC) if (re.test(src)) return `${rel}: uses ${what}`;
+    const key = keyProblem(scan);
+    if (key) return `${rel}: uses ${key}`;
     if (!inNodeDir) for (const [re, what] of NODE_ONLY) if (re.test(src)) return `${rel}: uses ${what} outside host/node/`;
+    if (inside(hostDir, f)) {
+      for (const [re, what] of HOST_IDENTIFIERS) if (re.test(code)) return `${rel}: host/ uses ${what}`;
+      if (!f.startsWith(nodeDir) && /(?<![.$\w#])process\b/.test(code)) return `${rel}: host/ uses process outside host/node/`;
+      for (const c of scan.computed) {
+        if (c.kind === "key") return `${rel}: host/ uses a computed object or destructuring key`;
+        if (!HOST_LITERAL_ACCESS.test(src.slice(c.at))) return `${rel}: host/ uses a non-literal computed member access`;
+      }
+    }
     for (const s of specifiers) {
       if (isRelative(s)) {
         const target = resolve(dirname(f), s);
@@ -152,7 +409,9 @@ export function g2NoBareImport(ctx) {
   // Declarations: the same specifier rules; a relative one must reach a declaration file inside types/.
   for (const f of walk(typesDir, (p) => p.endsWith(".ts"))) {
     const rel = relative(ctx.root, f);
-    const { specifiers, nonLiteralDynamic } = scanImports(readFileSync(f, "utf8"));
+    const { specifiers, nonLiteralDynamic, unparsed, error } = scanImports(readFileSync(f, "utf8"));
+    if (error) return `${rel}: ${error} (fail closed)`;
+    if (unparsed) return `${rel}: ${unparsed} (fail closed)`;
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
     for (const s of specifiers) {
       if (!isRelative(s)) return `${rel}: bare specifier "${s}"`;
@@ -433,6 +692,8 @@ export function g8ToolPins(ctx) {
   const staged = join(ctx.toolsDir, "npm", "package-lock.json");
   if (!existsSync(staged)) return "staged npm lockfile is missing";
   if (lockResolution(readJson(staged)) !== lockResolution(readJson(committed))) return "staged npm lockfile resolves differently from tools/package-lock.json";
+  const npm = npmProblem(join(ctx.toolsDir, "npm"), readJson(join(ctx.root, "tools", "package.json")).devDependencies);
+  if (npm) return npm;
   const nm = findNodeModules(ctx.root, ctx.root, []);
   if (nm.length) return `node_modules inside the repository: ${nm.join(", ")}`;
   return null;

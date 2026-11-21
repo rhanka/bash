@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, symlinkSync, writeFileSync, cpSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync, cpSync, appendFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot, scratch } from "./helpers.mjs";
-import { toolsDir, toolBin, run, readJson, toolProblem, markerText, sha256File, lockProblem, pinsProblem } from "../tools/lib.mjs";
+import { toolsDir, toolBin, run, readJson, toolProblem, markerText, sha256File, lockProblem, pinsProblem, npmProblem, treeManifest, NPM_MANIFEST } from "../tools/lib.mjs";
 import * as gates from "../tools/gates.mjs";
 
 const fx = (name) => join(repoRoot, "test", "fixtures", name);
@@ -261,7 +261,7 @@ test("G8 fails on a pin that is not an https URL", () => {
   pins.tools[0].url = "http://example.invalid/x.tar.gz";
   writeFileSync(join(root, "tools", "pins.json"), JSON.stringify(pins));
   assert.match(gates.g8ToolPins({ ...real(), root }), /does not use an https/);
-  assert.match(pinsProblem([{ name: "t", url: "file:///x.tar.gz", sha256: "0".repeat(64) }]), /https/);
+  assert.match(pinsProblem([{ name: "t", version: "1.0.0", bin: "t", url: "file:///x.tar.gz", sha256: "0".repeat(64) }]), /https/);
 });
 
 test("a tampered cached binary is detected by toolProblem and by G8", () => {
@@ -287,4 +287,89 @@ test("lockProblem rejects a missing integrity, an http URL and a manifest mismat
   assert.match(lockProblem(lock({ ...pkg, integrity: undefined }), manifest), /no sha512 integrity/);
   assert.match(lockProblem(lock({ ...pkg, resolved: "http://x/a.tgz" }), manifest), /not resolved over https/);
   assert.match(lockProblem(lock(pkg, { a: "2.0.0" }), manifest), /devDependencies differ/);
+});
+
+// ------------------------------------------------------------------ hardening after the PR #6 review
+
+test("G2 sees through a template ${} expression that hides a quote and a comment opener", () => {
+  const evil = 'const a = `${/* ` " */ "/*"}`; import("node:child_process"); /* " */ `x`;\n';
+  assert.match(g2({ "host/browser.js": evil }), /non-literal|bare specifier|node:child_process/);
+  // The same trick with a literal specifier must also be caught as a specifier.
+  const evil2 = 'const a = `${"/*"}`; import "lodash"; /* " */\n';
+  assert.match(g2({ "host/browser.js": evil2 }), /bare specifier "lodash"/);
+});
+
+test("G2 treats a slash after a keyword as a regex literal", () => {
+  const src = 'function f() { return /a"/; }\nimport "lodash";\n// "\n';
+  assert.match(g2({ "host/browser.js": src }), /bare specifier "lodash"/);
+});
+
+test("G2 rejects a backslash escape outside a string literal", () => {
+  assert.match(g2({ "host/browser.js": "\\u0065val('1');" }), /backslash escape outside a string/);
+  assert.equal(g2({ "host/browser.js": 'const s = "\\u0041"; const r = /\\u0041/; const t = `\\u0041`;' }), null);
+});
+
+test("G2 bans eval, require, Function, AsyncFunction, GeneratorFunction and Reflect as bare identifiers", () => {
+  assert.match(g2({ "host/a.js": "const e = eval; (0, e)('1');" }), /banned bare identifier/);
+  assert.match(g2({ "host/a.js": "const r = require; r('fs');" }), /banned bare identifier/);
+  assert.match(g2({ "host/a.js": "const F = Function;" }), /Function constructor/);
+  assert.match(g2({ "host/a.js": "const F = AsyncFunction;" }), /banned bare identifier/);
+  assert.match(g2({ "host/a.js": "const F = GeneratorFunction;" }), /banned bare identifier/);
+  assert.match(g2({ "host/a.js": "Reflect.get(process, 'x');" }), /banned bare identifier/);
+  assert.equal(g2({ "host/a.js": 'const msg = "eval require Function Reflect";' }), null);
+});
+
+test("G2 bans .constructor and a destructured constructor, but not a class constructor", () => {
+  assert.match(g2({ "host/a.js": "(() => {}).constructor('return 1')();" }), /\.constructor/);
+  assert.match(g2({ "host/a.js": "const { constructor } = (() => {});" }), /destructured constructor/);
+  assert.match(g2({ "host/a.js": "const { a, constructor: C } = x;" }), /destructured constructor/);
+  assert.match(g2({ "host/a.js": 'const C = (() => {})["constructor"];' }), /\[\\"constructor\\"\]|constructor/);
+  assert.equal(g2({ "host/a.js": "class A { constructor(x) { this.x = x; } }" }), null);
+});
+
+test("G2 allows exactly one Reflect.get form, in generated dist/js files only", () => {
+  const ok = 'if (!Reflect.get(cstate, "callingSyncExport")) {}';
+  assert.equal(g2({ "js/p/p.js": ok }), null);
+  assert.match(g2({ "host/a.js": ok }), /banned bare identifier/);
+  assert.match(g2({ "js/p/p.js": 'Reflect.get(cstate, "other");' }), /banned bare identifier/);
+});
+
+test("the real generated glue passes the scripts rules", () => {
+  assert.equal(gates.g2NoBareImport(real()), null);
+});
+
+function g8Fixture(prefix, mutate) {
+  const lock = { packages: { "": { devDependencies: { a: "1.0.0" } }, "node_modules/a": { version: "1.0.0", resolved: "https://registry.npmjs.org/a/-/a-1.0.0.tgz", integrity: "sha512-AAAA" } } };
+  const root = tree(prefix, { "tools/package.json": JSON.stringify({ devDependencies: { a: "1.0.0" } }), "tools/package-lock.json": JSON.stringify(lock) });
+  const tdir = scratch(`${prefix}-tools`);
+  for (const p of readJson(join(repoRoot, "tools", "pins.json")).tools) symlinkSync(join(toolsDir(), `${p.name}-${p.version}`), join(tdir, `${p.name}-${p.version}`));
+  const npm = join(tdir, "npm");
+  mkdirSync(join(npm, "node_modules", "a"), { recursive: true });
+  writeFileSync(join(npm, "package-lock.json"), JSON.stringify(lock));
+  writeFileSync(join(npm, "node_modules", "a", "package.json"), '{"name":"a","version":"1.0.0"}');
+  writeFileSync(join(npm, "node_modules", "a", "index.js"), "module.exports = 1;\n");
+  writeFileSync(join(npm, NPM_MANIFEST), JSON.stringify(treeManifest(join(npm, "node_modules"))));
+  mutate?.(npm);
+  return { ...real(), root, toolsDir: tdir };
+}
+
+test("G8 accepts a staged npm tree that matches its manifest", () => {
+  assert.equal(gates.g8ToolPins(g8Fixture("g8-npm-ok")), null);
+});
+
+test("G8 fails on a modified, added or manifest-less staged node_modules", () => {
+  assert.match(gates.g8ToolPins(g8Fixture("g8-npm-mod", (n) => appendFileSync(join(n, "node_modules", "a", "index.js"), "// evil\n"))), /differs from the install manifest/);
+  assert.match(gates.g8ToolPins(g8Fixture("g8-npm-add", (n) => writeFileSync(join(n, "node_modules", "a", "extra.js"), "x"))), /differs from the install manifest/);
+  assert.match(gates.g8ToolPins(g8Fixture("g8-npm-link", (n) => symlinkSync("/etc/passwd", join(n, "node_modules", "a", "l")))), /differs from the install manifest/);
+  assert.match(gates.g8ToolPins(g8Fixture("g8-npm-nomf", (n) => rmSync(join(n, NPM_MANIFEST)))), /no file-hash manifest/);
+  assert.match(gates.g8ToolPins(g8Fixture("g8-npm-ver", (n) => writeFileSync(join(n, "node_modules", "a", "package.json"), '{"version":"9.9.9"}'))), /not at 1\.0\.0/);
+});
+
+test("pinsProblem rejects unsafe name, version and bin fields", () => {
+  const ok = { name: "t", version: "1.0.0", bin: "bin/t", url: "https://x.invalid/t.tgz", sha256: "0".repeat(64) };
+  assert.equal(pinsProblem([ok]), null);
+  for (const bad of [{ name: "a/b" }, { name: ".." }, { name: "a..b" }, { version: "../1" }, { version: "1/2" }, { bin: "../x" }, { bin: "/bin/x" }, { bin: "a/../x" }, { bin: "" }]) {
+    assert.match(pinsProblem([{ ...ok, ...bad }]), /unsafe/, JSON.stringify(bad));
+    assert.match(pinsProblem([{ ...ok, ...bad }], { fieldsOnly: true }), /unsafe/);
+  }
 });
