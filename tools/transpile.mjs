@@ -37,11 +37,14 @@ export async function transpileComponent(componentPath, outDir, { minify = false
 // On engines without JSPI, skip the call so the generator does not catch 14 TypeErrors.
 export function guardPromisingProbes(source, { minify = false } = {}) {
   const drift = (detail) => new Error(`jco promising probe drift in kernel.js: ${detail}. Review the generated glue and update the guard`);
-  const count = [...source.matchAll(/\.promising\b/g)].length;
+  const count = [...source.matchAll(/\bpromising\b/g)].length;
   if (count !== 14) throw drift(`expected 14 references, found ${count}`);
 
   // The minifier aliases the WebAssembly instance and uses backticks for export names.
-  if (minify && !source.includes("let r=n?.shim?.globals?.WebAssembly??globalThis.WebAssembly;")) {
+  const alias = minify
+    ? "let r=n?.shim?.globals?.WebAssembly??globalThis.WebAssembly;"
+    : "\n\tlet WebAssembly = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;\n";
+  if (!source.includes(alias)) {
     throw drift("WebAssembly alias changed");
   }
   const postReturn = minify
@@ -54,6 +57,9 @@ export function guardPromisingProbes(source, { minify = false } = {}) {
     const matches = [...source.matchAll(pattern)].length;
     if (matches !== expected) throw drift(`expected ${expected} ${kind} probes in the pinned try/catch shape, found ${matches}`);
     source = source.replace(pattern, (probe) => probe.replace(".promising(", ".promising?.("));
+  }
+  if ([...source.matchAll(/\.promising\?\.\(/g)].length !== count) {
+    throw drift("expected every promising reference to be an optional call");
   }
   return source;
 }
