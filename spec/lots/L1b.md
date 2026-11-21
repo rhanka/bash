@@ -147,7 +147,7 @@ test checks that none of these names appears in its bytes).
 | `__fetch <url>` | Issues `fetch` (method GET); prints the status then the pushed `body` |
 | `__sleep <ms>` | Issues `sleep` |
 | `__clock` | Issues `clock`; prints `wall-ms` |
-| `__entropy <n>` | Issues `entropy`; prints the byte count received |
+| `__entropy <n>` | Issues `entropy` and prints the byte count received when granted. Otherwise emits bytes from the fixed-seed generator. |
 | `__trap` | Executes the `unreachable` instruction |
 
 A host call for a capability absent from the shell's grants (`host-fs`, `network`, `real-sleep`,
@@ -284,19 +284,21 @@ returns `["curl"]`. `types/browser.d.ts` re-exports the same surface.
 
 For one `exec` (asynchronous form):
 1. Pre-checks before lowering anything (EVOL Annex A rules): script lengths (5.1); every non-streamed
-   value (env values, args, cwd) against `maxStringLength` and against half the profile's headroom in
+   value (env names and values, args, cwd) against `maxStringLength` and against half the profile's headroom in
    total. A failed pre-check produces the limit result (exit 126) without calling the kernel.
 2. `fiber.spawn`; send stdin with `write-stdin` in chunks of at most 1 MiB, the last with `last = true`.
 3. Loop `run(fuel)` with a fuel slice of 100 000:
    - `out-of-fuel`: drain stdout and stderr (`take-*` with max 1 MiB until empty); if the abort signal is
      set call `cancel(aborted)`; if the wall-time limit of the profile has passed call `cancel(deadline)`;
      yield to the event loop at least every 10 ms of wall time; continue.
-   - `host-call`: drain outputs, then serve the request through the membrane (7.4) and call `resume` with
-     the outcome; a request for which no handler is configured is answered `denied`.
+   - `host-call`: drain outputs, check abort and deadline, and yield on the same schedule as
+     `out-of-fuel`. Serve the request through the membrane (7.4) and call `resume` with the outcome
+     and the fuel left in the slice. A request for which no handler is configured is answered `denied`.
    - `done`: drain outputs, build the result.
 4. Result: stdout and stderr converted by the rule of EVOL Annex D.2 (valid UTF-8 decoded, other bytes one
-   character each), `exitCode`, `env` as an object in kernel order, `stdoutKind` only when the kernel
-   reports bytes.
+   character each), `exitCode`, and `env` as an object in kernel order. A command can push binary
+   stdout on `stdout-bytes`. The kernel then reports `stdout-kind: bytes` and the driver lifts the complete
+   stdout stream as a byte string with `stdoutKind: "bytes"`.
 5. `exec` never rejects for a script outcome. It rejects with `KernelPoisonedError` if the instance is
    poisoned (7.6), and with `TypeError` for invalid options.
 
@@ -333,7 +335,9 @@ Every host call is served inside a *scope* tied to `(fiber, epoch)`:
   1 MiB chunks, then `resume(command-exit)`. A command that throws or rejects gives exit code 1 with its
   message on stderr, host paths replaced by `<path>`.
 - `trusted: false` commands (`trusted` defaults to true for commands passed in `customCommands`, as in the
-  reference): `set-call-env` is never sent and their `ctx.env` is frozen against mutation.
+  reference): `set-call-env` is never sent, `ctx.assignShellVariable` is absent, and their `ctx.env` is
+  frozen against mutation. Trusted assignments are reflected in `ctx.env` and keep the kernel's export
+  flags when written back. Both write paths pre-check payload sizes and report overflows as limits.
 - Sandbox data never becomes a property name on a plain object: environment maps and file tables in the
   host use `Map` or null-prototype objects (EVOL S10).
 - Lazily loaded commands (`LazyCommand`): `load()` is awaited on first use inside the scope.
@@ -406,7 +410,7 @@ tarball contains `kernel` only.
    budget (a child `__alloc` beyond the parent's remaining live budget gives 126).
 10. **Default deny (S2).** With no grant, `__hostfs`, `__lazy`, `__fetch` each end with `denied` and a
     recording driver sees zero host calls; `__sleep 5000` returns immediately and `__clock` after it
-    prints `5000`; `__entropy 16` prints `16` and two instances give the same bytes.
+    prints `5000`; `__entropy 16` emits 16 bytes and two fresh instances give the same sequence.
 11. **Membrane (S5, S6).** A custom command that keeps `ctx.fs` and calls it after it resolved gets
     `ExecutionAbortedError`; one that ignores abort and resolves 500 ms later does not delay the exec
     beyond `maxExtensionCleanupTimeMs` + 50 ms and cannot write a file afterwards; a late `resume` is

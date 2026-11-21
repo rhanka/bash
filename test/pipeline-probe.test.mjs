@@ -2,17 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pipelineProbe } from "@sentropic/bash";
 
-test("the probe instantiates synchronously with an empty import object", () => {
-  const probe = pipelineProbe();
+test("the probe loads on demand and instantiates with an empty import object", async () => {
+  const probe = await pipelineProbe();
   assert.equal(typeof probe.ping, "function");
 });
 
-test("ping adds one", () => {
-  assert.equal(pipelineProbe().ping(41), 42);
+test("ping adds one", async () => {
+  assert.equal((await pipelineProbe()).ping(41), 42);
 });
 
-test("echoBytes round-trips", () => {
-  const probe = pipelineProbe();
+test("echoBytes round-trips", async () => {
+  const probe = await pipelineProbe();
   const everyByte = Uint8Array.from({ length: 256 }, (_, i) => i);
   const big = new Uint8Array(70000).map((_, i) => (i * 31 + 7) & 0xff);
   for (const data of [new Uint8Array(0), Uint8Array.of(0xab), big, everyByte]) {
@@ -20,8 +20,8 @@ test("echoBytes round-trips", () => {
   }
 });
 
-test("views are refreshed after the memory grows", () => {
-  const probe = pipelineProbe();
+test("views are refreshed after the memory grows", async () => {
+  const probe = await pipelineProbe();
   const big = new Uint8Array(70000).map((_, i) => (i * 13 + 5) & 0xff);
   assert.deepEqual(probe.echoBytes(big), big);
   const before = probe.grow(0);
