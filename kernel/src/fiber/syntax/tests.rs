@@ -941,3 +941,138 @@ fn heredoc_unclosed_substitutions_diagnosed() {
     // Quoted heredoc treats unclosed `${` / `$(` literally without error.
     let _ = parse_ok("cat <<'EOF'\n${x\n$(echo hi\n`echo hi\nEOF\n");
 }
+
+// --- PR #21 review v2 fixes: linear-time lookahead in dparen, subscript, brace, and extglob ---
+
+#[test]
+fn lexer_dparen_and_subscript_lookahead_is_linear() {
+    use std::time::Instant;
+
+    let cases: [(&str, std::string::String, bool); 6] = [
+        ("open_parens_50k", "(".repeat(50_000), false),
+        (
+            "open_parens_50k_trailing_dparen",
+            std::format!("{}{}", "(".repeat(50_000), "))"),
+            false,
+        ),
+        (
+            "spaced_dparen_25k_trailing",
+            std::format!("{}{}", "(( ".repeat(25_000), "))"),
+            false,
+        ),
+        (
+            "balanced_parens_25k",
+            std::format!("{}{}", "(".repeat(25_000), ")".repeat(25_000)),
+            false,
+        ),
+        ("subscript_open_50k", "a[ ".repeat(50_000), true),
+        (
+            "subscript_open_50k_trailing_assign",
+            std::format!("{}{}", "a[ ".repeat(50_000), "]=1"),
+            true,
+        ),
+    ];
+    for (label, input, expect_ok) in cases {
+        let t0 = Instant::now();
+        if expect_ok {
+            let _ = parse_ok(&input);
+        } else {
+            let err = parse_err(&input);
+            assert!(
+                err.contains("Maximum parser nesting depth exceeded (200)"),
+                "{label}: unexpected err: {err}"
+            );
+        }
+        let elapsed_ms = t0.elapsed().as_millis();
+        assert!(
+            elapsed_ms < 250,
+            "{label}: took {elapsed_ms}ms (expected linear time)"
+        );
+    }
+
+    // Valid nested `(((1+2)))` and `((((1+2))` semantics preserved.
+    let ast = parse_ok("(((1+2)))");
+    let stmts = &ast.stmt_lists[ast.root.range()];
+    let p = ast.pipelines[ast.stmts[stmts[0].0 as usize].pipelines.start as usize];
+    let c = ast.commands[ast.cmd_lists[p.commands.start as usize].0 as usize];
+    assert!(matches!(c, Command::Arithmetic { .. }));
+
+    // Work budget is charged during long lookahead inside `is_arithmetic_dparen`.
+    crate::mem::testing::reset(CEIL);
+    let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+    let long_dparen = std::format!(
+        "{}{}{}{}",
+        "((a&&".repeat(10),
+        "x".repeat(4000),
+        ") ".repeat(20),
+        "))"
+    );
+    let mut left = 200u64;
+    let mut charge = |u: u64| {
+        if left < u {
+            Err(())
+        } else {
+            left -= u;
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        Ast::parse(long_dparen.as_bytes(), 1 << 20, &b, &mut charge),
+        Err(Error::Work)
+    ));
+}
+
+#[test]
+fn word_brace_and_extglob_lookahead_is_linear() {
+    use std::time::Instant;
+
+    let cases: [(&str, std::string::String); 7] = [
+        (
+            "brace_100k_trailing_rbrace",
+            std::format!("echo {}{}", "{".repeat(100_000), "}"),
+        ),
+        (
+            "brace_50k_balanced_no_comma",
+            std::format!("echo {}{}", "{".repeat(50_000), "}".repeat(50_000)),
+        ),
+        (
+            "brace_50k_inner_comma",
+            std::format!("echo {}a,b{}", "{".repeat(50_000), "}".repeat(50_000)),
+        ),
+        (
+            "brace_interleaved_10k",
+            std::format!("echo {}", "{{a,b}".repeat(10_000)),
+        ),
+        (
+            "extglob_50k_trailing_rparen",
+            std::format!("echo {}{}", "@(".repeat(50_000), ")"),
+        ),
+        (
+            "extglob_50k_half_closed",
+            std::format!("echo {}{}", "@(".repeat(50_000), ")".repeat(25_000)),
+        ),
+        (
+            "extglob_interleaved_10k",
+            std::format!("echo {}", "@(@(a)".repeat(10_000)),
+        ),
+    ];
+    for (label, input) in cases {
+        let t0 = Instant::now();
+        let ast = parse_ok(&input);
+        let elapsed_ms = t0.elapsed().as_millis();
+        assert!(
+            elapsed_ms < 250,
+            "{label}: took {elapsed_ms}ms (expected linear time)"
+        );
+        // Spot-check that valid inner brace/extglob parts are still parsed accurately.
+        if label == "brace_50k_inner_comma" {
+            assert!(!ast.brace_items.is_empty(), "{label}: missing inner brace expansion");
+        }
+        if label == "extglob_50k_trailing_rparen" {
+            assert!(
+                ast.parts.iter().any(|p| matches!(p, WordPart::Glob { .. })),
+                "{label}: missing trailing @() glob part"
+            );
+        }
+    }
+}

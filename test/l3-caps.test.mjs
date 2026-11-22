@@ -274,3 +274,42 @@ test("[[ argument does not corrupt cond_depth and for-loop respects readonly var
   assert.equal(r4.stdout, "");
   await usable(shell);
 });
+
+test("linear-time lookahead in dparen, brace, extglob, and subscript scans (< 50ms in Wasm)", async () => {
+  const shell = new Bash({ executionLimitProfile: "normal" });
+  // Warm up the Wasm instance before timing.
+  await usable(shell);
+
+  const dparenCases = [
+    ["open parens 50k", "(".repeat(50_000)],
+    ["open parens 50k + ))", "(".repeat(50_000) + "))"],
+    ["spaced (( 25k + ))", "(( ".repeat(25_000) + "))"],
+  ];
+  for (const [label, script] of dparenCases) {
+    const t0 = performance.now();
+    const r = await shell.exec(script);
+    const ms = performance.now() - t0;
+    assert.equal(r.exitCode, 2, `${label} expected exit 2, got ${r.exitCode}: ${r.stderr}`);
+    assert.match(r.stderr, /Maximum parser nesting depth exceeded \(200\)/, label);
+    assert.ok(ms < 50, `${label} took ${ms.toFixed(1)}ms (expected < 50ms)`);
+  }
+
+  const wordCases = [
+    ["brace 100k + }", "echo " + "{".repeat(100_000) + "}", "{".repeat(100_000) + "}\n"],
+    ["brace 50k balanced", "if false; then echo " + "{".repeat(50_000) + "}".repeat(50_000) + "; fi; echo ok", "ok\n"],
+    ["brace 50k inner comma", "if false; then echo " + "{".repeat(50_000) + "a,b" + "}".repeat(50_000) + "; fi; echo ok", "ok\n"],
+    ["brace interleaved 10k", "if false; then echo " + "{{a,b}".repeat(10_000) + "; fi; echo ok", "ok\n"],
+    ["extglob 50k + )", "echo " + "@(".repeat(50_000) + ")", "@(".repeat(50_000) + ")\n"],
+    ["extglob interleaved 10k", ": " + "@(@(a)".repeat(10_000), ""],
+    ["subscript open 50k + ]=1", "if false; then " + "a[ ".repeat(50_000) + "]=1; fi; echo ok", "ok\n"],
+  ];
+  for (const [label, script, expectedOut] of wordCases) {
+    const t0 = performance.now();
+    const r = await shell.exec(script);
+    const ms = performance.now() - t0;
+    assert.equal(r.exitCode, 0, `${label} failed: ${r.stderr}`);
+    assert.equal(r.stdout, expectedOut, label);
+    assert.ok(ms < 50, `${label} took ${ms.toFixed(1)}ms (expected < 50ms)`);
+  }
+  await usable(shell);
+});
