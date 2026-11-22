@@ -1374,7 +1374,6 @@ impl Fiber {
                     return Err(Fail::CallDepth(bytes_in(func.as_bytes(), &self.live)?));
                 }
                 let args = self.finish_dispatch(args, last_arg)?;
-                self.hit("bash:cmd:Group")?;
                 self.vm.call_depth += 1;
                 let previous = core::mem::replace(&mut self.params, args);
                 self.vm.frames.try_push(Frame::FuncCall(previous))?;
