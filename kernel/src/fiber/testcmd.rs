@@ -634,193 +634,6 @@ impl Fiber {
         Some(flow)
     }
 
-    fn emit_exit(&mut self, exit: i32, chan: Chan, bytes: &[u8]) -> Flow {
-        self.last_exit = exit;
-        let r = self.write_out(chan, bytes);
-        self.t_ok(r)
-    }
-
-    fn limit_yield(&mut self, limit_name: &str, msg: core::fmt::Arguments<'_>) -> Flow {
-        self.finish_early(126, Status::LimitExceeded, Some(limit_name), Some(msg));
-        Flow::Yield
-    }
-
-    fn parse_num_arg(raw: &[u8], bits: bool) -> Option<f64> {
-        if bits && (raw.starts_with(b"0x") || raw.starts_with(b"0X")) {
-            let s = core::str::from_utf8(&raw[2..]).ok()?;
-            let u = u64::from_str_radix(s, 16).ok()?;
-            Some(f64::from_bits(u))
-        } else {
-            parse_f64_strict(raw)
-        }
-    }
-
-    fn parse_i64_signed(raw: &[u8]) -> Option<i64> {
-        let s = core::str::from_utf8(raw).ok()?;
-        s.parse::<i64>().ok()
-    }
-
-    fn exec_test_num(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
-        let Some(op) = args.first().copied() else {
-            return self.t_bad(name);
-        };
-        let Some(arg1) = args.get(1).copied() else {
-            return self.t_bad(name);
-        };
-        match op {
-            b"js" => {
-                let is_bits = args.get(2).copied() == Some(b"bits".as_slice());
-                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
-                    return self.t_bad(name);
-                };
-                let mut s = KString::new_in(&self.scratch);
-                if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
-                    return Flow::Fail(Fail::Mem(e));
-                }
-                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-            }
-            b"fixed" => {
-                let Some(prec_raw) = args.get(2).copied() else {
-                    return self.t_bad(name);
-                };
-                let Some(prec_u64) = parse_u64(prec_raw) else {
-                    return self.t_bad(name);
-                };
-                let Ok(prec) = usize::try_from(prec_u64) else {
-                    return self.t_bad(name);
-                };
-                let is_bits = args.get(3).copied() == Some(b"bits".as_slice());
-                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
-                    return self.t_bad(name);
-                };
-                match fmt_f64_fixed(val, prec, &self.scratch) {
-                    Ok(mut s) => {
-                        if let Err(e) = s.try_push('\n') {
-                            return Flow::Fail(Fail::Mem(e));
-                        }
-                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-                    }
-                    Err(FloatFmtError::PrecisionRange) => {
-                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
-                    }
-                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
-                }
-            }
-            b"exp" => {
-                let Some(prec_raw) = args.get(2).copied() else {
-                    return self.t_bad(name);
-                };
-                let Some(prec_u64) = parse_u64(prec_raw) else {
-                    return self.t_bad(name);
-                };
-                let Ok(prec) = usize::try_from(prec_u64) else {
-                    return self.t_bad(name);
-                };
-                let flags = args.get(3).copied().unwrap_or(b"-");
-                let (is_bits, upper, two_digit) = if flags == b"bits" {
-                    (true, false, false)
-                } else {
-                    (
-                        flags.contains(&b'b'),
-                        flags.contains(&b'u'),
-                        flags.contains(&b'2'),
-                    )
-                };
-                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
-                    return self.t_bad(name);
-                };
-                match fmt_f64_exp(val, prec, upper, two_digit, &self.scratch) {
-                    Ok(mut s) => {
-                        if let Err(e) = s.try_push('\n') {
-                            return Flow::Fail(Fail::Mem(e));
-                        }
-                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-                    }
-                    Err(FloatFmtError::PrecisionRange) => {
-                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
-                    }
-                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
-                }
-            }
-            b"prec" => {
-                let Some(sig_raw) = args.get(2).copied() else {
-                    return self.t_bad(name);
-                };
-                let Some(sig_u64) = parse_u64(sig_raw) else {
-                    return self.t_bad(name);
-                };
-                let Ok(sig) = usize::try_from(sig_u64) else {
-                    return self.t_bad(name);
-                };
-                let flags = args.get(3).copied().unwrap_or(b"-");
-                let (is_bits, upper, keep_zeros, two_digit) = if flags == b"bits" {
-                    (true, false, true, false)
-                } else {
-                    (
-                        flags.contains(&b'b'),
-                        flags.contains(&b'u'),
-                        flags.contains(&b'k'),
-                        flags.contains(&b'2'),
-                    )
-                };
-                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
-                    return self.t_bad(name);
-                };
-                match fmt_f64_prec(val, sig, upper, keep_zeros, two_digit, &self.scratch) {
-                    Ok(mut s) => {
-                        if let Err(e) = s.try_push('\n') {
-                            return Flow::Fail(Fail::Mem(e));
-                        }
-                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-                    }
-                    Err(FloatFmtError::PrecisionRange) => {
-                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
-                    }
-                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
-                }
-            }
-            b"arith" => match parse_arith_literal(arg1) {
-                Ok(val) => {
-                    let mut s = KString::new_in(&self.scratch);
-                    if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
-                        return Flow::Fail(Fail::Mem(e));
-                    }
-                    self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-                }
-                Err(ArithNumError::ValueTooGreatForBase) => {
-                    self.emit_exit(1, Chan::Stderr, b"bash: value too great for base\n")
-                }
-                Err(ArithNumError::InvalidNumber) => {
-                    self.emit_exit(1, Chan::Stderr, b"bash: invalid number\n")
-                }
-            },
-            b"printf-int" => {
-                let r = parse_printf_int(arg1);
-                let mut s = KString::new_in(&self.scratch);
-                if let Err(e) = fmt_f64_js(r.value, &mut s)
-                    .and_then(|()| s.try_push('|'))
-                    .and_then(|()| s.try_push(if r.invalid { '1' } else { '0' }))
-                    .and_then(|()| s.try_push('\n'))
-                {
-                    return Flow::Fail(Fail::Mem(e));
-                }
-                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-            }
-            b"f64-prefix" | b"f64-strict" => {
-                let parsed = if op == b"f64-prefix" {
-                    parse_f64_prefix(arg1)
-                } else {
-                    parse_f64_strict(arg1)
-                };
-                match parsed {
-                    Some(v) => {
-                        let mut s = KString::new_in(&self.scratch);
-                        if let Err(e) = fmt_f64_js(v, &mut s).and_then(|()| s.try_push('\n')) {
-                            return Flow::Fail(Fail::Mem(e));
-                        }
-                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
-                    }
-                    None => self.emit_exit(1, Chan::Stdout, b"none\n"),
     fn exec_regex(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
         let (Some(&mode_arg), Some(&flags_arg), Some(&pattern)) =
             (args.first(), args.get(1), args.get(2))
@@ -1154,6 +967,199 @@ impl Fiber {
                         self.t_ok(r)
                     }
                     Err(e) => handle_err(self, e),
+                }
+            }
+            _ => self.t_bad(name),
+        }
+    }
+
+    fn emit_exit(&mut self, exit: i32, chan: Chan, bytes: &[u8]) -> Flow {
+        self.last_exit = exit;
+        let r = self.write_out(chan, bytes);
+        self.t_ok(r)
+    }
+
+    fn limit_yield(&mut self, limit_name: &str, msg: core::fmt::Arguments<'_>) -> Flow {
+        self.finish_early(126, Status::LimitExceeded, Some(limit_name), Some(msg));
+        Flow::Yield
+    }
+
+    fn parse_num_arg(raw: &[u8], bits: bool) -> Option<f64> {
+        if bits && (raw.starts_with(b"0x") || raw.starts_with(b"0X")) {
+            let s = core::str::from_utf8(&raw[2..]).ok()?;
+            let u = u64::from_str_radix(s, 16).ok()?;
+            Some(f64::from_bits(u))
+        } else {
+            parse_f64_strict(raw)
+        }
+    }
+
+    fn parse_i64_signed(raw: &[u8]) -> Option<i64> {
+        let s = core::str::from_utf8(raw).ok()?;
+        s.parse::<i64>().ok()
+    }
+
+    fn exec_test_num(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let Some(op) = args.first().copied() else {
+            return self.t_bad(name);
+        };
+        let Some(arg1) = args.get(1).copied() else {
+            return self.t_bad(name);
+        };
+        match op {
+            b"js" => {
+                let is_bits = args.get(2).copied() == Some(b"bits".as_slice());
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                let mut s = KString::new_in(&self.scratch);
+                if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+            }
+            b"fixed" => {
+                let Some(prec_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(prec_u64) = parse_u64(prec_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(prec) = usize::try_from(prec_u64) else {
+                    return self.t_bad(name);
+                };
+                let is_bits = args.get(3).copied() == Some(b"bits".as_slice());
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_fixed(val, prec, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"exp" => {
+                let Some(prec_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(prec_u64) = parse_u64(prec_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(prec) = usize::try_from(prec_u64) else {
+                    return self.t_bad(name);
+                };
+                let flags = args.get(3).copied().unwrap_or(b"-");
+                let (is_bits, upper, two_digit) = if flags == b"bits" {
+                    (true, false, false)
+                } else {
+                    (
+                        flags.contains(&b'b'),
+                        flags.contains(&b'u'),
+                        flags.contains(&b'2'),
+                    )
+                };
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_exp(val, prec, upper, two_digit, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"prec" => {
+                let Some(sig_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(sig_u64) = parse_u64(sig_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(sig) = usize::try_from(sig_u64) else {
+                    return self.t_bad(name);
+                };
+                let flags = args.get(3).copied().unwrap_or(b"-");
+                let (is_bits, upper, keep_zeros, two_digit) = if flags == b"bits" {
+                    (true, false, true, false)
+                } else {
+                    (
+                        flags.contains(&b'b'),
+                        flags.contains(&b'u'),
+                        flags.contains(&b'k'),
+                        flags.contains(&b'2'),
+                    )
+                };
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_prec(val, sig, upper, keep_zeros, two_digit, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"arith" => match parse_arith_literal(arg1) {
+                Ok(val) => {
+                    let mut s = KString::new_in(&self.scratch);
+                    if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
+                        return Flow::Fail(Fail::Mem(e));
+                    }
+                    self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                }
+                Err(ArithNumError::ValueTooGreatForBase) => {
+                    self.emit_exit(1, Chan::Stderr, b"bash: value too great for base\n")
+                }
+                Err(ArithNumError::InvalidNumber) => {
+                    self.emit_exit(1, Chan::Stderr, b"bash: invalid number\n")
+                }
+            },
+            b"printf-int" => {
+                let r = parse_printf_int(arg1);
+                let mut s = KString::new_in(&self.scratch);
+                if let Err(e) = fmt_f64_js(r.value, &mut s)
+                    .and_then(|()| s.try_push('|'))
+                    .and_then(|()| s.try_push(if r.invalid { '1' } else { '0' }))
+                    .and_then(|()| s.try_push('\n'))
+                {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+            }
+            b"f64-prefix" | b"f64-strict" => {
+                let parsed = if op == b"f64-prefix" {
+                    parse_f64_prefix(arg1)
+                } else {
+                    parse_f64_strict(arg1)
+                };
+                match parsed {
+                    Some(v) => {
+                        let mut s = KString::new_in(&self.scratch);
+                        if let Err(e) = fmt_f64_js(v, &mut s).and_then(|()| s.try_push('\n')) {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    None => self.emit_exit(1, Chan::Stdout, b"none\n"),
                 }
             }
             _ => self.t_bad(name),
