@@ -207,7 +207,7 @@ Recommend owner review of a Cargo-feature `slim` profile. The projected raw size
 
 **Go on kernel, owner review of the JS budget (JS-only miss).** All kernel thresholds pass; browser JS exceeds 45,000 B (and 58,000 B) and total JS exceeds 60,000 B. W4 can proceed. This is the exactly one current verdict.
 
-`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control, after the PR #16 fix (TOCTOU single-read, ceiling, holder cleanup, coalesced snapshot, flattened bundle, lazy shellConfig, pooled codec, no-freeze descriptors). `make check` is green (G1–G8, K1, Rust tests, bindings regen, 30/30 parity on both bindings and both packages). Raw data: `tmp/bench-l2/committed/results.json`.
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control, after the PR #16 fix (TOCTOU single-read, ceiling, holder cleanup, coalesced snapshot, flattened bundle, lazy shellConfig, pooled codec, no-freeze descriptors) plus the fix-2 bundler cleanup (dead-code removal, keyword-regex hardening, flattener fixtures). `make check` is green (G1–G8, K1, Rust tests, bindings regen, 30/30 parity on both bindings and both packages). Raw data: `tmp/bench-l2/committed/results.json`.
 
 ### Revision and protocol (fix)
 
@@ -219,8 +219,8 @@ Recommend owner review of a Cargo-feature `slim` profile. The projected raw size
 | Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
 | wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
 | Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
-| Git | `04b8a1b` plus the fix changes, `dirty = true` (uncommitted fix outputs only) |
-| Loader Wasm SHA-256 | `d78254338163a0a4…` (full digest in `tmp/bench-l2/committed/results.json`) |
+| Git | `7576dc6` (bundler dead-code removal, keyword-regex hardening, flattener fixtures), `dirty = false` |
+| Loader Wasm SHA-256 | `d78254338163a0a496e3de2885d7e5af419e2e428d48710124eea7989234a3ec` |
 | Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
 
 Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload.
@@ -238,19 +238,19 @@ Median / p95 / minimum per metric; the verdict compares unrounded median-of-run 
 
 | Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
 |---|---:|---:|---:|---:|---|
-| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 21.534 / 24.877 / 20.349 | 42.418 / 50.549 / 37.232 | Pass |
-| M1 import (cold-full) | — | — | 10.488 / 13.407 / 9.849 | — | — |
-| M1 construction | — | — | 3.502 / 4.825 / 3.334 | — | — |
-| M1 first exec | — | — | 7.301 / 8.674 / 7.007 | — | — |
-| M1 import-only child | — | — | — | — | — |
-| M2 warm construction | 0.37 | 0.20 | 0.12034 / 0.59936 / 0.09810 | — | Pass |
-| M3a warm async exec | 0.35 | 0.07 | 0.04524 / 0.07761 / 0.04327 | — | Pass |
-| M3a warm sync exec | — | — | 0.11173 / 0.23601 / 0.07258 | — | — |
-| M_host warm custom call | — | — | 0.30182 / 0.54377 / 0.15749 | — | — |
-| M5 RSS delta, B | 35,500,000 | 10,000,000 | 3,950,592 | 5,378,048 | Pass |
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 21.420 / 23.691 / 20.042 | 36.003 / 39.382 / 34.632 | Pass |
+| M1 import (cold-full) | — | — | 10.434 / 12.862 / 9.757 | 15.099 / 17.239 / 14.360 | — |
+| M1 construction | — | — | 3.505 / 4.389 / 3.272 | 11.598 / 13.040 / 11.126 | — |
+| M1 first exec | — | — | 7.309 / 9.780 / 7.002 | 9.331 / 10.651 / 9.043 | — |
+| M1 import-only child | — | — | 10.522 / 13.384 / 9.895 | 15.103 / 17.024 / 14.162 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12117 / 0.58085 / 0.09869 | 0.70611 / 1.65063 / 0.61981 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04628 / 0.07336 / 0.04372 | 0.07643 / 0.15763 / 0.07228 | Pass |
+| M3a warm sync exec | — | — | 0.04447 / 0.06943 / 0.04228 | 0.07704 / 0.14975 / 0.07229 | — |
+| M_host warm custom call | — | — | 0.10968 / 0.19502 / 0.10174 | 0.17174 / 0.37244 / 0.14530 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 4,200,448 | 5,654,528 | Pass |
 | M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 252,632 / 88,621 | 252,632 / 88,621 | Pass |
 
-Per-seed M1 medians: 22.258 / 21.534 / 20.965. Per-seed M2 medians: 0.12542 / 0.12034 / 0.11903. Per-seed M3a medians: 0.04570 / 0.04524 / 0.04523. Per-seed M5: 4,206,592 / 3,887,104 / 3,950,592.
+Per-seed M1 medians: 21.280 / 21.420 / 22.203. Per-seed M2 medians: 0.12413 / 0.11452 / 0.12117. Per-seed M3a medians: 0.04628 / 0.04630 / 0.04558. Per-seed M5: 4,153,344 / 4,200,448 / 4,347,904.
 
 ### Package split and JS budgets (fix)
 
@@ -265,6 +265,8 @@ Per-seed M1 medians: 22.258 / 21.534 / 20.965. Per-seed M2 medians: 0.12542 / 0.
 - N (remaining shipped JS) = 1,770 B against N <= 40,000: pass, headroom +38,230.
 - T (B + N) = 64,672 B against T <= 60,000: miss, headroom −4,672.
 - Z (per-file gzip sum) = 22,108 B against Z <= 30,000: pass, headroom +7,892.
+
+The Option D control carries no JS gate; for the record its split is B = 311,691, N = 1,770, T = 313,461, Z = 59,773.
 
 ### wasm-opt
 
@@ -286,6 +288,6 @@ Recommend owner review of a Cargo-feature `slim` profile. The projected raw size
 
 ### Verification (fix)
 
-- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 339 passes and 9 existing TODOs (0 failures). The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package.
-- Exit gates 1–4 now covered by `test/snapshot.test.mjs` (20 tests: prior 15 plus single-read predicate, hostile-grant ordinary setup, ceiling liftBudget, holder failure cleanup, coalesced image) and `test/pack.test.mjs` (10 tests).
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 345 passes and 9 existing TODOs (0 failures). The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package.
+- Exit gates 1–4 now covered by `test/snapshot.test.mjs` (20 tests: prior 15 plus single-read predicate, hostile-grant ordinary setup, ceiling liftBudget, holder failure cleanup, coalesced image) and `test/pack.test.mjs` (10 tests). The flattener is covered by `test/bundle-flatten.test.mjs` (6 collision-fixture tests: top-level rename, nested shadow, member/shorthand, keyword regex, string/comment/template immunity, slash class).
 - Raw samples are in `tmp/bench-l2/committed/results.json` (default install and Option D control).
