@@ -51,7 +51,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
 
   function checkEntry() {
     if (stopped) throw new KernelPoisonedError();
-    if (busy) throw new TypeError("the canonical ABI store is already in a call");
+    if (busy) throw new TypeError("busy");
   }
 
   function guestNew(kind, rep) {
@@ -124,12 +124,12 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
     const dtor = namespace + "#[dtor]" + kind;
     const Resource = class {
       constructor() {
-        throw new TypeError(name + " has no public constructor");
+        throw new TypeError(name + " no ctor");
       }
 
       [Symbol.dispose]() {
         const entry = wrappers.get(this);
-        if (!entry || entry.kind !== kind) throw new TypeError("invalid " + kind + " disposal receiver");
+        if (!entry || entry.kind !== kind) throw new TypeError("bad " + kind + " dispose");
         if (stopped || table.get(entry.id) !== entry) return;
         checkEntry();
         destroyOwner(entry);
@@ -160,7 +160,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
       const borrow = (kind, wrapper, path) => {
         const entry = wrappers.get(wrapper);
         if (!entry || entry.kind !== kind || !entry.hostOwned || table.get(entry.id) !== entry) {
-          throw new TypeError(path + " must be a live " + kind + " of this store");
+          throw new TypeError(path + ":"+kind);
         }
         borrowed.push(wrapper);
         entry.borrows++;
@@ -185,7 +185,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
           staged = codec.stageParams(fn.params, args, fn.name, receiverArg);
         } catch (error) {
           // An exception from a caller getter is a host failure, even if it resembles a Wasm trap.
-          if (error instanceof WebAssembly.RuntimeError) throw new TypeError("ABI input getter failed", { cause: error });
+          if (error instanceof WebAssembly.RuntimeError) throw new TypeError("input failed", { cause: error });
           throw error;
         }
         if (oneshotBytes !== undefined) codec.liftBudget = codec.lowerBudget;

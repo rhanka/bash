@@ -96,9 +96,10 @@ test("package sizes take their JavaScript files from the variant tree", () => {
 });
 
 test("the verdict function decides each bound at equality and just over", () => {
+  // Provisional browser cap B <= 58,000 B decided by the owner on 21/11.
   const passing = {
     m1: 25.0, m2: 0.20, m3a: 0.07, m5: 10000000, wasmRaw: 1500000, wasmGzip: 700000,
-    b: 45000, n: 40000, t: 60000, z: 30000, suitesPass: true,
+    b: 58000, n: 40000, t: 60000, z: 30000, suitesPass: true,
   };
   assert.equal(decideGateL2(passing).verdict, "go");
   // Just over each kernel bound is a kernel miss; just over is measured unrounded.
@@ -109,32 +110,35 @@ test("the verdict function decides each bound at equality and just over", () => 
     assert.equal(miss.reason, "kernel miss");
   }
   // Just over each fixed JS bound is a JS-only miss while the kernel passes.
-  for (const [key, over] of [["n", 40001], ["t", 60001], ["z", 30001], ["b", 45001]]) {
+  for (const [key, over] of [["n", 40001], ["t", 60001], ["z", 30001], ["b", 58001]]) {
     const miss = decideGateL2({ ...passing, [key]: over });
     assert.equal(miss.verdict, "go-kernel-only", key);
     assert.equal(miss.reason, "JS-only miss");
   }
-  // Each browser-cap interval: at 45,000 both caps pass, at 58,000 only the higher passes,
-  // above 58,000 both fail (a JS-only miss while the choice is pending in every case).
+  // Browser-cap reporting: at 45,000 both caps pass, at 58,000 the provisional cap passes,
+  // above 58,000 both fail (a JS-only miss).
   const at45k = decideGateL2({ ...passing, b: 45000 });
   assert.equal(at45k.verdict, "go");
   assert.equal(at45k.js.b45, true);
   assert.equal(at45k.js.b58, true);
+  assert.equal(at45k.js.b, true);
   const at58k = decideGateL2({ ...passing, b: 58000 });
-  assert.equal(at58k.verdict, "go-kernel-only");
+  assert.equal(at58k.verdict, "go");
   assert.equal(at58k.js.b45, false);
   assert.equal(at58k.js.b58, true);
+  assert.equal(at58k.js.b, true);
   const over58k = decideGateL2({ ...passing, b: 58001 });
   assert.equal(over58k.verdict, "go-kernel-only");
   assert.equal(over58k.js.b45, false);
   assert.equal(over58k.js.b58, false);
+  assert.equal(over58k.js.b, false);
   // A simultaneous kernel and JS miss is still a kernel miss.
   assert.equal(decideGateL2({ ...passing, m1: 30, b: 60000 }).verdict, "no-go");
   // A red correctness suite blocks the verdict whatever the numbers say.
   assert.equal(decideGateL2({ ...passing, suitesPass: false }).verdict, "no-go");
 });
 
-test("the verdict function returns go-kernel-only on the measured fix numbers", (t) => {
+test("the verdict function returns go on the measured fix numbers", (t) => {
   // The benchmark runs separately on the green release artifacts; without its output there is
   // nothing to tie to the report, so this test skips instead of failing.
   const results = new URL("../tmp/bench-l2/committed/results.json", import.meta.url);
@@ -155,8 +159,8 @@ test("the verdict function returns go-kernel-only on the measured fix numbers", 
   assert.equal(out.kernel.m3a, true);
   assert.equal(out.kernel.m5, true);
   assert.equal(out.kernel.wasm, true);
-  assert.equal(out.verdict, "go-kernel-only");
-  assert.equal(out.reason, "JS-only miss");
+  assert.equal(out.verdict, "go");
+  assert.equal(out.reason, "all thresholds pass");
 });
 
 test("the wasm-opt request records that Binaryen optimization was not measured", () => {

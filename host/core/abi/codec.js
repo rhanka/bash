@@ -24,8 +24,8 @@ const integerBounds = {
 };
 
 export const trap = (detail) => new WebAssembly.RuntimeError("canonical ABI: " + detail);
-const badType = (path, expected) => new TypeError(path + " must be " + expected);
-const badRange = (path) => new RangeError(path + " is outside the ABI bounds");
+const badType = (path, expected) => new TypeError(path + ":" + expected);
+const badRange = (path) => new RangeError(path + ":range");
 
 export function unsigned32(value) {
   if (!Number.isInteger(value) || value < -0x80000000 || value > U32_MAX) throw trap("invalid i32 value");
@@ -34,14 +34,14 @@ export function unsigned32(value) {
 
 function integer(kind, value, path) {
   const [min, max] = integerBounds[kind];
-  if (typeof value !== typeof min) throw badType(path, typeof min === "bigint" ? "a BigInt" : "a number");
+  if (typeof value !== typeof min) throw badType(path, typeof min === "bigint" ? "bigint" : "num");
   if (value < min || value > max || (typeof value === "number" && !Number.isInteger(value))) throw badRange(path);
   return value;
 }
 
 function object(value, path) {
   if (!value || typeof value !== "object" || Array.isArray(value) || ArrayBuffer.isView(value)) {
-    throw badType(path, "an object");
+    throw badType(path, "obj");
   }
 }
 
@@ -53,18 +53,18 @@ function plainRecord(value, path) {
   const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor")?.value;
   if (typeof constructor !== "function" || functionSource.call(constructor) !== objectConstructorSource ||
       constructor.prototype !== prototype) {
-    throw badType(path, "a plain record");
+    throw badType(path, "rec");
   }
 }
 
 function field(value, key, path, optional) {
   if (Object.hasOwn(value, key)) return value[key];
-  if (!optional) throw badType(path, "present");
+  if (!optional) throw badType(path, "req");
 }
 
 function indexOf(labels, value, path) {
   const index = labels.indexOf(value);
-  if (index === -1) throw badType(path, "a known tag");
+  if (index === -1) throw badType(path, "tag");
   return index;
 }
 
@@ -96,18 +96,18 @@ export class Codec {
   stage(type, value, path, maxBytes) {
     switch (type.kind) {
       case "unit":
-        if (value !== undefined) throw badType(path, "undefined");
+        if (value !== undefined) throw badType(path, "undef");
         return;
       case "bool":
-        if (typeof value !== "boolean") throw badType(path, "a boolean");
+        if (typeof value !== "boolean") throw badType(path, "bool");
         return Number(value);
       case "u8": case "u16": case "u32": case "s32": case "u64": case "s64":
         return integer(type.kind, value, path);
       case "f64":
-        if (typeof value !== "number") throw badType(path, "a number");
+        if (typeof value !== "number") throw badType(path, "num");
         return value;
       case "string": {
-        if (typeof value !== "string") throw badType(path, "a string");
+        if (typeof value !== "string") throw badType(path, "str");
         if (value.length > this.lowerBudget) throw badRange(path);
         this.charge(utf8Length(value), path, maxBytes);
         return utf8Encoder.encode(value);
@@ -121,7 +121,7 @@ export class Codec {
           this.charge(arrayLength.call(value) * type.element.size, path, maxBytes);
           return new ArrayType(value);
         }
-        if (!Array.isArray(value)) throw badType(path, "an array");
+        if (!Array.isArray(value)) throw badType(path, "arr");
         const length = integer("u32", value.length, path + ".length");
         this.charge(length * Math.max(1, type.element.size), path, maxBytes);
         const staged = new Array(length);
@@ -149,10 +149,10 @@ export class Codec {
         let flags = 0;
         for (const key of Reflect.ownKeys(value)) {
           const bit = type.labels.indexOf(key);
-          if (bit === -1) throw badType(path, "an object with known flag names");
+          if (bit === -1) throw badType(path, "flags");
           const enabled = value[key];
           if (enabled === undefined) continue;
-          if (typeof enabled !== "boolean") throw badType(path + "." + key, "a boolean");
+          if (typeof enabled !== "boolean") throw badType(path + "." + key, "bool");
           if (enabled) flags += 2 ** bit;
         }
         return flags;
@@ -164,10 +164,10 @@ export class Codec {
         object(value, path);
         const tag = field(value, "tag", path + ".tag");
         const index = type.cases.findIndex((c) => c.tag === tag);
-        if (index === -1) throw badType(path + ".tag", "a known tag");
+        if (index === -1) throw badType(path + ".tag", "tag");
         const child = type.cases[index].type;
         if (child.kind === "unit") {
-          if (Object.hasOwn(value, "val")) throw badType(path, "a tag without a payload");
+          if (Object.hasOwn(value, "val")) throw badType(path, "no val");
           return [index];
         }
         return [index, this.stage(child, field(value, "val", path + ".val"), path + ".val")];
