@@ -127,7 +127,10 @@ export function stagePackage(source, tree, env) {
 
 function sizes(tree, env) {
   const files = packedJsFiles(tree, env);
-  const browser = browserImports(tree, join(tree, "host", "browser.js"));
+  const entry = existsSync(join(tree, "dist", "js", "browser.js"))
+    ? join(tree, "dist", "js", "browser.js")
+    : join(tree, "host", "browser.js");
+  const browser = browserImports(tree, entry);
   const groups = Object.fromEntries(["glue", "registry", "coreEntry", "nodeOnly"].map((name) => [name, {}]));
   for (const path of files) {
     const name = /^dist\/js\/kernel\/kernel(?:\.shims)?\.js$/.test(path) ? "glue" :
@@ -139,10 +142,15 @@ function sizes(tree, env) {
   }), { raw: 0, gzip: 0 });
   const groupSizes = Object.fromEntries(Object.entries(groups).map(([name, files]) =>
     [name, { files, ...sum(Object.values(files)) }]));
+  // The linked core ships only in the repository tree; installed trees carry the same
+  // bytes as their loader core.
+  const corePath = existsSync(join(tree, "dist", "kernel.core.wasm"))
+    ? "dist/kernel.core.wasm"
+    : "dist/js/kernel/kernel.core.wasm";
   return {
     wasm: {
       loader: size(tree, "dist/js/kernel/kernel.core.wasm"),
-      core: size(tree, "dist/kernel.core.wasm"),
+      core: size(tree, corePath),
       component: size(tree, "dist/kernel.component.wasm"),
     },
     js: {
