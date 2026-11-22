@@ -352,8 +352,8 @@ async function captureOnce(root, coreBytes) {
   return { usage, memory, pages, rep };
 }
 
-function diffRanges(initial, live) {
-  const ranges = [];
+function diffRanges(initial, live, maxGap = 64) {
+  const raw = [];
   let start = -1;
   const end = Math.max(initial.length, live.length);
   for (let i = 0; i < end; i++) {
@@ -362,11 +362,30 @@ function diffRanges(initial, live) {
     if (a !== b) {
       if (start < 0) start = i;
     } else if (start >= 0) {
-      ranges.push({ dst: start, bytes: live.slice(start, i) });
+      raw.push({ dst: start, bytes: live.slice(start, i) });
       start = -1;
     }
   }
-  if (start >= 0) ranges.push({ dst: start, bytes: live.slice(start, end) });
+  if (start >= 0) raw.push({ dst: start, bytes: live.slice(start, end) });
+  // Coalesce equal gaps of `maxGap` bytes or less: one `memory.init` per merged range
+  // instead of one per differing byte run. The image grows by the gap bytes, but the
+  // restore code shrinks by one init sequence per merged gap.
+  if (raw.length === 0) return raw;
+  const ranges = [raw[0]];
+  for (let i = 1; i < raw.length; i++) {
+    const prev = ranges[ranges.length - 1];
+    const cur = raw[i];
+    const gap = cur.dst - (prev.dst + prev.bytes.length);
+    if (gap <= maxGap) {
+      const merged = new Uint8Array(prev.bytes.length + gap + cur.bytes.length);
+      merged.set(prev.bytes, 0);
+      merged.set(live.slice(prev.dst + prev.bytes.length, cur.dst), prev.bytes.length);
+      merged.set(cur.bytes, prev.bytes.length + gap);
+      prev.bytes = merged;
+    } else {
+      ranges.push(cur);
+    }
+  }
   return ranges;
 }
 
