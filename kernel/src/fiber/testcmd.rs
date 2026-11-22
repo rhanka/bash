@@ -103,6 +103,10 @@ impl Fiber {
     }
 
     fn normalized_test_path(&self, path: &[u8]) -> Result<KBytes, Code> {
+        // Charge the normalized bytes, best-effort: the resume gate yields when the
+        // slice is spent, but the fuel itself is always accounted here.
+        let mut charged = path.len();
+        let _ = self.pay_bytes(&mut charged);
         if path.starts_with(b"/") {
             return self.shell.root.norm(path);
         }
@@ -186,22 +190,27 @@ impl Fiber {
                     if !self.shell.granted(G_HOST_FS) {
                         return Some(self.fs_exit(Err(Code::Permission), p));
                     }
+                    // One chunk per host call so no single ABI value exceeds 1 MiB
+                    // (D6.4). The full payload is stashed and the T_WRITE
+                    // continuation appends the rest chunk by chunk.
+                    let text: &[u8] = t;
+                    let mut charged = text.len();
+                    let _ = self.pay_bytes(&mut charged);
+                    let data = match bytes_in(text, &self.live) {
+                        Ok(data) => data,
+                        Err(e) => return Some(Flow::Fail(Fail::Mem(e))),
+                    };
+                    let end = text.len().min(FS_CHUNK as usize);
                     let built = (|| {
                         let mut ops = KVec::new_in(&self.scratch);
-                        let mut start = 0;
-                        loop {
-                            let end = t.len().min(start + FS_CHUNK as usize);
-                            ops.try_push(BatchOp::WriteFile {
-                                path: bytes_in(rest, &self.scratch)?,
-                                data: bytes_in(&t[start..end], &self.scratch)?,
-                                offset: Some(start as u64), truncate: start == 0, mode: None, mtime_ms: None,
-                            })?;
-                            if end == t.len() {
-                                return Ok(ops);
-                            }
-                            start = end;
-                        }
+                        ops.try_push(BatchOp::WriteFile {
+                            path: bytes_in(rest, &self.scratch)?,
+                            data: bytes_in(&text[..end], &self.scratch)?,
+                            offset: Some(0), truncate: true, mode: None, mtime_ms: None,
+                        })?;
+                        Ok(ops)
                     })();
+                    self.fs_write_data = Some(data);
                     return Some(self.emit_test_batch(id, T_WRITE, p, built));
                 }
                 let r = self.shell.root.op(Op::WriteFile { path: p, data: t, offset: Some(0), truncate: true, mode: None, mtime_ms: None });
@@ -396,6 +405,11 @@ impl Fiber {
                     (T_CAT, Some(Ok(BatchOk::Data(d)))) if d.len() <= FS_CHUNK as usize => {
                         self.write_out(Chan::Stdout, d).map_err(fail)?;
                         if d.len() == FS_CHUNK as usize {
+                            // Charge the transferred chunk; the resume gate yields
+                            // when the fuel slice is spent instead of chaining
+                            // unlimited 1 MiB reads at fuel zero.
+                            let mut charged = d.len();
+                            let _ = self.pay_bytes(&mut charged);
                             let max_failed = |e| fail(Fail::Mem(e));
                             let pos = aux + u64::from(FS_CHUNK);
                             let path = self.normalized_test_path(&self.fs_test_path).map_err(|_| CompleteError::BadOutcome)?;
@@ -417,17 +431,40 @@ impl Fiber {
                     _ => Err(CompleteError::BadOutcome),
                 }
             }
-            (T_WRITE, Outcome::Fs(r)) if r.len() != 0 => {
-                for i in 0..r.len() {
-                    match r.at(i) {
-                        Some(Ok(BatchOk::None)) => {}
-                        Some(Err((code, _))) => {
-                            let path = core::mem::replace(&mut self.fs_test_path, KBytes::new_in(&self.scratch));
-                            return self.finish_fs(Err(code), &path).map(|()| None).map_err(fail);
-                        }
-                        _ => return Err(CompleteError::BadOutcome),
+            (T_WRITE, Outcome::Fs(r)) if r.len() == 1 => {
+                match r.at(0) {
+                    Some(Ok(BatchOk::None)) => {}
+                    Some(Err((code, _))) => {
+                        let path = core::mem::replace(&mut self.fs_test_path, KBytes::new_in(&self.scratch));
+                        self.fs_write_data = None;
+                        return self.finish_fs(Err(code), &path).map(|()| None).map_err(fail);
                     }
+                    _ => return Err(CompleteError::BadOutcome),
                 }
+                // One chunk per host call: append the stashed remainder until done.
+                // `aux` is the start of the just-completed chunk; the next
+                // chunk starts where it ended.
+                let total = self.fs_write_data.as_ref().map(|d| d.len()).unwrap_or(0);
+                let start = usize::try_from(aux).map_err(|_| CompleteError::BadOutcome)?.min(total);
+                let end = total.min(start.saturating_add(FS_CHUNK as usize));
+                if end < total {
+                    let next = total.min(end.saturating_add(FS_CHUNK as usize));
+                    let mut charged = next - end;
+                    let _ = self.pay_bytes(&mut charged);
+                    let max_failed = |e| fail(Fail::Mem(e));
+                    let path = self.normalized_test_path(&self.fs_test_path).map_err(|_| CompleteError::BadOutcome)?;
+                    let (id, rest) = self.shell.root.resolve_host_mount(&path).ok_or(CompleteError::BadOutcome)?;
+                    let data = self.fs_write_data.as_ref().ok_or(CompleteError::BadOutcome)?;
+                    let mut ops = KVec::new_in(&self.scratch);
+                    ops.try_push(BatchOp::WriteFile {
+                        path: bytes_in(rest, &self.scratch).map_err(max_failed)?,
+                        data: bytes_in(&data.as_slice()[end..next], &self.scratch).map_err(max_failed)?,
+                        offset: None, truncate: false, mode: None, mtime_ms: None,
+                    }).map_err(max_failed)?;
+                    let req = self.host_fs_batch(id, ops).map_err(|_| CompleteError::BadOutcome)?;
+                    return Ok(Some((Pending::Test(T_WRITE, end as u64), req)));
+                }
+                self.fs_write_data = None;
                 Ok(())
             }
             (T_FSBATCH, Outcome::Fs(r)) if r.len() == 6 => {
