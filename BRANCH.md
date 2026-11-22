@@ -125,12 +125,12 @@ ANSI-C `$'...'` decoding.
    within the Wasm call stack; depth 201 exits `2` with `Maximum parser nesting depth exceeded (200)`.
 2. **Core Wasm size delta:**
    - Baseline `dist/js/kernel/kernel.core.wasm`: `247 498 B raw` / `89 259 B gzip`
-   - After L3 `dist/js/kernel/kernel.core.wasm`: `432 012 B raw` / `144 257 B gzip`
-   - Delta: `+184 514 B raw` / `+54 998 B gzip` (well under Gate L2 budget `1 500 000 B raw` / `700 000 B gzip`).
+   - After L3 `dist/js/kernel/kernel.core.wasm`: `438 746 B raw` / `146 543 B gzip`
+   - Delta: `+191 248 B raw` / `+57 284 B gzip` (well under Gate L2 budget `1 500 000 B raw` / `700 000 B gzip`).
 3. **Parity and fuzz counts:**
    - `test/parity/l3.test.mjs`: **36/36** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
    - `test/parity/l2.test.mjs`: **30/30** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
-   - Native Rust AST & syntax tests (`fiber::syntax::tests` + `fiber::vm::l3_vm_tests`): **93** tests (90 syntax/AST/security unit + 1 native 2 500-input seeded fuzz + 2 L3 VM unit; **134** total `cargo test --lib`).
+   - Native Rust AST & syntax tests (`fiber::syntax::tests` + `fiber::vm::l3_vm_tests`): **95** tests (92 syntax/AST/security unit + 1 native 2 500-input seeded fuzz + 2 L3 VM unit; **289** total `cargo test --lib`).
    - JS seeded parser fuzz slice (`test/l3-parser-fuzz.test.mjs`, seed `0x5345_4E54_4C33_465A`): **2 500** inputs (1 500 grammar-mutated + 1 000 arbitrary byte/UTF-8/surrogate/deep-nesting), **0 traps**, `~295 ms` total (`< 3 s` budget).
 4. **Handoff table for L4 and L5:**
    | Downstream lot | `kernel::fiber::syntax::Ast` entry points |
