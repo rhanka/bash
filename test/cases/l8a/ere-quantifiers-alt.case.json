@@ -1,0 +1,13 @@
+{
+  "id": "l8a/ere-quantifiers-alt",
+  "steps": [
+    {
+      "script": "grep -E -- '(ab)+c?d{2,4}|(xy|)'",
+      "stdin": "abcdd\nababddddd\nxy\n\nfoo\n"
+    }
+  ],
+  "tags": [
+    "ere"
+  ],
+  "title": "ERE quantifiers and alternation including an empty branch"
+}

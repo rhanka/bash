@@ -1,0 +1,15 @@
+{
+  "id": "l8a/extglob-at-star",
+  "steps": [
+    {
+      "script": "( shopt -s extglob; case 'abab' in @(a|ab)) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( shopt -s extglob; case 'aaab' in *(a|b)) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "extglob"
+  ],
+  "title": "Extglob exactly-one and zero-or-more groups"
+}

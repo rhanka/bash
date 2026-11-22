@@ -1,0 +1,21 @@
+{
+  "id": "l8a/bracket-edge-cases",
+  "steps": [
+    {
+      "script": "grep -E -- '[]a-]'",
+      "stdin": "]\na\n-\nb\n"
+    },
+    {
+      "script": "grep -E -- '[^]a]'",
+      "stdin": "]\na\nb\n"
+    },
+    {
+      "script": "grep -E -- '[!a]'",
+      "stdin": "!\na\nb\n"
+    }
+  ],
+  "tags": [
+    "brackets"
+  ],
+  "title": "Leading bracket, negated bracket, and literal bang in regex brackets"
+}

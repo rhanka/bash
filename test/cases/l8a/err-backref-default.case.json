@@ -1,0 +1,22 @@
+{
+  "id": "l8a/err-backref-default",
+  "steps": [
+    {
+      "script": "grep -- '\\(a\\)\\1'",
+      "stdin": "aa\naaX\n"
+    },
+    {
+      "script": "grep -E -- '(a)\\1'",
+      "stdin": "aa\naaX\n"
+    },
+    {
+      "script": "grep -P -- '(a)\\1'",
+      "stdin": "aa\naaX\n"
+    }
+  ],
+  "tags": [
+    "backrefs",
+    "errors"
+  ],
+  "title": "Pattern backreferences fail in BRE, ERE, and Perl with exit 2"
+}

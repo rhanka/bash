@@ -1,0 +1,13 @@
+{
+  "id": "l8a/perl-inline-flags-named",
+  "steps": [
+    {
+      "script": "grep -Po -- '(?i:abc)-(?-i:DEF)-(?P<id>[0-9]+)'",
+      "stdin": "ABC-def-42\nabc-DEF-7\nabc-def-8\n"
+    }
+  ],
+  "tags": [
+    "perl"
+  ],
+  "title": "Perl scoped inline flags with a named capture group"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "l8a/bre-basic-literals",
+  "steps": [
+    {
+      "script": "grep -- 'a+b?c(1)\\|2'",
+      "stdin": "a+b?c(1)|2\n2\naabbc11\nnope\n"
+    }
+  ],
+  "tags": [
+    "bre"
+  ],
+  "title": "BRE plus, question, parens, and pipe are literal without backslashes"
+}

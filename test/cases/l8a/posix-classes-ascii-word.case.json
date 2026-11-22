@@ -1,0 +1,17 @@
+{
+  "id": "l8a/posix-classes-ascii-word",
+  "steps": [
+    {
+      "script": "grep -Ex -- '[[:ascii:]]+'",
+      "stdin": "plain\ncafé\n"
+    },
+    {
+      "script": "grep -Ex -- '[[:word:]]+'",
+      "stdin": "abc_123\nwith-dash\n"
+    }
+  ],
+  "tags": [
+    "posix"
+  ],
+  "title": "POSIX ascii and word classes on full lines"
+}

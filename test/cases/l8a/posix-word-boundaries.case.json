@@ -1,0 +1,13 @@
+{
+  "id": "l8a/posix-word-boundaries",
+  "steps": [
+    {
+      "script": "grep -E -- '[[:<:]]cat[[:>:]]'",
+      "stdin": "cat\ncats\na cat!\n_cat\n"
+    }
+  ],
+  "tags": [
+    "posix"
+  ],
+  "title": "POSIX start-of-word and end-of-word bracket assertions"
+}

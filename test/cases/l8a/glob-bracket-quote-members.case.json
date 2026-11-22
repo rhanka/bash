@@ -1,0 +1,15 @@
+{
+  "id": "l8a/glob-bracket-quote-members",
+  "steps": [
+    {
+      "script": "( case 'm' in ['a-z']) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case '-' in ['a-z']) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Single quotes are literal members inside glob brackets"
+}

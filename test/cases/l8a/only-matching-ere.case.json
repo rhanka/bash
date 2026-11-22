@@ -1,0 +1,17 @@
+{
+  "id": "l8a/only-matching-ere",
+  "steps": [
+    {
+      "script": "grep -Eo -- '[a-z]+[0-9]+'",
+      "stdin": "abc123 def\nno match here\nx1y2z3\n"
+    },
+    {
+      "script": "grep -Eo -- '[a-z]+[0-9]+'",
+      "stdin": "no digits here\n"
+    }
+  ],
+  "tags": [
+    "flags"
+  ],
+  "title": "Only-matching output with several hits per line and a no-match exit 1"
+}

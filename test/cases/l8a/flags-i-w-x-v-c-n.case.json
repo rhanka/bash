@@ -1,0 +1,25 @@
+{
+  "id": "l8a/flags-i-w-x-v-c-n",
+  "steps": [
+    {
+      "script": "grep -Eiw -- 'cat'",
+      "stdin": "cat\nCat\ncats\nconcat\n"
+    },
+    {
+      "script": "grep -Ex -- '[0-9]+'",
+      "stdin": "123\nabc\n12a\n"
+    },
+    {
+      "script": "grep -Evc -- '^#'",
+      "stdin": "# comment\ncode\n#x\n\n"
+    },
+    {
+      "script": "grep -En -- 'hit'",
+      "stdin": "miss\nhit here\nhit\n"
+    }
+  ],
+  "tags": [
+    "flags"
+  ],
+  "title": "Ignore case, whole word, line match, invert count, and line numbers"
+}

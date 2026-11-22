@@ -1,0 +1,29 @@
+{
+  "id": "l8a/fixed-strings-multiline",
+  "steps": [
+    {
+      "script": "grep -F -- 'a*b'",
+      "stdin": "a*b\naaab\n"
+    },
+    {
+      "script": "grep -F -- 'foo\nbar'",
+      "stdin": "foo\nbaz\nbar\nqux\n"
+    },
+    {
+      "script": "grep -Fi -- 'Hello'",
+      "stdin": "hello\nHELLO\nbye\n"
+    },
+    {
+      "script": "grep -Fw -- 'cat'",
+      "stdin": "cat\ncats\na cat!\n"
+    },
+    {
+      "script": "grep -Fx -- 'exact'",
+      "stdin": "exact\ninexact\n"
+    }
+  ],
+  "tags": [
+    "fixed"
+  ],
+  "title": "Fixed strings with metacharacters, needles, and flag combinations"
+}
