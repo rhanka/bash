@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-b-escapes-and-stop",
+  "steps": [
+    {
+      "script": "printf '%b' '\\a|\\e|\\0|\\0101|\\101|\\777|\\x4g|\\xc3\\xa9|\\xc3\\x28|\\u00e9|\\U0001f600'"
+    },
+    {
+      "script": "printf '%b-%s' 'abc\\cdef' 'ignored'"
+    }
+  ],
+  "title": "printf %b escapes and \\c early stop"
+}

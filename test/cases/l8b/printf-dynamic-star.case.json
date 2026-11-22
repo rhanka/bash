@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-dynamic-star",
+  "steps": [
+    {
+      "script": "printf '%*.*f|%*d|%.*d' '-8' '2' '3.5' '-4' '7' '3' '7'"
+    }
+  ],
+  "title": "printf dynamic * width and precision"
+}

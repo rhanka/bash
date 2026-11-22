@@ -1,0 +1,17 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxStringLength": 12
+    }
+  },
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-output-size-limit",
+  "steps": [
+    {
+      "script": "printf '%s%s' '01234567' '89abX'"
+    }
+  ],
+  "title": "printf formatted value size limit exceeded"
+}

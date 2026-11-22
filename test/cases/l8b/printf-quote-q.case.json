@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-quote-q",
+  "steps": [
+    {
+      "script": "printf '%q|' '' 'abc_1-2./' 'hello world' 'a'\\''b' 'é' '~foo' 'a=b' '{a,b}' '!hist'"
+    }
+  ],
+  "title": "printf %q shell quoting"
+}

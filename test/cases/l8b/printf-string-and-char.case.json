@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-string-and-char",
+  "steps": [
+    {
+      "script": "printf '%5s|%-5s|%05s|%.3s|%.2s|%c|%c|%c' 'hi' 'hi' 'hi' 'héllo' '😀ab' '' 'abc' 'é'"
+    }
+  ],
+  "title": "printf %s width/precision and %c first byte"
+}

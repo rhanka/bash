@@ -1,0 +1,32 @@
+{
+  "case": "l8b/printf-output-size-limit",
+  "caseHash": "34ce6e7a3b429e7c8e52fd002f838f1402c492a14b70e48d413195ae267b7a68",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "TZ": "UTC"
+      },
+      "exitCode": 126,
+      "stderr": "bash: formatted value size limit exceeded (4 bytes)\n",
+      "stdout": ""
+    }
+  ]
+}

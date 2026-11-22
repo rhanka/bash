@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-quote-control-bytes",
+  "steps": [
+    {
+      "script": "printf '%q' 'a\tb'"
+    },
+    {
+      "script": "printf '%b' '\\x01\\x7f\\x1b'"
+    }
+  ],
+  "title": "printf %q control characters and %b control bytes"
+}
