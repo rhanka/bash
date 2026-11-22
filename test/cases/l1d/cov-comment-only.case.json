@@ -1,0 +1,13 @@
+{
+  "capture": {
+    "coverage": true,
+    "trace": true
+  },
+  "id": "l1d/cov-comment-only",
+  "steps": [
+    {
+      "script": "# comment only\n"
+    }
+  ],
+  "title": "Comment-only script emits no coverage or trace"
+}

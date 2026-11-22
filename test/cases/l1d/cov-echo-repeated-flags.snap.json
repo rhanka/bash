@@ -1,0 +1,43 @@
+{
+  "case": "l1d/cov-echo-repeated-flags",
+  "caseHash": "1de68ea12dae297b4ad7b3a12548247878ecd7424862f4bbdd4fd6450a8dd8ed",
+  "coverage": [
+    "bash:cmd:SimpleCommand",
+    "bash:expansion:word_glob",
+    "bash:expansion:word_glob",
+    "bash:expansion:word_glob",
+    "bash:expansion:word_glob",
+    "bash:builtin:echo",
+    "cmd:flag:echo:-n",
+    "cmd:flag:echo:-n",
+    "cmd:flag:echo:-e"
+  ],
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "hi"
+    }
+  ]
+}

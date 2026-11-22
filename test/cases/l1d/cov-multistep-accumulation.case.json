@@ -1,0 +1,19 @@
+{
+  "capture": {
+    "coverage": true,
+    "trace": true
+  },
+  "id": "l1d/cov-multistep-accumulation",
+  "steps": [
+    {
+      "script": "echo a"
+    },
+    {
+      "script": "echo -n b"
+    },
+    {
+      "script": "echo -e 'c\\nd'"
+    }
+  ],
+  "title": "Multi-step coverage drains per step without duplication"
+}

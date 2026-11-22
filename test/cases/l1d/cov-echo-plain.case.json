@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-echo-plain",
+  "steps": [
+    {
+      "script": "echo hello world"
+    }
+  ],
+  "title": "Plain echo emits SimpleCommand, word_glob, and builtin:echo"
+}

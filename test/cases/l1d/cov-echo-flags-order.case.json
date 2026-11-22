@@ -1,0 +1,15 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-echo-flags-order",
+  "steps": [
+    {
+      "script": "echo -n -e 'a\\nb'"
+    },
+    {
+      "script": "echo hi -n -E"
+    }
+  ],
+  "title": "Echo flag coverage hits follow argument order"
+}

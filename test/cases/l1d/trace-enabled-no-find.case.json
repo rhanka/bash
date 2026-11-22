@@ -1,0 +1,13 @@
+{
+  "capture": {
+    "coverage": true,
+    "trace": true
+  },
+  "id": "l1d/trace-enabled-no-find",
+  "steps": [
+    {
+      "script": "X=ok; echo -n $X"
+    }
+  ],
+  "title": "Trace enabled without find leaves trace empty while keeping coverage"
+}

@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-pipeline-stages",
+  "steps": [
+    {
+      "script": "echo left | { echo right; }"
+    }
+  ],
+  "title": "Pipeline stage coverage hits for SimpleCommand and Group"
+}

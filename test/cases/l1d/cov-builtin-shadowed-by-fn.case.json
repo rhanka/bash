@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-builtin-shadowed-by-fn",
+  "steps": [
+    {
+      "script": "echo() { /bin/echo custom; }\necho hi"
+    }
+  ],
+  "title": "Builtin hit emitted before function lookup when shadowed"
+}

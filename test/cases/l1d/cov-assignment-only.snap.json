@@ -1,0 +1,43 @@
+{
+  "case": "l1d/cov-assignment-only",
+  "caseHash": "c8ecfcc59493719fd02feb064b0486567336feac8a3a7064083c0e4f41247b77",
+  "coverage": [
+    "bash:cmd:SimpleCommand",
+    "bash:cmd:SimpleCommand",
+    "bash:expansion:word_glob",
+    "bash:expansion:word_split",
+    "bash:expansion:word_glob",
+    "bash:expansion:word_split",
+    "bash:builtin:echo"
+  ],
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "A": "1",
+        "B": "2",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "1 2\n"
+    }
+  ]
+}

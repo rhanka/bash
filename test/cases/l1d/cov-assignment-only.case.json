@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-assignment-only",
+  "steps": [
+    {
+      "script": "A=1 B=2\necho $A $B"
+    }
+  ],
+  "title": "Assignment-only simple command coverage"
+}
