@@ -10,6 +10,9 @@ use crate::mem;
 /// Requires no configuration yet, no allocated byte, a pristine high-water and exactly
 /// `expected_pages` of linear memory. Never changes state: a failed preflight leaves memory,
 /// handles and any latch untouched.
+///
+/// # Safety
+/// Exported with a stable Wasm name for the tool-generated restore; the signature is plain data.
 #[unsafe(export_name = "__restore_preflight")]
 pub extern "C" fn restore_preflight(expected_pages: u32) -> u32 {
     let pages = core::arch::wasm32::memory_size(0);
@@ -20,6 +23,9 @@ pub extern "C" fn restore_preflight(expected_pages: u32) -> u32 {
 /// The final linear-memory size is checked against the explicit 268,435,456 B default cap; on
 /// refusal nothing is grown, written or registered. The heap metadata comes from the image
 /// itself, so no free block is inserted.
+///
+/// # Safety
+/// Exported with a stable Wasm name for the tool-generated restore; the signature is plain data.
 #[unsafe(export_name = "__restore_grow")]
 pub extern "C" fn restore_grow(pages: u32) -> u32 {
     u32::from(mem::restore_grow(pages as usize))
@@ -28,6 +34,9 @@ pub extern "C" fn restore_grow(pages: u32) -> u32 {
 /// Read-only capture probe for the offline snapshot tool: bit 0 is set when the transfer headroom
 /// account is empty, bit 1 when the allocator reserve is closed, bit 2 when no lowering slot is
 /// held. A capture requires all three.
+///
+/// # Safety
+/// Exported with a stable Wasm name for the offline capture tool; the signature is plain data.
 #[unsafe(export_name = "__snapshot_probe")]
 pub extern "C" fn snapshot_probe() -> u64 {
     let mut probe = 0u64;
