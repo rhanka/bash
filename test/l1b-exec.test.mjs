@@ -187,8 +187,8 @@ test("gate 6: an allocation beyond the memory ceiling is a limit result", async 
     await gate;
     return { stdout: "", stderr: "", exitCode: 0 };
   });
-  const a = new Bash({ ...overrides, fs, customCommands: [hold], [INTERNAL]: internal(hooks) });
-  const b = new Bash({ ...overrides, fs, [INTERNAL]: internal(hooks) });
+  const a = new Bash({ ...overrides, fs, isolation: "shared", customCommands: [hold], [INTERNAL]: internal(hooks) });
+  const b = new Bash({ ...overrides, fs, isolation: "shared", [INTERNAL]: internal(hooks) });
   const pa = a.exec("__alloc 58000000\nhold");
   await new Promise((r) => setTimeout(r, 50));
   const rb = await b.exec("__alloc 58000000");

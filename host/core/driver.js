@@ -17,6 +17,19 @@ const FATAL_STDERR = "bash: internal error: sandbox instance failed\n";
 
 const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
+/** Driver-private tag for a mount entry backed by a kernel `InMemoryFs` volume (L7c D27). */
+const KERNEL_VOLUME = Symbol("kernel-volume");
+
+/** Marks mount id 1 as a kernel-backed volume; the facade holds the entry, the driver serves it. */
+export function markKernelVolume(fs) {
+  return Object.freeze({ [KERNEL_VOLUME]: true, fs });
+}
+
+/** Returns the branded volume of a mount entry, or null for host-adapter entries. */
+export function kernelVolumeOf(entry) {
+  return entry?.[KERNEL_VOLUME] ? entry.fs : null;
+}
+
 /** An object keyed by sandbox data: null prototype (EVOL S10). */
 export function nullObject(entries) {
   const o = Object.create(null);
@@ -141,9 +154,22 @@ export function* execLoop(B, script, o) {
             !stringLimit([path], L.maxStringLength, B.headroom)) cwd = path;
       } else if (o.env.length === 0 && candidate !== cwd &&
           !stringLimit([candidate], L.maxStringLength, B.headroom)) {
-        const { vfs } = fsState(B.rootFs);
-        const result = inst.call(() => vfs.op({ tag: "exists", val: utf8(candidate) }));
-        if (result.tag === "ok" && result.val.val) cwd = candidate;
+        const st = fsState(B.volumeFs ?? B.rootFs);
+        if (st.holder === B.holder) {
+          const result = inst.call(() => st.vfs.op({ tag: "exists", val: utf8(candidate) }));
+          if (result.tag === "ok" && result.val.val) cwd = candidate;
+        } else {
+          // A separate volume: a lost volume keeps the requested cwd; guest I/O reports `io`.
+          const target = st.holder.instance;
+          if (target) {
+            try {
+              const result = target.call(() => st.vfs.op({ tag: "exists", val: utf8(candidate) }));
+              if (result.tag === "ok" && result.val.val) cwd = candidate;
+            } catch {
+              /* keep the requested cwd */
+            }
+          }
+        }
       }
     }
     x.fiber = inst.call(() =>
@@ -255,6 +281,98 @@ function finish(x, er) {
 
 // ---------------------------------------------------------------------------------------- host calls
 
+/**
+ * Serves one `fs-batch` against a kernel-backed volume (L7c D27), synchronously.
+ * Every op runs in order through the volume owner's `Instance.call(() => vfs.op(op))`,
+ * so the result records keep the existing WIT forms; ops the volume does not
+ * implement (L7a: links, chmod, lazy, ...) come back `unsupported` from the volume itself.
+ * The serialized request and the aggregate response are each bounded by
+ * `min(1 MiB, floor(requesting shell headroom / 2))`, counting the encoded records
+ * and their variable-length payloads. An oversized request reaches zero volume ops;
+ * on response overflow the batch stops with its completed mutations visible and no
+ * partial listing is delivered. Either overflow resumes the execution fiber once at
+ * the same epoch with `limit-exceeded("headroom")` (the fiber ends that exec with 126).
+ * A lost volume yields an ordinary `io` error per op and zero guest calls to its owner.
+ */
+/** Served outcome of one synchronous volume batch; exported for the L7c bound tests. */
+export function serveKernelVolume(x, pc, volFs) {
+  const ops = pc.req.val.ops;
+  const bound = Math.min(1 << 20, Math.floor(x.B.headroom / 2));
+  const st = fsState(volFs);
+  const target = st.holder.instance;
+  const io = (op) => ({ tag: "err", val: { code: "io", path: batchOpPath(op) } });
+  if (!target || target.poisoned) return { outcome: { tag: "fs", val: ops.map(io) } };
+  let request = 0;
+  for (const op of ops) request += REQ_FIXED + payloadBytes(op.val);
+  if (request > bound) return { outcome: { tag: "limit-exceeded", val: "headroom" } };
+  const results = [];
+  let response = 0;
+  for (const op of ops) {
+    let r;
+    try {
+      r = target.call(() => st.vfs.op(op));
+    } catch {
+      // The volume was lost mid-batch: the remaining ops report `io` without
+      // touching the failed owner again.
+      return { outcome: { tag: "fs", val: [...results, ...ops.slice(results.length).map(io)] } };
+    }
+    response += resultSize(r);
+    if (response > bound) return { outcome: { tag: "limit-exceeded", val: "headroom" } };
+    results.push(r);
+  }
+  return { outcome: { tag: "fs", val: results } };
+}
+
+/** Fixed per-record sizes for the synchronous mount bounds (the kernel batch gate uses 72 per op). */
+const REQ_FIXED = 72;
+const RES_FIXED = 16;
+
+/** Sums the variable-length payloads (`Uint8Array`) of a lifted ABI value. */
+function payloadBytes(value) {
+  if (value instanceof Uint8Array) return value.length;
+  if (Array.isArray(value)) return value.reduce((n, e) => n + payloadBytes(e), 0);
+  if (value !== null && typeof value === "object") {
+    let n = 0;
+    for (const e of Object.values(value)) {
+      if (typeof e !== "bigint" && typeof e !== "number" && typeof e !== "string" && typeof e !== "boolean") n += payloadBytes(e);
+    }
+    return n;
+  }
+  return 0;
+}
+
+/**
+ * Encoded size of one batch result: the record plus its variable-length
+ * payloads. Listings count one fixed record per entry (12 for `read-dir`,
+ * 56 for `read-dir-plus`/`walk`, 8 for `all-paths`), mirroring the ABI
+ * lowering, so an oversized listing overflows instead of truncating.
+ */
+function resultSize(r) {
+  if (r.tag === "err") return RES_FIXED + r.val.path.length;
+  const v = r.val;
+  switch (v.tag) {
+    case "path":
+    case "data":
+      return RES_FIXED + v.val.length;
+    case "paths":
+      return RES_FIXED + v.val.reduce((n, p) => n + 8 + p.length, 0);
+    case "entries":
+      return RES_FIXED + v.val.reduce((n, e) => n + 12 + e.name.length, 0);
+    case "entries-plus":
+      return RES_FIXED + v.val.reduce((n, e) => n + 56 + e.path.length, 0);
+    default:
+      return RES_FIXED + 32;
+  }
+}
+
+/** The virtual path carried by a batch op (mirrors the async `fs-batch` mapping). */
+function batchOpPath(op) {
+  const val = op.val;
+  if (op.tag === "symlink") return val.target;
+  if (val instanceof Uint8Array) return val;
+  return val?.path ?? val?.root ?? val?.source ?? utf8("/");
+}
+
 /** Waits for `promise` or for the first of abort, wall-time deadline and poisoning. */
 function raceExec(x, promise) {
   return new Promise((resolve) => {
@@ -300,8 +418,13 @@ function* serve(x, pc) {
       if (!B.sleep) return { outcome: { tag: "denied" } };
       return yield* serveExtension(x, (scope) => scope.guard(B.sleep)(Number(req.val)).then(() => ({ tag: "completed" })), { tag: "failed", val: utf8("sleep failed") });
     }
-    case "fs-batch":
+    case "fs-batch": {
+      // A kernel-backed volume is served synchronously against the owning Vfs:
+      // no promises, no public FS callbacks, no yields for FS I/O.
+      const volFs = kernelVolumeOf(B.mounts.get(req.val.mountId));
+      if (volFs) return serveKernelVolume(x, pc, volFs);
       return yield* serveFsBatch(x, req.val, serveExtension);
+    }
     default:
       return { outcome: { tag: "denied" } };
   }
@@ -392,7 +515,7 @@ function* serveCustom(x, epoch, call) {
       for (const [k, v] of originalEnv) Map.prototype.set.call(env, k, v);
       let stdinText;
       const ctx = {
-        fs: scope.wrap(B.userFs ?? B.rootFs, FS_METHODS),
+        fs: scope.wrap(B.userFs ?? B.volumeFs ?? B.rootFs, FS_METHODS),
         cwd: decodeUtf8(call.cwd),
         env,
         exportedEnv: nullObject([...envFlags].filter(([, ex]) => ex).map(([k]) => [k, env.get(k)])),
