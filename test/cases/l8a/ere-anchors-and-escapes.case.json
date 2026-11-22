@@ -1,0 +1,17 @@
+{
+  "id": "l8a/ere-anchors-and-escapes",
+  "steps": [
+    {
+      "script": "grep -E -- '^\\[a\\.b\\]\\$$'",
+      "stdin": "[a.b]$\n[a.b]\n[a.b]$x\n"
+    },
+    {
+      "script": "grep -E -- '^\\w+\\s+\\d+$'",
+      "stdin": "abc 123\nabc xyz\n123 abc\n"
+    }
+  ],
+  "tags": [
+    "ere"
+  ],
+  "title": "ERE anchors with escaped literals and word, space, and digit classes"
+}

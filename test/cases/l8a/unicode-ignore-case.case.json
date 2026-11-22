@@ -1,0 +1,21 @@
+{
+  "id": "l8a/unicode-ignore-case",
+  "steps": [
+    {
+      "script": "grep -Ei -- 'café'",
+      "stdin": "CAFÉ\ncafé\ncafe\n"
+    },
+    {
+      "script": "grep -Ex -- '.'",
+      "stdin": "é\n😀\nab\n"
+    },
+    {
+      "script": "grep -E -- '[^ab]'",
+      "stdin": "a\nb\né\n"
+    }
+  ],
+  "tags": [
+    "unicode"
+  ],
+  "title": "Unicode case folding with astral dot and negated-bracket matching"
+}

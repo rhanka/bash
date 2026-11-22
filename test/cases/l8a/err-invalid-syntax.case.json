@@ -1,0 +1,25 @@
+{
+  "id": "l8a/err-invalid-syntax",
+  "steps": [
+    {
+      "script": "grep -- '['",
+      "stdin": "x\n"
+    },
+    {
+      "script": "grep -E -- '(abc'",
+      "stdin": "abc\n"
+    },
+    {
+      "script": "grep -E -- '[z-a]'",
+      "stdin": "z\n"
+    },
+    {
+      "script": "grep -E -- '[[:bogus:]a]'",
+      "stdin": "a\n"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Unclosed bracket and group, reversed range, and unknown class fail"
+}

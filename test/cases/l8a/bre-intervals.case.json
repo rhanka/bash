@@ -1,0 +1,17 @@
+{
+  "id": "l8a/bre-intervals",
+  "steps": [
+    {
+      "script": "grep -- 'a\\{2,3\\}b'",
+      "stdin": "ab\naab\naaab\naaaab\n"
+    },
+    {
+      "script": "grep -- 'a\\{,2\\}b'",
+      "stdin": "a{,2}b\nab\naab\n"
+    }
+  ],
+  "tags": [
+    "bre"
+  ],
+  "title": "BRE intervals need a digit after the brace, comma-first stays literal"
+}

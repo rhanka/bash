@@ -1,0 +1,15 @@
+{
+  "id": "l8a/extglob-plus-qmark",
+  "steps": [
+    {
+      "script": "( shopt -s extglob; case 'aaab' in +(a)b) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( shopt -s extglob; case 'main' in ?(pre_)main) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "extglob"
+  ],
+  "title": "Extglob one-or-more and zero-or-one groups"
+}

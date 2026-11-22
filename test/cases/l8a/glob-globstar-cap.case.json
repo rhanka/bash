@@ -1,0 +1,13 @@
+{
+  "id": "l8a/glob-globstar-cap",
+  "steps": [
+    {
+      "script": "( shopt -s globstar; echo /**/**/**/**/**/** )"
+    }
+  ],
+  "tags": [
+    "glob",
+    "limits"
+  ],
+  "title": "Six globstar segments exceed the cap with exit 126"
+}

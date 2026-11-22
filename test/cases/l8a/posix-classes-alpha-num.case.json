@@ -1,0 +1,13 @@
+{
+  "id": "l8a/posix-classes-alpha-num",
+  "steps": [
+    {
+      "script": "grep -Ex -- '[[:alpha:]]+-[[:digit:]]+-[[:alnum:]]+-[[:xdigit:]]+'",
+      "stdin": "abc-123-a1Z-1aF\nabc-123-a1Z-1aG\n"
+    }
+  ],
+  "tags": [
+    "posix"
+  ],
+  "title": "POSIX alpha, digit, alnum, and xdigit classes on full lines"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "l8a/posix-classes-space-punct",
+  "steps": [
+    {
+      "script": "grep -Ex -- '[[:blank:]]+[[:punct:]]+[[:upper:]][[:lower:]]'",
+      "stdin": " !Ab\n\t?Xy\nno\n"
+    },
+    {
+      "script": "grep -Ex -- '[[:print:]]+'",
+      "stdin": "hello world!\n\tindented\n"
+    },
+    {
+      "script": "grep -Ex -- '[[:graph:]]+'",
+      "stdin": "visible\nwith space\n"
+    }
+  ],
+  "tags": [
+    "posix"
+  ],
+  "title": "POSIX blank, punct, upper, lower, print, and graph classes"
+}

@@ -1,0 +1,17 @@
+{
+  "id": "l8a/bre-plus-qmark-literal",
+  "steps": [
+    {
+      "script": "grep -- 'a\\+b'",
+      "stdin": "a+b\naaab\n"
+    },
+    {
+      "script": "grep -- 'a\\?b'",
+      "stdin": "a?b\naab\n"
+    }
+  ],
+  "tags": [
+    "bre"
+  ],
+  "title": "BRE escaped plus and question match literal characters"
+}

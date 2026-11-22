@@ -1,0 +1,26 @@
+{
+  "id": "l8a/err-perl-lookaround",
+  "steps": [
+    {
+      "script": "grep -P -- 'a(?=b)'",
+      "stdin": "ab\na\nb\n"
+    },
+    {
+      "script": "grep -P -- 'a(?!b)'",
+      "stdin": "ab\na\nb\n"
+    },
+    {
+      "script": "grep -P -- '(?<=a)b'",
+      "stdin": "ab\na\nb\n"
+    },
+    {
+      "script": "grep -P -- '(?<!a)b'",
+      "stdin": "ab\na\nb\n"
+    }
+  ],
+  "tags": [
+    "errors",
+    "perl"
+  ],
+  "title": "Perl lookahead and lookbehind assertions are rejected with exit 2"
+}
