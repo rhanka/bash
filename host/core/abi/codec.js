@@ -4,8 +4,8 @@ import { PROFILES } from "../limits.js";
 
 const U32_MAX = 0xffffffff;
 const MIB = 1 << 20;
-const LOWER_BUDGET = 64 * MIB;
-const MAX_ONESHOT_BYTES = Math.max(...Object.values(PROFILES).map(({ oneshot }) => oneshot));
+export const LOWER_BUDGET = 64 * MIB;
+export const MAX_ONESHOT_BYTES = Math.max(...Object.values(PROFILES).map(({ oneshot }) => oneshot));
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const functionSource = Object.toString;
