@@ -198,7 +198,7 @@ test("the parser caps apply before the VM runs a stage", async () => {
   const tokens = await shell.exec("echo x\n".repeat(33_334));
   assert.equal(tokens.exitCode, 2);
   assert.equal(tokens.stdout, "");
-  assert.equal(tokens.stderr, "bash: syntax error: Parse error at 1:1: Too many tokens: 100002 exceeds limit of 100000\n");
+  assert.equal(tokens.stderr, "bash: syntax error: Parse error at 1:1: Too many tokens: 100003 exceeds limit of 100000\n");
   const nested = await shell.exec("{ ".repeat(201) + "echo x;" + " };".repeat(201));
   assert.equal(nested.exitCode, 2);
   assert.equal(nested.stdout, "");

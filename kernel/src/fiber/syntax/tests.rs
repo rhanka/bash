@@ -728,3 +728,216 @@ fn seeded_parser_fuzz_no_panic() {
         let _ = Ast::parse(&norm, 512, &b, &mut charge);
     }
 }
+
+// --- PR #21 review fixes: bounded recursion, heredoc errors, `[[` context, EOF token cap ---
+
+#[test]
+fn lexer_deep_nested_subst_and_quotes_bounded() {
+    for (label, input) in [
+        ("cmd_subst_5000", std::format!("echo {}", "$(".repeat(5000))),
+        ("arith_subst_5000", std::format!("echo {}", "$((".repeat(5000))),
+        ("dq_param_5000", std::format!("echo {}", "\"${{x:-".repeat(5000))),
+        ("legacy_arith_dq_5000", std::format!("echo {}", "$[\"".repeat(5000))),
+        ("array_cmd_subst_5000", std::format!("a=({}", "$(".repeat(5000))),
+        (
+            "balanced_cmd_subst_205",
+            std::format!("echo {}1{}", "$(echo ".repeat(205), ")".repeat(205)),
+        ),
+    ] {
+        let err = parse_err(&input);
+        assert!(
+            err.contains("Maximum parser nesting depth exceeded (200)"),
+            "{label}: unexpected err: {err}"
+        );
+    }
+}
+
+#[test]
+fn word_brace_and_param_recursion_bounded_and_charged() {
+    let brace_deep = std::format!("echo {}{}", "{,".repeat(5000), "}".repeat(5000));
+    assert!(parse_err(&brace_deep).contains("Maximum parser nesting depth exceeded (200)"));
+
+    let param_bangs = std::format!("echo ${{{}}}", "!".repeat(5000));
+    assert!(parse_err(&param_bangs).contains("Maximum parser nesting depth exceeded (200)"));
+
+    let param_nested = std::format!("echo {}a{}", "${x:-".repeat(5000), "}".repeat(5000));
+    assert!(parse_err(&param_nested).contains("Maximum parser nesting depth exceeded (200)"));
+
+    // Unclosed `{,` x 5000 must stay linear and not hang or overflow.
+    let unclosed_brace = std::format!("echo {}", "{,".repeat(5000));
+    let _ = parse_ok(&unclosed_brace);
+
+    // Work budget must be charged inside word/param/brace parsing.
+    crate::mem::testing::reset(CEIL);
+    let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+    let mut left = 25u64;
+    let mut charge = |u: u64| {
+        if left < u {
+            Err(())
+        } else {
+            left -= u;
+            Ok(())
+        }
+    };
+    let tight_brace = std::format!("echo {}{}", "{a,".repeat(40), "}".repeat(40));
+    assert!(matches!(
+        Ast::parse(tight_brace.as_bytes(), 1 << 20, &b, &mut charge),
+        Err(Error::Work)
+    ));
+}
+
+#[test]
+fn arith_and_cond_deep_chains_and_nesting_bounded() {
+    // Iterative chains succeed without stack overflow.
+    let unary_50k = std::format!("echo $(({}1))", "!".repeat(50_000));
+    let _ = parse_ok(&unary_50k);
+
+    let assign_5k = std::format!("(( {}1 ))", "a=".repeat(5_000));
+    let _ = parse_ok(&assign_5k);
+
+    let pow_5k = std::format!("(( {}2 ))", "2**".repeat(5_000));
+    let _ = parse_ok(&pow_5k);
+
+    let tern_alt_5k = std::format!("(( {}3 ))", "1?2:".repeat(5_000));
+    let _ = parse_ok(&tern_alt_5k);
+
+    let cond_not_50k = std::format!("[[ {}a ]]", "! ".repeat(50_000));
+    let _ = parse_ok(&cond_not_50k);
+
+    // True nesting constructs hit DEPTH_CAP (200).
+    let tern_cons = std::format!("(( {}2{} ))", "1?".repeat(500), ":3".repeat(500));
+    assert!(parse_err(&tern_cons).contains("Maximum parser nesting depth exceeded (200)"));
+
+    let sub_deep = std::format!("(( {}0{} ))", "a[".repeat(5000), "]".repeat(5000));
+    assert!(parse_err(&sub_deep).contains("Maximum parser nesting depth exceeded (200)"));
+
+    let nested_dp = std::format!("(( {}1{} ))", "$((".repeat(500), "))".repeat(500));
+    assert!(parse_err(&nested_dp).contains("Maximum parser nesting depth exceeded (200)"));
+
+    let nested_br = std::format!("(( {}1{} ))", "$[".repeat(500), "]".repeat(500));
+    assert!(parse_err(&nested_br).contains("Maximum parser nesting depth exceeded (200)"));
+}
+
+#[test]
+fn skip_newlines_propagates_heredoc_parse_work_and_mem_errors() {
+    // Parse-time bad substitution inside heredoc before `&&\n` and `|\n`
+    let err_and = parse_err("cat <<EOF &&\n${#x-y}\nEOF\necho ok\n");
+    assert!(err_and.contains("${#x-y}: bad substitution"), "got: {err_and}");
+
+    let err_pipe = parse_err("cat <<EOF |\n${#x-y}\nEOF\ncat\n");
+    assert!(err_pipe.contains("${#x-y}: bad substitution"), "got: {err_pipe}");
+
+    // Depth cap inside heredoc before `&&\n`
+    let deep_hd = std::format!(
+        "cat <<EOF &&\n{}1{}\nEOF\necho ok\n",
+        "$(echo ".repeat(205),
+        ")".repeat(205)
+    );
+    let err_depth = parse_err(&deep_hd);
+    assert!(
+        err_depth.contains("Maximum parser nesting depth exceeded (200)"),
+        "got: {err_depth}"
+    );
+
+    // Work limit inside heredoc before `&&\n` must return Error::Work, not be swallowed.
+    crate::mem::testing::reset(CEIL);
+    let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+    let hd_work_src = std::format!("cat <<EOF &&\n{}\nEOF\necho ok\n", "$x".repeat(200));
+    let mut left = 30u64;
+    let mut charge = |u: u64| {
+        if left < u {
+            Err(())
+        } else {
+            left -= u;
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        Ast::parse(hd_work_src.as_bytes(), 1 << 20, &b, &mut charge),
+        Err(Error::Work)
+    ));
+}
+
+#[test]
+fn dbrack_only_classified_in_command_position() {
+    // `echo [[; ]]`: `[[` is an argument word, so `]]` is a plain command word (not DBrackEnd).
+    let ast = parse_ok("echo [[; ]]");
+    let stmts = &ast.stmt_lists[ast.root.range()];
+    assert_eq!(stmts.len(), 2);
+    let s1 = ast.stmts[stmts[1].0 as usize];
+    let p1 = ast.pipelines[s1.pipelines.start as usize];
+    let c1 = ast.commands[ast.cmd_lists[p1.commands.start as usize].0 as usize];
+    assert!(matches!(c1, Command::Simple(sc) if sc.name.is_some()));
+
+    // `echo [[; (( x = 1 ))`: `cond_depth` stays 0, so `((` still parses as Arithmetic.
+    let ast2 = parse_ok("echo [[; (( x = 1 ))");
+    let stmts2 = &ast2.stmt_lists[ast2.root.range()];
+    assert_eq!(stmts2.len(), 2);
+    let s2 = ast2.stmts[stmts2[1].0 as usize];
+    let p2 = ast2.pipelines[s2.pipelines.start as usize];
+    let c2 = ast2.commands[ast2.cmd_lists[p2.commands.start as usize].0 as usize];
+    assert!(matches!(c2, Command::Arithmetic { .. }));
+
+    // `echo [[; cat <(echo hi)`: `<(...)` still parses as ProcessSubst.
+    let ast3 = parse_ok("echo [[; cat <(echo hi)");
+    let stmts3 = &ast3.stmt_lists[ast3.root.range()];
+    assert_eq!(stmts3.len(), 2);
+    let s3 = ast3.stmts[stmts3[1].0 as usize];
+    let p3 = ast3.pipelines[s3.pipelines.start as usize];
+    let Command::Simple(sc3) = ast3.commands[ast3.cmd_lists[p3.commands.start as usize].0 as usize] else {
+        panic!("expected Simple");
+    };
+    let arg_w = ast3.words[ast3.word_lists[sc3.args.start as usize].0 as usize];
+    assert!(matches!(
+        ast3.parts[arg_w.parts.start as usize],
+        WordPart::ProcessSubst { output: false, .. }
+    ));
+
+    // Nested `[[` inside `[[ ... ]]` and command-position forms (`f() [[ ... ]]`, `function g [[ ... ]]`, `time -p [[ ... ]]`).
+    let _ = parse_ok("[[ ( [[ == [[ ) ]]");
+    let _ = parse_ok("f() [[ -n a ]]");
+    let _ = parse_ok("function g [[ -n a ]]");
+    let _ = parse_ok("time -p [[ -n a ]]");
+    let _ = parse_ok("case x in a) [[ -n a ]] ;; esac");
+}
+
+#[test]
+fn top_level_token_cap_includes_synthetic_eof() {
+    let over_1 = "a ".repeat(100_001);
+    let err = parse_err(&over_1);
+    assert!(
+        err.contains("Too many tokens: 100002 exceeds limit of 100000"),
+        "got: {err}"
+    );
+
+    let at_cap_plus_eof = "a ".repeat(100_000);
+    let err2 = parse_err(&at_cap_plus_eof);
+    assert!(
+        err2.contains("Too many tokens: 100001 exceeds limit of 100000"),
+        "got: {err2}"
+    );
+}
+
+#[test]
+fn heredoc_unclosed_substitutions_diagnosed() {
+    let err_brace = parse_err("cat <<EOF\n${x\nEOF\n");
+    assert!(
+        err_brace.contains("Parse error at 0:0: unexpected EOF while looking for matching '}'"),
+        "got: {err_brace}"
+    );
+
+    let err_cmd = parse_err("cat <<EOF\n$(echo hi\nEOF\n");
+    assert!(
+        err_cmd.contains("unexpected EOF while looking for matching `)'"),
+        "got: {err_cmd}"
+    );
+
+    let err_bt = parse_err("cat <<EOF\n`echo hi\nEOF\n");
+    assert!(
+        err_bt.contains("unexpected EOF while looking for matching ``'"),
+        "got: {err_bt}"
+    );
+
+    // Quoted heredoc treats unclosed `${` / `$(` literally without error.
+    let _ = parse_ok("cat <<'EOF'\n${x\n$(echo hi\n`echo hi\nEOF\n");
+}

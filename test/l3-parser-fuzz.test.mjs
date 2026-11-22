@@ -66,7 +66,10 @@ test("deterministic seeded parser fuzz slice (>= 2500 inputs, 0 traps, < 50ms/in
     }
     if (i % 25 === 0) s = "(".repeat(205) + "a" + ")".repeat(205);
     else if (i % 25 === 1) s = "{ ".repeat(205) + "a;" + " }".repeat(205);
-    else if (i % 25 === 2) s = "${".repeat(40) + "x";
+    else if (i % 25 === 2) s = "${".repeat(500) + "x";
+    else if (i % 25 === 3) s = "$(".repeat(500) + "a";
+    else if (i % 25 === 4) s = "{,".repeat(500) + "}".repeat(500);
+    else if (i % 25 === 5) s = "(( " + "a[".repeat(500) + "0" + "]".repeat(500) + " ))";
     inputs.push(s);
   }
 
