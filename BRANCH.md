@@ -51,6 +51,7 @@ ANSI-C `$'...'` decoding.
   - `harness/**`
   - `test/cases/l3/**`
   - `test/parity/exclusions.json`
+  - `test/l2-limits.test.mjs`
   - `DIVERGENCES.md`
 - **Exception process**:
   - Declare exception ID `BRxx-EXn` in `## Feedback Loop` before touching any conditional/forbidden path.
@@ -61,6 +62,10 @@ ANSI-C `$'...'` decoding.
 - subagent/agent: `blocked` / `deferred` / `cancelled` / `attention`
 - conductor/owner: `clarification` / `acknowledge` / `refuse`
 - `BRANCH.md` itself is written in the first commit (allowed path, no exception).
+- `BR3-EX1` (`test/l2-limits.test.mjs`):
+  - **Reason:** L3 adds the `just-bash@3.6.0` top-level statement iteration cap (`> 10_000` statements -> exit `2`, `Parser stuck: too many iterations (>10000)` per `spec/lots/L3.md` sections 6.1 and 9.3). In `test/l2-limits.test.mjs`, `commandPressure(cap)` previously used a flat `"echo x\n".repeat(cap + 1)` for `hardened` (`10_001` statements) and `micro` (`25_001` statements) because L2 only enforced the `100_000` token cap.
+  - **Impact:** One-line threshold update in `commandPressure` (`cap + 1 <= 10_000 && ...`) so `hardened` and `micro` use the existing binary-tree call generator (`f0..fN`) already used by `contain` and `normal`, keeping all 4 profiles testing `maxCommandCount` end-to-end.
+  - **Rollback:** Revert the single line in `test/l2-limits.test.mjs`.
 - `DIVERGENCES.md` (conditional path, additive rows only): no `BRxx-EXn` needed unless a
   shared-file edit is required; L3 records the `time`-zeros shape divergence and the
   never-throw-out-of-exec glob policy there, both additive single-row edits. Owner decision
@@ -69,52 +74,70 @@ ANSI-C `$'...'` decoding.
 
 ## Plan / Todo (lot-based)
 
-- [ ] **Lot 0 — Baseline & constraints**
+- [x] **Lot 0 — Baseline & constraints**
   - [x] Confirm worktree `tmp/l3-parser` and `harness check branch`.
   - [x] Confirm scope boundaries and declare `BRxx-EXn` exceptions if needed (none).
-  - [ ] Write `BRANCH.md` (this file) and commit it first.
-- [ ] **Lot 1 — `syntax` arena AST + full lexer**
-  - [ ] Flat-arena `Ast` per spec section 4 (all `KVec` tables, `Copy` id handles).
-  - [ ] Multi-heredoc `normalize` FIFO queue (spec 5.2).
-  - [ ] Full lexer: operators, reserved words, comments, continuations, all quoting
+  - [x] Write `BRANCH.md` (this file) and commit it first.
+- [x] **Lot 1 — `syntax` arena AST + full lexer**
+  - [x] Flat-arena `Ast` per spec section 4 (all `KVec` tables, `Copy` id handles).
+  - [x] Multi-heredoc `normalize` FIFO queue (spec 5.2).
+  - [x] Full lexer: operators, reserved words, comments, continuations, all quoting
     forms, `${...}`/`$(...)`/`$((...))`/backtick/process-sub scanning, heredoc bodies.
-  - [ ] Lot gate: `cargo test --lib` new AST unit tests green.
-- [ ] **Lot 2 — Full parser + budgets + exact diagnostics**
-  - [ ] All 12 command kinds, pipelines, lists, deferred root `}`/`)` errors.
-  - [ ] Word/parameter/brace/tilde/glob, arithmetic, and `[[ ]]` conditional ASTs.
-  - [ ] Token/depth/iteration caps with exact messages; `Error::Lexer`/`Error::Parser`
+  - [x] Lot gate: `cargo test --lib` new AST unit tests green.
+- [x] **Lot 2 — Full parser + budgets + exact diagnostics**
+  - [x] All 12 command kinds, pipelines, lists, deferred root `}`/`)` errors.
+  - [x] Word/parameter/brace/tilde/glob, arithmetic, and `[[ ]]` conditional ASTs.
+  - [x] Token/depth/iteration caps with exact messages; `Error::Lexer`/`Error::Parser`
     display lines and `Fiber::prepare` mapping.
-  - [ ] Lot gate: error-case oracle snapshots match byte-for-byte.
-- [ ] **Lot 3 — VM + expansion extensions**
-  - [ ] `If`/`For`/`While`/`Until`/`Subshell`/`Group`/`FunctionDef`/`time` frames,
+  - [x] Lot gate: error-case oracle snapshots match byte-for-byte.
+- [x] **Lot 3 — VM + expansion extensions**
+  - [x] `If`/`For`/`While`/`Until`/`Subshell`/`Group`/`FunctionDef`/`time` frames,
     fd-0 heredoc/herestring stdin, empty `Simple` no-op, deferred-error trap,
     `$'...'` expansion, `bash:cmd:*` coverage hits.
-  - [ ] Lot gate: runtime oracle cases pass (`if`, `for`, loops, subshell, functions,
+  - [x] Lot gate: runtime oracle cases pass (`if`, `for`, loops, subshell, functions,
     heredoc stdin, ANSI-C).
-- [ ] **Lot 4 — Suites, gates, and report points**
-  - [ ] `test/parity/l3.test.mjs` (36/36, 0 stale, 0 excluded, 0 not-covered),
+- [x] **Lot 4 — Suites, gates, and report points**
+  - [x] `test/parity/l3.test.mjs` (36/36, 0 stale, 0 excluded, 0 not-covered),
     `test/l3-caps.test.mjs`, `test/l3-coverage.test.mjs`,
-    `test/l3-parser-fuzz.test.mjs` + native fuzz slice (>= 60 AST unit tests,
-    >= 2 500 fuzz inputs).
-  - [ ] Record in this file: arena footprint (`size_of` on `wasm32`), core Wasm size
+    `test/l3-parser-fuzz.test.mjs` + native fuzz slice (82 `fiber::syntax` tests,
+    2 500 JS + 2 500 native fuzz inputs).
+  - [x] Record in this file: arena footprint (`size_of` on `wasm32`), core Wasm size
     delta, parity/fuzz counts, L4/L5 handoff table.
-  - [ ] Lot gate: `make check` green + `harness check scope` pass.
+  - [x] Lot gate: `make check` green + `harness check scope` pass.
 - [ ] **Lot N — Final validation**
-  - [ ] `make check`
+  - [x] `make check`
   - [ ] PR body = this `BRANCH.md`; CI green on the PR.
   - [ ] Owner sign-off; remove `BRANCH.md` in the last commit before merge.
 
 ## Points the builder must confirm and report (spec section 10)
 
-1. **AST arena footprint and zero-recursion drop:** exact `size_of` of `Command`, `Stmt`,
-   `WordPart`, `ArithExpr`, and `CondId`-target `CondExpr` on `wasm32`; `Drop for Ast`
-   frees flat vectors without recursion; 200-deep scripts run inside the Wasm call stack.
-2. **Core Wasm size delta:** `dist/js/kernel/kernel.core.wasm` raw and gzip byte delta added
-   by L3 against the Gate L2 `1 500 000 B raw / 700 000 B gzip` budget.
-3. **Parity and fuzz counts:** `36/36` on `test/parity/l3.test.mjs`, `30/30` on
-   `test/parity/l2.test.mjs`, native AST test count, seeded fuzz input count + wall-clock
-   runtime in `make check`.
-4. **Handoff table for L4 and L5:** exact `syntax::Ast` entry points L4 will consume
-   (`ParamExpand`, `CommandSubst`, `ArithExpand`, `ProcessSubst`, `BraceExpand`,
-   `TildeExpand`, `Glob`, `ArithExpr`) and L5 will consume (`Redir`,
-   `Assign::subscript`/`array`, `Stmt::source_span`, `CStyleFor`, `Case`, `Conditional`).
+1. **AST arena footprint and zero-recursion drop:**
+   All AST node types contain only fixed-width scalars (`u32`, `i64`, `u8`, `bool`, `Span`,
+   typed `*Id` handles) — zero pointers, zero `usize`, zero `KBox` trees — so sizes are
+   identical on `wasm32` and host targets and `Drop for Ast` frees flat `KVec` arenas with
+   O(1) stack depth:
+   - `size_of::<Command>()` = **44 B**
+   - `size_of::<Stmt>()` = **44 B**
+   - `size_of::<WordPart>()` = **16 B**
+   - `size_of::<ArithExpr>()` = **40 B**
+   - `size_of::<CondExpr>()` = **12 B**
+   200-deep `{ }`, `( )`, `if`, `[[ ( ... ) ]]`, and `$(( (...) ))` scripts execute cleanly
+   within the Wasm call stack; depth 201 exits `2` with `Maximum parser nesting depth exceeded (200)`.
+2. **Core Wasm size delta:**
+   - Baseline `dist/js/kernel/kernel.core.wasm`: `247 498 B raw` / `89 259 B gzip`
+   - After L3 `dist/js/kernel/kernel.core.wasm`: `399 671 B raw` / `133 859 B gzip`
+   - Delta: `+152 173 B raw` / `+44 600 B gzip` (well under Gate L2 budget `1 500 000 B raw` / `700 000 B gzip`).
+3. **Parity and fuzz counts:**
+   - `test/parity/l3.test.mjs`: **36/36** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
+   - `test/parity/l2.test.mjs`: **30/30** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
+   - Native Rust AST & syntax tests (`fiber::syntax::tests`): **82** tests (81 AST/unit + 1 native 2 500-input seeded fuzz test).
+   - JS seeded parser fuzz slice (`test/l3-parser-fuzz.test.mjs`, seed `0x5345_4E54_4C33_465A`): **2 500** inputs (1 500 grammar-mutated + 1 000 arbitrary byte/UTF-8/surrogate/deep-nesting), **0 traps**, `~295 ms` total (`< 3 s` budget).
+4. **Handoff table for L4 and L5:**
+   | Downstream lot | `kernel::fiber::syntax::Ast` entry points |
+   |---|---|
+   | **L4 (Expansions & arithmetic)** | `WordPart::ParamExpand(u32)` -> `Ast::param_expands` (all 15 `ParamOp` variants), `WordPart::CommandSubst { body, backtick }`, `WordPart::ArithExpand(ArithId)`, `WordPart::ProcessSubst { body, output }`, `WordPart::BraceExpand(Span)` -> `Ast::brace_items` (`BraceItem::Word`/`Range`), `WordPart::TildeExpand { user }`, `WordPart::Glob { pattern }`, `Ast::arith_nodes` / `Ast::arith_lists` (`ArithExpr` incl. bases 2..=64, `DynamicBase`, `DynamicNumber`, `ArrayElement`, `NumberSubscript`, `DoubleSubscript`, `SingleQuote`, `Concat`, `SyntaxError`) |
+   | **L5 (Redirections, arrays, control flow)** | `Ast::redirs` (`Redir { fd, fd_var, op: RedirOp, target: RedirTarget }`), `Assign { name, subscript, value, array, append }`, `Stmt::source_span` / `Stmt::background` / `Stmt::line`, `Command::CStyleFor`, `Command::Case` -> `Ast::case_items` (`CaseItem` with `DoubleSemi`/`SemiAnd`/`SemiSemiAnd`), `Command::Arithmetic`, `Command::Conditional` -> `Ast::cond_nodes` (`CondExpr` with all 25 unary & 14 binary ops, `=~`, `!(...)`) |
+5. **Deviations & `DIVERGENCES.md` candidates:**
+   - `time` / `time -p` prints deterministic zero timings (`0m0.000s` / `0.00`) in the exact reference shapes (spec section 7 point 9; candidate for `DIVERGENCES.md`).
+   - Top-level token counter excludes the synthetic `EOF` token so the committed read-only `test/l2-limits.test.mjs` assertion (`"echo x\n".repeat(33_334)` -> `100002`) stays green alongside L3 token caps.
+   - `test/parity/l3.test.mjs` wraps `sentropic-adapter.mjs` with a 5-line stdin-only custom `cat` command for the three L3 heredoc/pipeline oracle cases until L7a adds `kernel/src/cmd/cat.rs`; `true`, `false`, `:`, `[`, `test` are dispatched as shell builtins in `vm.rs` without touching the read-only `kernel/src/cmd/` registry.
