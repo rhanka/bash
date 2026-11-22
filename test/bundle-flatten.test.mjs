@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { flattenShared, splitCode } from "../tools/bundle.mjs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { bundlePackage, collectDecls, flattenShared, rewriteLazyImports, splitCode } from "../tools/bundle.mjs";
+import { toolsDir } from "../tools/lib.mjs";
+import { scratch } from "./helpers.mjs";
 
 const ROOT = "/repo";
 const id = (name) => ROOT + "/" + name;
@@ -106,4 +111,98 @@ test("dollar-prefixed and dollar-suffixed names are distinct identifiers", () =>
   ]);
   assert.match(code, /\[CHUNK\$9, \$CHUNK\]/);
   assert.match(code, /const use = CHUNK \+ 1;/);
+});
+
+test("destructuring, single-param arrow and generator bindings are renamed before import capture", () => {
+  const { code } = flatten([
+    ["p.js", `export const val = 10;`],
+    ["q.js", [
+      `import { val as v } from "./p.js";`,
+      `export function run(obj, arr) {`,
+      `  const { val } = obj;`,
+      `  const [x, { k: val2 }] = arr;`,
+      `  const f = val => val + v + val2;`,
+      `  function* g(...val) { yield val.length + v; }`,
+      `  return val + x + f(1) + g(2, 3).next().value;`,
+      `}`,
+    ].join("\n"), [{ spec: "./p.js", namespace: null, names: [{ imported: "val", local: "v" }], target: id("p.js") }]],
+  ]);
+  const run = new Function(code + "\nreturn run;")();
+  assert.equal(run({ val: 4 }, [5, { k: 6 }]), 4 + 5 + (1 + 10 + 6) + (2 + 10));
+});
+
+test("collectDecls ignores property values and member accesses", () => {
+  const decls = collectDecls(`const o = { k: val, val: 1 }; return o.val + fn(val);`);
+  assert.equal(decls.has("o"), true);
+  assert.equal(decls.has("val"), false);
+});
+
+test("rewriteLazyImports rewrites single and double quoted import() calls without touching other strings", () => {
+  const src = [
+    `const msg = "./ext.js";`,
+    `const a = () => import('./ext.js');`,
+    `const b = () => import( /* keep */ "./ext.js" );`,
+    `export { msg, a, b };`,
+  ].join("\n");
+  const out = rewriteLazyImports(src, new Map([["./ext.js", "./core/ext.js"]]));
+  assert.match(out, /const msg = "\.\/ext\.js";/);
+  assert.match(out, /import\("\.\/core\/ext\.js"\)/);
+  assert.match(out, /import\( \/\* keep \*\/ "\.\/core\/ext\.js" \)/);
+});
+
+test("bundlePackage recurses into lazy chunks and rewrites adapters and nested lazy imports", async (t) => {
+  if (!existsSync(join(toolsDir(), "npm", "node_modules", "oxc-minify", "index.js"))) {
+    t.skip("oxc-minify not staged");
+    return;
+  }
+  const root = scratch("bundle-lazy-recursive");
+  for (const dir of ["host/core", "host/node", "dist/js"]) mkdirSync(join(root, dir), { recursive: true });
+  writeFileSync(join(root, "host/browser.js"), `import { run, runNode } from "./core/main.js";\nexport { run, runNode };\n`);
+  writeFileSync(join(root, "host/node/load.js"), `export const load = () => 1;\n`);
+  writeFileSync(join(root, "host/node/adapter.js"), `export async function useNodeLazy() { return (await import("../core/node-lazy.js")).tag; }\n`);
+  writeFileSync(join(root, "host/index.js"), [
+    `import { load } from "./node/load.js";`,
+    `import { run, runNode } from "./core/main.js";`,
+    `export { run, runNode };`,
+    `export { useNodeLazy } from "./node/adapter.js";`,
+    `export const init = load;`,
+  ].join("\n"));
+  writeFileSync(join(root, "host/core/main.js"), [
+    `export async function run() { return (await import("./lazy-a.js")).val(); }`,
+    `export function runNode() { return "ok"; }`,
+  ].join("\n"));
+  writeFileSync(join(root, "host/core/lazy-a.js"), [
+    `import { helper } from "./lazy-helper.js";`,
+    `export async function val() { return await helper(); }`,
+  ].join("\n"));
+  writeFileSync(join(root, "host/core/lazy-helper.js"), [
+    `export async function helper() { return "a+" + (await import("./lazy-b.js")).leaf; }`,
+  ].join("\n"));
+  writeFileSync(join(root, "host/core/lazy-b.js"), `export const leaf = "b";\n`);
+  writeFileSync(join(root, "host/core/node-lazy.js"), `export const tag = "node-lazy";\n`);
+
+  const outJs = join(root, "dist", "js");
+  await bundlePackage({
+    root,
+    indexEntry: join(root, "host/index.js"),
+    browserEntry: join(root, "host/browser.js"),
+    loadEntry: join(root, "host/node/load.js"),
+    outShared: join(outJs, "shared.js"),
+    outIndex: join(outJs, "index.js"),
+    outBrowser: join(outJs, "browser.js"),
+    outLoad: join(outJs, "node/load.js"),
+  });
+
+  const shared = readFileSync(join(outJs, "shared.js"), "utf8");
+  const lazyA = readFileSync(join(outJs, "core/lazy-a.js"), "utf8");
+  const lazyB = readFileSync(join(outJs, "core/lazy-b.js"), "utf8");
+  const adapters = readFileSync(join(outJs, "node/adapters.js"), "utf8");
+  assert.match(shared, /import\(["']\.\/core\/lazy-a\.js["']\)/);
+  assert.match(lazyA, /import\(["']\.\/lazy-b\.js["']\)/);
+  assert.match(adapters, /import\(["']\.\.\/core\/node-lazy\.js["']\)/);
+  assert.ok(lazyB.length > 0);
+  const browserMod = await import(pathToFileURL(join(outJs, "browser.js")).href);
+  const indexMod = await import(pathToFileURL(join(outJs, "index.js")).href);
+  assert.equal(await browserMod.run(), "a+b");
+  assert.equal(await indexMod.useNodeLazy(), "node-lazy");
 });

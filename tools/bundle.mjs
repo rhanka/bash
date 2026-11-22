@@ -392,24 +392,198 @@ function replaceIdent(body, oldName, newName) {
   }).join("");
 }
 
-function hasDecl(body, word) {
-  // True when `word` is declared (not merely a property or method name) in the body:
-  // a shadowing binding that would capture a direct import replacement. Over-approximating
-  // with `(`/`,` triggers is safe (an extra alias), under-approximating is not.
-  const esc = word.replace(/[$]/g, "\\$&");
-  const re = new RegExp("(?:const|let|var|function|class|catch|\\(|,)\\s*" + esc + "\\b", "g");
-  for (const seg of splitCode(body)) {
-    if (!seg.code) continue;
-    if (re.test(seg.text)) return true;
+// Tokenizes code segments of `src` (replacing strings, regexes and template text with a LIT
+// marker while keeping template interpolations as code) so binding-declaration scanning sees
+// exact syntax without regex guessing.
+function tokenizeDecls(src) {
+  const tokens = [];
+  for (const seg of splitCode(src)) {
+    if (!seg.code) {
+      // Comments are skipped (no token); strings, regexes and template literals become LIT so
+      // adjacent identifiers cannot merge across them.
+      if (!seg.text.startsWith("//") && !seg.text.startsWith("/*")) tokens.push({ type: "lit", text: "" });
+      continue;
+    }
+    const text = seg.text;
+    let i = 0;
+    while (i < text.length) {
+      const c = text[i];
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") { i++; continue; }
+      if ((c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$") {
+        let j = i + 1;
+        while (j < text.length && /[\w$]/.test(text[j])) j++;
+        tokens.push({ type: "id", text: text.slice(i, j) });
+        i = j;
+      } else if (c >= "0" && c <= "9") {
+        let j = i + 1;
+        while (j < text.length && /[\w.]/.test(text[j])) j++;
+        tokens.push({ type: "lit", text: text.slice(i, j) });
+        i = j;
+      } else if (text.startsWith("...", i)) {
+        tokens.push({ type: "punc", text: "..." });
+        i += 3;
+      } else if (text.startsWith("=>", i)) {
+        tokens.push({ type: "punc", text: "=>" });
+        i += 2;
+      } else if (text.startsWith("?.", i)) {
+        tokens.push({ type: "punc", text: "?." });
+        i += 2;
+      } else {
+        tokens.push({ type: "punc", text: c });
+        i++;
+      }
+    }
   }
-  return false;
+  return tokens;
 }
 
-function hasWord(body, word) {
-  return hasDecl(body, word);
+function collectDecls(body) {
+  const tokens = tokenizeDecls(body);
+  const decls = new Set();
+  const n = tokens.length;
+  const isPunc = (i, s) => i < n && tokens[i].type === "punc" && tokens[i].text === s;
+  const isPropAccess = (i) => i > 0 && (isPunc(i - 1, ".") || isPunc(i - 1, "?."));
+
+  // Finds the matching closer `)` / `]` / `}` starting from the opener at `openIdx`.
+  function matchClose(openIdx) {
+    const open = tokens[openIdx].text;
+    const close = open === "(" ? ")" : open === "[" ? "]" : "}";
+    let depth = 0;
+    for (let j = openIdx; j < n; j++) {
+      if (tokens[j].type !== "punc") continue;
+      if (tokens[j].text === open) depth++;
+      else if (tokens[j].text === close && --depth === 0) return j;
+    }
+    return n - 1;
+  }
+
+  // Skips an initializer expression (`= ...`) inside a pattern or declarator up to one of
+  // `stops` at depth 0, returning the index of the stopping token.
+  function skipInit(i, stops) {
+    let dParen = 0, dBrack = 0, dBrace = 0;
+    while (i < n) {
+      const t = tokens[i];
+      if (t.type === "punc") {
+        if (dParen === 0 && dBrack === 0 && dBrace === 0 && stops.includes(t.text)) return i;
+        if (t.text === "(") dParen++;
+        else if (t.text === ")") { if (dParen === 0) return i; dParen--; }
+        else if (t.text === "[") dBrack++;
+        else if (t.text === "]") { if (dBrack === 0) return i; dBrack--; }
+        else if (t.text === "{") dBrace++;
+        else if (t.text === "}") { if (dBrace === 0) return i; dBrace--; }
+      }
+      i++;
+    }
+    return i;
+  }
+
+  // Parses a binding pattern starting at `i` and returns the index after the pattern.
+  function parsePattern(i) {
+    if (i >= n) return i;
+    if (tokens[i].type === "id") {
+      decls.add(tokens[i].text);
+      return i + 1;
+    }
+    if (isPunc(i, "[")) {
+      i++;
+      while (i < n && !isPunc(i, "]")) {
+        if (isPunc(i, ",")) { i++; continue; }
+        if (isPunc(i, "...")) i++;
+        i = parsePattern(i);
+        if (isPunc(i, "=")) i = skipInit(i + 1, [",", "]"]);
+        if (isPunc(i, ",")) i++;
+      }
+      return isPunc(i, "]") ? i + 1 : i;
+    }
+    if (isPunc(i, "{")) {
+      i++;
+      while (i < n && !isPunc(i, "}")) {
+        if (isPunc(i, ",")) { i++; continue; }
+        if (isPunc(i, "...")) {
+          i++;
+          if (i < n && tokens[i].type === "id") decls.add(tokens[i++].text);
+          if (isPunc(i, ",")) i++;
+          continue;
+        }
+        if (isPunc(i, "[")) {
+          i = matchClose(i) + 1;
+          if (isPunc(i, ":")) i = parsePattern(i + 1);
+        } else if (i + 1 < n && isPunc(i + 1, ":")) {
+          i = parsePattern(i + 2);
+        } else if (tokens[i].type === "id") {
+          decls.add(tokens[i++].text);
+        } else {
+          i++;
+        }
+        if (isPunc(i, "=")) i = skipInit(i + 1, [",", "}"]);
+        if (isPunc(i, ",")) i++;
+      }
+      return isPunc(i, "}") ? i + 1 : i;
+    }
+    return i;
+  }
+
+  function parseParams(openIdx) {
+    let i = openIdx + 1;
+    const end = matchClose(openIdx);
+    while (i < end) {
+      if (isPunc(i, ",")) { i++; continue; }
+      if (isPunc(i, "...")) i++;
+      const next = parsePattern(i);
+      i = next === i ? i + 1 : next;
+      if (i < end && isPunc(i, "=")) i = skipInit(i + 1, [",", ")"]);
+      if (i < end && isPunc(i, ",")) i++;
+    }
+    return end + 1;
+  }
+
+  const NON_METHOD = new Set(["if", "while", "for", "switch", "with", "catch"]);
+  for (let i = 0; i < n; i++) {
+    const t = tokens[i];
+    if (t.type !== "id" && !isPunc(i, "(")) continue;
+    if (t.type === "id" && !isPropAccess(i)) {
+      if (t.text === "const" || t.text === "var" ||
+          (t.text === "let" && i + 1 < n && (tokens[i + 1].type === "id" || isPunc(i + 1, "{") || isPunc(i + 1, "[")))) {
+        let j = i + 1;
+        while (j < n) {
+          const next = parsePattern(j);
+          if (next === j) break;
+          j = next;
+          if (isPunc(j, "=")) j = skipInit(j + 1, [",", ";", ")"]);
+          if (isPunc(j, ",")) { j++; continue; }
+          break;
+        }
+      } else if (t.text === "function") {
+        let j = i + 1;
+        if (isPunc(j, "*")) j++;
+        if (j < n && tokens[j].type === "id") decls.add(tokens[j++].text);
+        if (isPunc(j, "(")) parseParams(j);
+      } else if (t.text === "class") {
+        if (i + 1 < n && tokens[i + 1].type === "id" &&
+            tokens[i + 1].text !== "extends") {
+          decls.add(tokens[i + 1].text);
+        }
+      } else if (t.text === "catch") {
+        if (isPunc(i + 1, "(")) parseParams(i + 1);
+      } else if (isPunc(i + 1, "=>")) {
+        decls.add(t.text);
+      } else if (isPunc(i + 1, "(") && !NON_METHOD.has(t.text)) {
+        const close = matchClose(i + 1);
+        if (isPunc(close + 1, "{")) parseParams(i + 1);
+      }
+    } else if (isPunc(i, "(")) {
+      const close = matchClose(i);
+      if (isPunc(close + 1, "=>")) parseParams(i);
+    }
+  }
+  return decls;
 }
 
-function flattenShared(modules, sharedIds, root, externals = new Map()) {
+function hasWord(decls, word) {
+  return decls.has(word);
+}
+
+function flattenShared(modules, sharedIds, root, externals = new Map(), lazyRewritesByModule = null) {
   const order = [...sharedIds];
   const set = new Set(sharedIds);
   const used = new Set();
@@ -474,16 +648,19 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
       }
     }
     let body = stripExportKeyword(stripImportLines(rec.src)).trim();
+    const lazyMap = lazyRewritesByModule?.get(id);
+    if (lazyMap) body = rewriteLazyImports(body, lazyMap);
     for (const [oldName, newName] of rename) body = replaceIdent(body, oldName, newName);
     // Imports become direct references. When the provider name already occurs as a shadowing
     // nested binding, rename that nested binding first so the replacement cannot be captured.
+    const decls = collectDecls(body);
     for (const imp of bindings) {
       if (imp.namespace || externals.has(imp.target)) continue;
       for (const { imported, local } of imp.names) {
         const flat = mapping.get(imp.target + "::" + imported);
         if (!flat) throw new Error(rec.file + ": provider not yet flattened for " + imported);
         if (local === flat) continue;
-        if (hasWord(body, flat)) {
+        if (hasWord(decls, flat)) {
           let n = 1;
           let candidate = flat + "$" + n;
           while (used.has(candidate)) {
@@ -491,6 +668,8 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
             candidate = flat + "$" + n;
           }
           body = replaceIdent(body, flat, candidate);
+          decls.delete(flat);
+          decls.add(candidate);
           used.add(candidate);
         }
         body = replaceIdent(body, local, flat);
@@ -609,7 +788,7 @@ async function minifyFile(name, code) {
 // Pure units exported for the collision-fixture suite (test/bundle-flatten.test.mjs):
 // splitCode proves renames never touch strings, comments, template raw text or regex
 // literals; flattenShared proves cross-module collisions alpha-rename instead of colliding.
-export { splitCode, flattenShared };
+export { splitCode, flattenShared, collectDecls, rewriteLazyImports };
 
 // Collects static relative `import()` specifiers (lazy chunks) from one source.
 // Comments are stripped first (JSDoc type imports such as
@@ -622,6 +801,53 @@ function lazySpecs(src) {
   const re = /\bimport\s*\(\s*(['"])(\.[^'"]*?\.js)\1\s*\)/g;
   let m;
   while ((m = re.exec(stripped)) !== null) out.push(m[2]);
+  return out;
+}
+
+// Rewrites literal `import("./...")` specifiers inside one module body using `splitCode` so
+// non-import strings, comments, template raw text and regex literals are never touched, and
+// both single- and double-quoted specifiers are rewritten per originating module.
+function rewriteLazyImports(src, rewrites) {
+  if (!rewrites || rewrites.size === 0) return src;
+  const segs = splitCode(src);
+  const isWsOrComment = (seg) =>
+    seg.code ? /^\s*$/.test(seg.text) : (seg.text.startsWith("//") || seg.text.startsWith("/*"));
+  const prevCodeText = (idx) => {
+    let acc = "";
+    for (let j = idx - 1; j >= 0 && acc.length < 32; j--) {
+      if (segs[j].code) acc = segs[j].text + acc;
+      else if (!segs[j].text.startsWith("//") && !segs[j].text.startsWith("/*")) break;
+    }
+    return acc;
+  };
+  const nextCodeText = (idx) => {
+    let acc = "";
+    for (let j = idx + 1; j < segs.length && acc.length < 16; j++) {
+      if (segs[j].code) acc += segs[j].text;
+      else if (!segs[j].text.startsWith("//") && !segs[j].text.startsWith("/*")) break;
+    }
+    return acc;
+  };
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    if (seg.code || isWsOrComment(seg)) continue;
+    const q = seg.text[0];
+    if (q !== '"' && q !== "'") continue;
+    const spec = seg.text.slice(1, -1);
+    const replacement = rewrites.get(spec);
+    if (!replacement) continue;
+    if (/\bimport\s*\(\s*$/.test(prevCodeText(i)) && /^\s*\)/.test(nextCodeText(i))) {
+      seg.text = JSON.stringify(replacement);
+    }
+  }
+  return segs.map((s) => s.text).join("");
+}
+
+function restoreLazyQuotes(minified, relPaths) {
+  let out = minified;
+  for (const runtimeRel of relPaths) {
+    out = out.split("import(`" + runtimeRel + "`)").join("import(" + JSON.stringify(runtimeRel) + ")");
+  }
   return out;
 }
 
@@ -671,32 +897,75 @@ export async function bundlePackage({
   // helpers) stay out of the shared chunk and ship as separate minified files.
   // They load only when used (`fs` given, `isolation` set, or a host mount),
   // keeping them off the cold path while staying G2-clean.
-  const lazyIds = [];
+  const jsDir = dirname(outShared);
+  const hostDir = join(root, "host");
+  const outAdapters = join(jsDir, "node", "adapters.js");
+  // Lazy chunks: static relative `import()` targets (L7b fs-batch, L7c volume
+  // helpers, and any nested lazy chunks) stay out of the shared chunk and ship as
+  // separate minified files. They load only when used, keeping them off the cold
+  // path while staying G2-clean.
   const lazySeen = new Set();
   const lazyQueue = [];
-  for (const id of [...browserClosure, ...indexClosure]) {
-    const rec = modules.get(id);
-    if (!rec || rec.src === null) continue;
+  const lazyEdges = [];
+  const enqueueLazy = (fromId, runtimeOut, rec) => {
+    if (!rec || rec.src === null) return;
     for (const spec of lazySpecs(rec.src)) {
-      let target = resolveSpec(id, spec);
-      if (target === alias.from) target = alias.to;
-      if (sharedIds.has(target) || externals.has(target) || lazySeen.has(target)) continue;
-      if (id === browserEntry || id === indexEntry || id === loadEntry) {
-        throw new Error(relative(root, id) + ": lazy chunk entry is not supported for " + spec);
+      if (fromId === browserEntry || fromId === indexEntry || fromId === loadEntry) {
+        throw new Error(relative(root, fromId) + ": lazy chunk entry is not supported for " + spec);
       }
-      lazySeen.add(target);
-      lazyQueue.push([id, spec, target]);
+      let target = resolveSpec(fromId, spec);
+      if (target === alias.from) target = alias.to;
+      if (sharedIds.has(target) || externals.has(target)) continue;
+      lazyEdges.push({ fromId, runtimeOut, spec, target });
+      if (!lazySeen.has(target)) {
+        lazySeen.add(target);
+        lazyQueue.push(target);
+      }
+    }
+  };
+  for (const id of [...browserClosure, ...indexClosure]) {
+    const runtimeOut = sharedIds.has(id) ? outShared : outAdapters;
+    enqueueLazy(id, runtimeOut, modules.get(id));
+  }
+  const lazyChunks = [];
+  const lazyChunkSet = new Set();
+  for (let qi = 0; qi < lazyQueue.length; qi++) {
+    const chunkRoot = lazyQueue[qi];
+    if (!chunkRoot.startsWith(root + "/")) throw new Error("lazy chunk escapes the repository: " + chunkRoot);
+    if (!chunkRoot.startsWith(hostDir + "/")) {
+      throw new Error("lazy chunk outside host/: " + relative(root, chunkRoot));
+    }
+    loadGraph(chunkRoot, { alias, externals: new Set(externals.keys()), root, modules });
+    if (externals.has(chunkRoot) || sharedIds.has(chunkRoot)) continue;
+    const chunkOrder = topoOrder(modules, chunkRoot).filter((x) => !sharedIds.has(x) && !externals.has(x));
+    for (const x of chunkOrder) {
+      if (nodePrivate.includes(x) || x.startsWith(nodeDir)) {
+        throw new Error("lazy chunk reaches host/node/: " + relative(root, x));
+      }
+    }
+    const chunkOut = join(jsDir, relative(hostDir, chunkRoot));
+    lazyChunkSet.add(chunkRoot);
+    lazyChunks.push({ chunkRoot, chunkOut, chunkOrder });
+    for (const memberId of chunkOrder) {
+      enqueueLazy(memberId, chunkOut, modules.get(memberId));
     }
   }
-  for (const [, , target] of lazyQueue) {
-    if (!target.startsWith(root + "/")) throw new Error("lazy chunk escapes the repository: " + target);
-    loadGraph(target, { alias, externals: new Set(externals.keys()), root, modules });
+  const rewritesByOut = new Map();
+  const relPathsByOut = new Map();
+  for (const { fromId, runtimeOut, spec, target } of lazyEdges) {
+    if (!lazyChunkSet.has(target)) continue;
+    const targetOut = join(jsDir, relative(hostDir, target));
+    const runtimeRel = relativeTo(targetOut, runtimeOut);
+    let byModule = rewritesByOut.get(runtimeOut);
+    if (!byModule) rewritesByOut.set(runtimeOut, byModule = new Map());
+    let modMap = byModule.get(fromId);
+    if (!modMap) byModule.set(fromId, modMap = new Map());
+    modMap.set(spec, runtimeRel);
+    let rels = relPathsByOut.get(runtimeOut);
+    if (!rels) relPathsByOut.set(runtimeOut, rels = new Set());
+    rels.add(runtimeRel);
   }
-  for (const [, , target] of lazyQueue) {
-    if (externals.has(target) || sharedIds.has(target)) continue;
-    lazyIds.push(target);
-  }
-  const { code, mapping, header } = flattenShared(modules, ordered, root, externals);
+  const { code, mapping, header } = flattenShared(modules, ordered, root, externals, rewritesByOut.get(outShared));
   const rewritten = new Map();
   const needed = new Map();
   const mergeNeeded = (r) => {
@@ -713,7 +982,6 @@ export async function bundlePackage({
     rewritten.set(entry, r);
     mergeNeeded(r);
   }
-  const jsDir = dirname(outShared);
   const flatOuts = [];
   const addSharedNeed = (target, name) => {
     const flat = mapping.get(target + "::" + name);
@@ -731,7 +999,8 @@ export async function bundlePackage({
         for (const { imported } of imp.names) addSharedNeed(imp.target, imported);
       }
     }
-    const { code: chunkCode, mapping: chunkMap, header: chunkHeader } = flattenShared(modules, order, root, chunkExternals);
+    const { code: chunkCode, mapping: chunkMap, header: chunkHeader } =
+      flattenShared(modules, order, root, chunkExternals, rewritesByOut.get(outFile));
     const exportList = exportSpecs.map(([id, name]) => {
       const ref = chunkMap.get(id + "::" + name);
       if (!ref) throw new Error(relative(root, id) + ": no flattened export " + name);
@@ -746,7 +1015,6 @@ export async function bundlePackage({
   // `../shared.js`. Rewrite `index.js` imports/re-exports of those modules to it.
   if (nodePrivate.length) {
     const nodeOrder = topoOrder(modules, indexEntry).filter((x) => nodePrivate.includes(x));
-    const outAdapters = join(jsDir, "node", "adapters.js");
     const nodeExports = [];
     const nodeSet = new Set(nodePrivate);
     for (const imp of modules.get(indexEntry).imports) {
@@ -769,48 +1037,19 @@ export async function bundlePackage({
   // Emit lazy chunks (static relative `import()` targets outside the shared set)
   // as flattened minified modules under `dist/js/`, with shared imports pointed at
   // `shared.js`. Their specifiers in the importing code are rewritten to the shipped path.
-  const lazyRewrites = [];
-  for (const id of lazyIds) {
-    if (!id.startsWith(join(root, "host") + "/")) {
-      throw new Error("lazy chunk outside host/: " + relative(root, id));
-    }
-    const chunkOrder = topoOrder(modules, id).filter((x) => !sharedIds.has(x) && !externals.has(x));
-    for (const x of chunkOrder) {
-      if (nodePrivate.includes(x) || x.startsWith(nodeDir)) {
-        throw new Error("lazy chunk reaches host/node/: " + relative(root, x));
-      }
-    }
-    const out = join(jsDir, relative(join(root, "host"), id));
-    const exportSpecs = declaredExports(modules.get(id)).map((name) => [id, name]);
-    const { out: chunkCode } = flattenClosure(chunkOrder, out, exportSpecs);
-    flatOuts.push([out, chunkCode]);
-  }
-  for (const [fromId, spec, target] of lazyQueue) {
-    if (!lazyIds.includes(target)) continue;
-    const chunkOut = join(jsDir, relative(join(root, "host"), target));
-    // Shared modules are flattened into the shared chunk, so their runtime
-    // importer is always the shared chunk itself.
-    const runtimeImporterOut = sharedIds.has(fromId) || ordered.includes(fromId) ? outShared
-      : fromId === indexEntry ? outIndex
-      : fromId === browserEntry ? outBrowser
-      : fromId === loadEntry ? outLoad
-      : join(jsDir, relative(join(root, "host"), fromId));
-    let runtimeRel = relative(dirname(runtimeImporterOut), chunkOut);
-    if (!runtimeRel.startsWith(".")) runtimeRel = "./" + runtimeRel;
-    runtimeRel = runtimeRel.split("\\").join("/");
-    lazyRewrites.push([spec, runtimeRel]);
+  for (const { chunkRoot, chunkOut, chunkOrder } of lazyChunks) {
+    const exportSpecs = declaredExports(modules.get(chunkRoot)).map((name) => [chunkRoot, name]);
+    const { out: chunkCode } = flattenClosure(chunkOrder, chunkOut, exportSpecs);
+    flatOuts.push([chunkOut, chunkCode]);
   }
   const exported = "export { " + [...needed].map(([name, ref]) =>
     ref === name ? name : ref + " as " + name).join(", ") + " };";
-  let sharedCode = header.join("\n") + (header.length ? "\n" : "") +
+  const sharedCode = header.join("\n") + (header.length ? "\n" : "") +
     code + "\n\n" + exported + "\n";
-  for (const [spec, runtimeRel] of lazyRewrites) {
-    sharedCode = sharedCode.split(JSON.stringify(spec)).join(JSON.stringify(runtimeRel));
-  }
-  let minifiedShared = await minifyFile(relative(root, outShared), sharedCode);
-  for (const [, runtimeRel] of lazyRewrites) {
-    minifiedShared = minifiedShared.split("import(`" + runtimeRel + "`)").join("import(" + JSON.stringify(runtimeRel) + ")");
-  }
+  const minifiedShared = restoreLazyQuotes(
+    await minifyFile(relative(root, outShared), sharedCode),
+    relPathsByOut.get(outShared) ?? [],
+  );
   mkdirSync(dirname(outShared), { recursive: true });
   writeFileSync(outShared, minifiedShared);
   for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad]]) {
@@ -820,9 +1059,13 @@ export async function bundlePackage({
   }
   for (const [out, flatCode] of flatOuts) {
     mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, await minifyFile(relative(root, out), flatCode));
+    const minified = restoreLazyQuotes(
+      await minifyFile(relative(root, out), flatCode),
+      relPathsByOut.get(out) ?? [],
+    );
+    writeFileSync(out, minified);
   }
-  return { shared: outShared, modules: ordered.length + nodePrivate.length + lazyIds.length };
+  return { shared: outShared, modules: ordered.length + nodePrivate.length + lazyChunks.length };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
