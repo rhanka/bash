@@ -275,41 +275,97 @@ test("[[ argument does not corrupt cond_depth and for-loop respects readonly var
   await usable(shell);
 });
 
-test("linear-time lookahead in dparen, brace, extglob, and subscript scans (< 50ms in Wasm)", async () => {
-  const shell = new Bash({ executionLimitProfile: "normal" });
-  // Warm up the Wasm instance before timing.
-  await usable(shell);
+test("linear-time lookahead in dparen, brace, extglob, and subscript scans (work-bounded and linear scaling in Wasm)", async () => {
+  const ABS_CAP_MS = 2_000;
 
+  // Min of 3 runs filters transient OS scheduling/GC pauses while still verifying every run.
+  async function measureMinMs(fn, runs = 3) {
+    let best = Infinity;
+    let last;
+    for (let i = 0; i < runs; i++) {
+      const t0 = performance.now();
+      last = await fn();
+      const ms = performance.now() - t0;
+      if (ms < best) best = ms;
+    }
+    return { result: last, ms: best };
+  }
+
+  // Warm up the Wasm instance before timing.
+  const warmup = new Bash({ executionLimitProfile: "normal" });
+  await usable(warmup);
+
+  // 1. Kernel work-counter gate (deterministic, load-independent): every full-size case
+  //    must complete well within a tight O(N) maxWorkUnits ceiling (O(N^2) would need >1e7).
   const dparenCases = [
-    ["open parens 50k", "(".repeat(50_000)],
-    ["open parens 50k + ))", "(".repeat(50_000) + "))"],
-    ["spaced (( 25k + ))", "(( ".repeat(25_000) + "))"],
+    ["open parens 50k", "(".repeat(50_000), 150_000],
+    ["open parens 50k + ))", "(".repeat(50_000) + "))", 150_000],
+    ["spaced (( 25k + ))", "(( ".repeat(25_000) + "))", 150_000],
   ];
-  for (const [label, script] of dparenCases) {
+  for (const [label, script, workCap] of dparenCases) {
+    const shell = new Bash({ executionLimitProfile: "normal", executionLimits: { maxWorkUnits: workCap } });
     const t0 = performance.now();
     const r = await shell.exec(script);
     const ms = performance.now() - t0;
     assert.equal(r.exitCode, 2, `${label} expected exit 2, got ${r.exitCode}: ${r.stderr}`);
     assert.match(r.stderr, /Maximum parser nesting depth exceeded \(200\)/, label);
-    assert.ok(ms < 50, `${label} took ${ms.toFixed(1)}ms (expected < 50ms)`);
+    assert.ok(ms < ABS_CAP_MS, `${label} took ${ms.toFixed(1)}ms (expected < ${ABS_CAP_MS}ms)`);
   }
 
   const wordCases = [
-    ["brace 100k + }", "echo " + "{".repeat(100_000) + "}", "{".repeat(100_000) + "}\n"],
-    ["brace 50k balanced", "if false; then echo " + "{".repeat(50_000) + "}".repeat(50_000) + "; fi; echo ok", "ok\n"],
-    ["brace 50k inner comma", "if false; then echo " + "{".repeat(50_000) + "a,b" + "}".repeat(50_000) + "; fi; echo ok", "ok\n"],
-    ["brace interleaved 10k", "if false; then echo " + "{{a,b}".repeat(10_000) + "; fi; echo ok", "ok\n"],
-    ["extglob 50k + )", "echo " + "@(".repeat(50_000) + ")", "@(".repeat(50_000) + ")\n"],
-    ["extglob interleaved 10k", ": " + "@(@(a)".repeat(10_000), ""],
-    ["subscript open 50k + ]=1", "if false; then " + "a[ ".repeat(50_000) + "]=1; fi; echo ok", "ok\n"],
+    ["brace 100k + }", "echo " + "{".repeat(100_000) + "}", "{".repeat(100_000) + "}\n", 20_000],
+    ["brace 50k balanced", "if false; then echo " + "{".repeat(50_000) + "}".repeat(50_000) + "; fi; echo ok", "ok\n", 20_000],
+    ["brace 50k inner comma", "if false; then echo " + "{".repeat(50_000) + "a,b" + "}".repeat(50_000) + "; fi; echo ok", "ok\n", 20_000],
+    ["brace interleaved 10k", "if false; then echo " + "{{a,b}".repeat(10_000) + "; fi; echo ok", "ok\n", 40_000],
+    ["extglob 50k + )", "echo " + "@(".repeat(50_000) + ")", "@(".repeat(50_000) + ")\n", 20_000],
+    ["extglob interleaved 10k", ": " + "@(@(a)".repeat(10_000), "", 20_000],
+    ["subscript open 50k + ]=1", "if false; then " + "a[ ".repeat(50_000) + "]=1; fi; echo ok", "ok\n", 250_000],
   ];
-  for (const [label, script, expectedOut] of wordCases) {
+  for (const [label, script, expectedOut, workCap] of wordCases) {
+    const shell = new Bash({ executionLimitProfile: "normal", executionLimits: { maxWorkUnits: workCap } });
     const t0 = performance.now();
     const r = await shell.exec(script);
     const ms = performance.now() - t0;
     assert.equal(r.exitCode, 0, `${label} failed: ${r.stderr}`);
     assert.equal(r.stdout, expectedOut, label);
-    assert.ok(ms < 50, `${label} took ${ms.toFixed(1)}ms (expected < 50ms)`);
+    assert.ok(ms < ABS_CAP_MS, `${label} took ${ms.toFixed(1)}ms (expected < ${ABS_CAP_MS}ms)`);
+  }
+
+  // 2. Verify the kernel work counter is actively charged for all 4 lookahead families.
+  const workProbeCases = [
+    ["dparen", "(( ".repeat(25_000) + "))"],
+    ["brace", "echo " + "{".repeat(100_000) + "}"],
+    ["extglob", "echo " + "@(".repeat(50_000) + ")"],
+    ["subscript", "if false; then " + "a[ ".repeat(50_000) + "]=1; fi; echo ok"],
+  ];
+  for (const [label, script] of workProbeCases) {
+    const probe = statusProbe();
+    const tight = bash({ executionLimitProfile: "normal", executionLimits: { maxWorkUnits: 500 } }, probe.hooks);
+    const r = await tight.exec(script);
+    assert.equal(r.exitCode, 126, `${label} should trip maxWorkUnits under tight cap`);
+    assert.equal(probe.last.status, "limit-exceeded", label);
+    assert.equal(probe.last.limit, "maxWorkUnits", label);
+  }
+
+  // 3. Load-independent N vs 4N time scaling check across all 4 families (linear ~4x, quadratic ~16x).
+  const scalingCases = [
+    ["dparen", (n) => "(( ".repeat(n) + "))", 5_000, 2],
+    ["brace", (n) => "if false; then echo " + "{".repeat(n) + "a,b" + "}".repeat(n) + "; fi; echo ok", 10_000, 0],
+    ["extglob", (n) => "echo " + "@(".repeat(n) + ")", 10_000, 0],
+    ["subscript", (n) => "if false; then " + "a[ ".repeat(n) + "]=1; fi; echo ok", 10_000, 0],
+  ];
+  const shell = new Bash({ executionLimitProfile: "normal" });
+  for (const [label, gen, n, expectedExit] of scalingCases) {
+    const small = await measureMinMs(() => shell.exec(gen(n)));
+    const large = await measureMinMs(() => shell.exec(gen(n * 4)));
+    assert.equal(small.result.exitCode, expectedExit, `${label} N=${n}`);
+    assert.equal(large.result.exitCode, expectedExit, `${label} 4N=${n * 4}`);
+    assert.ok(large.ms < ABS_CAP_MS, `${label} 4N took ${large.ms.toFixed(1)}ms (expected < ${ABS_CAP_MS}ms)`);
+    const ratio = large.ms / Math.max(small.ms, 1);
+    assert.ok(
+      ratio < 10,
+      `${label} non-linear scaling: N=${n} took ${small.ms.toFixed(1)}ms, 4N=${n * 4} took ${large.ms.toFixed(1)}ms (ratio ${ratio.toFixed(2)}x, expected < 10x)`,
+    );
   }
   await usable(shell);
 });

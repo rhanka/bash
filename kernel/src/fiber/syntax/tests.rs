@@ -948,44 +948,69 @@ fn heredoc_unclosed_substitutions_diagnosed() {
 fn lexer_dparen_and_subscript_lookahead_is_linear() {
     use std::time::Instant;
 
-    let cases: [(&str, std::string::String, bool); 6] = [
-        ("open_parens_50k", "(".repeat(50_000), false),
+    fn count_work(src: &str, expect_ok: bool) -> (Option<Ast>, u64) {
+        crate::mem::testing::reset(CEIL);
+        let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+        let mut units = 0u64;
+        let mut charge = |u: u64| {
+            units += u;
+            Ok(())
+        };
+        let res = Ast::parse(src.as_bytes(), 1 << 20, &b, &mut charge);
+        if expect_ok {
+            let ast = res.unwrap_or_else(|e| panic!("parse failed: {e}"));
+            (Some(ast), units)
+        } else {
+            let err = std::format!("{}", res.err().expect("expected error"));
+            assert!(
+                err.contains("Maximum parser nesting depth exceeded (200)"),
+                "unexpected err: {err}"
+            );
+            (None, units)
+        }
+    }
+
+    let cases: [(&str, fn(usize) -> std::string::String, usize, bool); 6] = [
+        ("open_parens", |n| "(".repeat(n), 10_000, false),
         (
-            "open_parens_50k_trailing_dparen",
-            std::format!("{}{}", "(".repeat(50_000), "))"),
+            "open_parens_trailing_dparen",
+            |n| std::format!("{}{}", "(".repeat(n), "))"),
+            10_000,
             false,
         ),
         (
-            "spaced_dparen_25k_trailing",
-            std::format!("{}{}", "(( ".repeat(25_000), "))"),
+            "spaced_dparen_trailing",
+            |n| std::format!("{}{}", "(( ".repeat(n), "))"),
+            5_000,
             false,
         ),
         (
-            "balanced_parens_25k",
-            std::format!("{}{}", "(".repeat(25_000), ")".repeat(25_000)),
+            "balanced_parens",
+            |n| std::format!("{}{}", "(".repeat(n), ")".repeat(n)),
+            5_000,
             false,
         ),
-        ("subscript_open_50k", "a[ ".repeat(50_000), true),
+        ("subscript_open", |n| "a[ ".repeat(n), 10_000, true),
         (
-            "subscript_open_50k_trailing_assign",
-            std::format!("{}{}", "a[ ".repeat(50_000), "]=1"),
+            "subscript_open_trailing_assign",
+            |n| std::format!("{}{}", "a[ ".repeat(n), "]=1"),
+            10_000,
             true,
         ),
     ];
-    for (label, input, expect_ok) in cases {
+    for (label, gen, n, expect_ok) in cases {
+        let (_, w_n) = count_work(&gen(n), expect_ok);
         let t0 = Instant::now();
-        if expect_ok {
-            let _ = parse_ok(&input);
-        } else {
-            let err = parse_err(&input);
-            assert!(
-                err.contains("Maximum parser nesting depth exceeded (200)"),
-                "{label}: unexpected err: {err}"
-            );
-        }
+        let (_, w_4n) = count_work(&gen(n * 4), expect_ok);
         let elapsed_ms = t0.elapsed().as_millis();
+        assert!(w_n > 0, "{label}: expected non-zero work units");
         assert!(
-            elapsed_ms < 250,
+            w_4n <= w_n * 5,
+            "{label}: non-linear work growth w({n})={w_n}, w({})={w_4n}",
+            n * 4
+        );
+        assert!(
+            elapsed_ms < 5_000,
             "{label}: took {elapsed_ms}ms (expected linear time)"
         );
     }
@@ -1026,49 +1051,76 @@ fn lexer_dparen_and_subscript_lookahead_is_linear() {
 fn word_brace_and_extglob_lookahead_is_linear() {
     use std::time::Instant;
 
-    let cases: [(&str, std::string::String); 7] = [
+    fn count_word_work(src: &str) -> (Ast, u64) {
+        crate::mem::testing::reset(CEIL);
+        let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+        let mut units = 0u64;
+        let mut charge = |u: u64| {
+            units += u;
+            Ok(())
+        };
+        let ast = Ast::parse(src.as_bytes(), 1 << 20, &b, &mut charge)
+            .unwrap_or_else(|e| panic!("parse failed: {e}"));
+        (ast, units)
+    }
+
+    let cases: [(&str, fn(usize) -> std::string::String, usize); 7] = [
         (
-            "brace_100k_trailing_rbrace",
-            std::format!("echo {}{}", "{".repeat(100_000), "}"),
+            "brace_trailing_rbrace",
+            |n| std::format!("echo {}{}", "{".repeat(n), "}"),
+            20_000,
         ),
         (
-            "brace_50k_balanced_no_comma",
-            std::format!("echo {}{}", "{".repeat(50_000), "}".repeat(50_000)),
+            "brace_balanced_no_comma",
+            |n| std::format!("echo {}{}", "{".repeat(n), "}".repeat(n)),
+            10_000,
         ),
         (
-            "brace_50k_inner_comma",
-            std::format!("echo {}a,b{}", "{".repeat(50_000), "}".repeat(50_000)),
+            "brace_inner_comma",
+            |n| std::format!("echo {}a,b{}", "{".repeat(n), "}".repeat(n)),
+            10_000,
         ),
         (
-            "brace_interleaved_10k",
-            std::format!("echo {}", "{{a,b}".repeat(10_000)),
+            "brace_interleaved",
+            |n| std::format!("echo {}", "{{a,b}".repeat(n)),
+            2_500,
         ),
         (
-            "extglob_50k_trailing_rparen",
-            std::format!("echo {}{}", "@(".repeat(50_000), ")"),
+            "extglob_trailing_rparen",
+            |n| std::format!("echo {}{}", "@(".repeat(n), ")"),
+            10_000,
         ),
         (
-            "extglob_50k_half_closed",
-            std::format!("echo {}{}", "@(".repeat(50_000), ")".repeat(25_000)),
+            "extglob_half_closed",
+            |n| std::format!("echo {}{}", "@(".repeat(n), ")".repeat(n / 2)),
+            10_000,
         ),
         (
-            "extglob_interleaved_10k",
-            std::format!("echo {}", "@(@(a)".repeat(10_000)),
+            "extglob_interleaved",
+            |n| std::format!("echo {}", "@(@(a)".repeat(n)),
+            2_500,
         ),
     ];
-    for (label, input) in cases {
+    for (label, gen, n) in cases {
+        let (_, w_n) = count_word_work(&gen(n));
         let t0 = Instant::now();
-        let ast = parse_ok(&input);
+        let (ast, w_4n) = count_word_work(&gen(n * 4));
         let elapsed_ms = t0.elapsed().as_millis();
+        assert!(w_n > 0, "{label}: expected non-zero work units");
         assert!(
-            elapsed_ms < 250,
+            w_4n <= w_n * 5,
+            "{label}: non-linear work growth w({n})={w_n}, w({})={w_4n}",
+            n * 4
+        );
+        assert!(
+            elapsed_ms < 5_000,
             "{label}: took {elapsed_ms}ms (expected linear time)"
         );
         // Spot-check that valid inner brace/extglob parts are still parsed accurately.
-        if label == "brace_50k_inner_comma" {
+        if label == "brace_inner_comma" {
             assert!(!ast.brace_items.is_empty(), "{label}: missing inner brace expansion");
         }
-        if label == "extglob_50k_trailing_rparen" {
+        if label == "extglob_trailing_rparen" {
             assert!(
                 ast.parts.iter().any(|p| matches!(p, WordPart::Glob { .. })),
                 "{label}: missing trailing @() glob part"

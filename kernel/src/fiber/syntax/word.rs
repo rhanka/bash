@@ -428,12 +428,12 @@ fn parse_word_glob(
             if paren_scan.is_unmatched(open) {
                 None
             } else {
-                find_matching_paren(raw, open)
+                find_matching_paren(raw, open, ctx)?
             }
         } else {
-            let found = find_matching_paren(raw, open);
+            let found = find_matching_paren(raw, open, ctx)?;
             if found.is_none() {
-                analyze_unmatched_parens(raw, open, paren_scan)?;
+                analyze_unmatched_parens(raw, open, paren_scan, ctx)?;
             }
             found
         };
@@ -465,10 +465,13 @@ fn analyze_unmatched_parens(
     raw: &[u8],
     from: usize,
     scan: &mut ParenScan,
+    ctx: &mut ParseCtx<'_, '_>,
 ) -> Result<(), Error> {
     scan.analyzed = true;
     let mut j = from;
+    let mut next_charge_at = j + 64;
     while j < raw.len() {
+        ctx.charge_scan(j, &mut next_charge_at)?;
         match raw[j] {
             b'\\' if j + 1 < raw.len() => j += 2,
             b'(' => {
@@ -1246,8 +1249,10 @@ fn try_parse_brace(
     let mut in_sq = false;
     let mut in_dq = false;
     let mut commas = KVec::new_in(ctx.budget);
+    let mut next_charge_at = i + 64;
 
     while i < raw.len() && depth > 0 {
+        ctx.charge_scan(i, &mut next_charge_at)?;
         let b = raw[i];
         if in_sq {
             if b == b'\'' {
@@ -1354,7 +1359,9 @@ fn analyze_valid_braces(
     let mut i = start_from;
     let mut in_sq = false;
     let mut in_dq = false;
+    let mut next_charge_at = i + 64;
     while i < raw.len() {
+        ctx.charge_scan(i, &mut next_charge_at)?;
         let b = raw[i];
         if in_sq {
             if b == b'\'' {
@@ -1951,10 +1958,16 @@ fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> Option<(&[u8], usize)>
     None
 }
 
-fn find_matching_paren(raw: &[u8], open: usize) -> Option<usize> {
+fn find_matching_paren(
+    raw: &[u8],
+    open: usize,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<Option<usize>, Error> {
     let mut i = open + 1;
     let mut depth = 1u32;
+    let mut next_charge_at = i + 64;
     while i < raw.len() {
+        ctx.charge_scan(i, &mut next_charge_at)?;
         match raw[i] {
             b'\\' if i + 1 < raw.len() => i += 2,
             b'(' => {
@@ -1964,14 +1977,14 @@ fn find_matching_paren(raw: &[u8], open: usize) -> Option<usize> {
             b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(i);
+                    return Ok(Some(i));
                 }
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    None
+    Ok(None)
 }
 
 fn find_matching_bracket(raw: &[u8], open: usize) -> Option<usize> {

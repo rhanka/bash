@@ -36,6 +36,16 @@ impl<'a, 'w> ParseCtx<'a, 'w> {
         Ok(())
     }
 
+    #[inline]
+    pub fn charge_scan(&mut self, i: usize, next_charge_at: &mut usize) -> Result<(), Error> {
+        if i >= *next_charge_at {
+            let chunks = (i - *next_charge_at) / 32 + 1;
+            (self.work)(chunks as u64).map_err(|()| Error::Work)?;
+            *next_charge_at += chunks * 32;
+        }
+        Ok(())
+    }
+
     pub fn enter_depth(&mut self, pos: Pos) -> Result<(), Error> {
         self.depth += 1;
         if self.depth > DEPTH_CAP {
