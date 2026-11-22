@@ -718,6 +718,9 @@ impl Fiber {
                         return Err(Fail::LoopLimit("for"));
                     }
                     let var_name = ast.bytes(fl.var);
+                    if readonly(var_name) {
+                        return Err(Fail::Readonly(bytes_in(var_name, &self.live)?));
+                    }
                     let item = &fl.items[fl.index];
                     let exported = self.env.get(var_name).is_some_and(|e| e.exported);
                     self.env.set(var_name, item, exported)?;
@@ -1780,4 +1783,92 @@ enum Dispatch {
     Custom,
     Kernel(&'static CommandSpec),
     Script,
+}
+
+#[cfg(test)]
+mod l3_vm_tests {
+    use super::super::*;
+    use crate::fs::Vfs;
+    use crate::shell::Config;
+
+    const CEIL: u64 = 1 << 30;
+
+    fn run_script(script: &str) -> (ExecResult, std::string::String, std::string::String) {
+        crate::mem::testing::reset(CEIL);
+        let meta = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+        let vfs = KRc::try_new_in(Vfs::create(1 << 20, LimitId(30)).unwrap(), &meta)
+            .ok()
+            .unwrap();
+        let cfg = Config {
+            profile: 0,
+            env: &[
+                (b"SHELLOPTS", b"braceexpand:hashall:interactive-comments", true),
+                (b"BASHOPTS", b"globskipdots", true),
+            ],
+            ..Config::default()
+        };
+        let sh = KRc::try_new_in(Shell::create(vfs, &cfg, CEIL).unwrap(), &meta)
+            .ok()
+            .unwrap();
+        let mut f = Fiber::spawn(
+            sh,
+            None,
+            &Opts {
+                script: script.as_bytes(),
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        let res = loop {
+            match f.run(100_000) {
+                Step::Done(r) => break r,
+                Step::OutOfFuel => {}
+                Step::Host { .. } => panic!("unexpected host call"),
+            }
+        };
+        let mut out = std::vec::Vec::new();
+        f.drain_output(false, 65536, |c| out.extend_from_slice(c));
+        let mut err = std::vec::Vec::new();
+        f.drain_output(true, 65536, |c| err.extend_from_slice(c));
+        (
+            res,
+            std::string::String::from_utf8_lossy(&out).into_owned(),
+            std::string::String::from_utf8_lossy(&err).into_owned(),
+        )
+    }
+
+    #[test]
+    fn for_loop_rejects_readonly_variables() {
+        let (res, out, err) = run_script("for SHELLOPTS in a b; do echo $SHELLOPTS; done; echo after");
+        assert_eq!(res.exit, 1);
+        assert_eq!(out, "");
+        assert_eq!(err, "bash: SHELLOPTS: readonly variable\n");
+        assert_eq!(
+            res.env.get(b"SHELLOPTS").unwrap().value.as_slice(),
+            b"braceexpand:hashall:interactive-comments"
+        );
+
+        let (res2, out2, err2) = run_script("for BASHOPTS in x; do echo $BASHOPTS; done");
+        assert_eq!(res2.exit, 1);
+        assert_eq!(out2, "");
+        assert_eq!(err2, "bash: BASHOPTS: readonly variable\n");
+        assert_eq!(
+            res2.env.get(b"BASHOPTS").unwrap().value.as_slice(),
+            b"globskipdots"
+        );
+
+        // Zero-iteration `for` loop does not assign the readonly variable.
+        let (res3, out3, err3) = run_script("for SHELLOPTS in; do echo $SHELLOPTS; done");
+        assert_eq!(res3.exit, 0);
+        assert_eq!(out3, "");
+        assert_eq!(err3, "");
+    }
+
+    #[test]
+    fn echo_dbrack_does_not_corrupt_following_rbrack_command() {
+        let (res, out, err) = run_script("echo [[; ]]");
+        assert_eq!(res.exit, 127);
+        assert_eq!(out, "[[\n");
+        assert_eq!(err, "bash: ]]: command not found\n");
+    }
 }

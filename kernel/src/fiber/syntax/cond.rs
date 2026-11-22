@@ -3,18 +3,18 @@ use super::ast::{CondBinOp, CondExpr, CondId, CondUnaryOp, WordId};
 use super::lexer::TokenKind;
 use super::parser::Parser;
 use super::word::parse_word_no_brace;
-use super::{Error, DEPTH_CAP};
+use super::Error;
 use crate::mem::KBytes;
 
 impl Parser<'_, '_, '_> {
     pub(super) fn parse_cond_or(&mut self) -> Result<CondId, Error> {
-        self.skip_newlines();
+        self.skip_newlines()?;
         let mut left = self.parse_cond_and()?;
         loop {
-            self.skip_newlines();
+            self.skip_newlines()?;
             if self.kind() == TokenKind::OrOr {
                 self.advance();
-                self.skip_newlines();
+                self.skip_newlines()?;
                 let right = self.parse_cond_and()?;
                 left = self.ctx.ast.push_cond(CondExpr::Or { left, right })?;
             } else {
@@ -27,10 +27,10 @@ impl Parser<'_, '_, '_> {
     fn parse_cond_and(&mut self) -> Result<CondId, Error> {
         let mut left = self.parse_cond_not()?;
         loop {
-            self.skip_newlines();
+            self.skip_newlines()?;
             if self.kind() == TokenKind::AndAnd {
                 self.advance();
-                self.skip_newlines();
+                self.skip_newlines()?;
                 let right = self.parse_cond_not()?;
                 left = self.ctx.ast.push_cond(CondExpr::And { left, right })?;
             } else {
@@ -41,17 +41,26 @@ impl Parser<'_, '_, '_> {
     }
 
     fn parse_cond_not(&mut self) -> Result<CondId, Error> {
-        self.skip_newlines();
-        if self.kind() == TokenKind::Bang {
-            self.advance();
-            let inner = self.parse_cond_not()?;
-            return Ok(self.ctx.ast.push_cond(CondExpr::Not(inner))?);
+        let mut negations: usize = 0;
+        loop {
+            self.skip_newlines()?;
+            if self.kind() == TokenKind::Bang {
+                self.step()?;
+                self.advance();
+                negations += 1;
+            } else {
+                break;
+            }
         }
-        self.parse_cond_primary()
+        let mut expr = self.parse_cond_primary()?;
+        for _ in 0..negations {
+            expr = self.ctx.ast.push_cond(CondExpr::Not(expr))?;
+        }
+        Ok(expr)
     }
 
     fn parse_cond_primary(&mut self) -> Result<CondId, Error> {
-        self.skip_newlines();
+        self.skip_newlines()?;
         self.step()?;
         match self.kind() {
             TokenKind::DBrackEnd
@@ -63,15 +72,12 @@ impl Parser<'_, '_, '_> {
             }
             TokenKind::LParen => {
                 self.advance();
-                self.ctx.depth += 1;
-                if self.ctx.depth > DEPTH_CAP {
-                    return Err(self.error_here(format_args!(
-                        "Maximum parser nesting depth exceeded ({DEPTH_CAP})"
-                    )));
-                }
-                let inner = self.parse_cond_or()?;
-                self.ctx.depth -= 1;
-                self.skip_newlines();
+                let pos = self.pos();
+                self.ctx.enter_depth(pos)?;
+                let inner = self.parse_cond_or();
+                self.ctx.leave_depth();
+                let inner = inner?;
+                self.skip_newlines()?;
                 self.expect(TokenKind::RParen)?;
                 return Ok(self.ctx.ast.push_cond(CondExpr::Group(inner))?);
             }

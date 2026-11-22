@@ -1,6 +1,6 @@
 //! Full bash lexer with line:col tracking, disambiguation, ANSI-C quoting, and heredoc bodies.
 use super::ast::{Pos, Span};
-use super::{ident_byte, ident_start, identifier, lexer_err, parser_err, Error, TOKEN_CAP};
+use super::{ident_byte, ident_start, identifier, lexer_err, parser_err, Error, DEPTH_CAP, TOKEN_CAP};
 use crate::mem::{Budget, KBytes, KVec};
 use core::fmt::Write;
 
@@ -233,13 +233,16 @@ pub fn lex<'a>(
         dparen_inner_depth: 0,
         last_kind: None,
         expect_cmd: true,
+        after_fn_name: false,
+        depth: 0,
     };
     lx.run()?;
-    if lx.count > TOKEN_CAP {
+    let total_tokens = lx.count + 1; // include synthetic EOF token per spec §6.1.2
+    if total_tokens > TOKEN_CAP {
         return Err(parser_err(
             Pos { line: 1, col: 1 },
             budget,
-            format_args!("Too many tokens: {} exceeds limit of {TOKEN_CAP}", lx.count),
+            format_args!("Too many tokens: {total_tokens} exceeds limit of {TOKEN_CAP}"),
         ));
     }
     Ok(LexOutput {
@@ -274,6 +277,8 @@ struct Lexer<'a, 'w> {
     dparen_inner_depth: u32,
     last_kind: Option<TokenKind>,
     expect_cmd: bool,
+    after_fn_name: bool,
+    depth: u32,
 }
 
 impl<'a, 'w> Lexer<'a, 'w> {
@@ -286,6 +291,20 @@ impl<'a, 'w> Lexer<'a, 'w> {
 
     fn charge(&mut self) -> Result<(), Error> {
         (self.work)(1).map_err(|()| Error::Work)
+    }
+
+    fn enter_depth(&mut self) -> Result<(), Error> {
+        self.charge()?;
+        self.depth += 1;
+        if self.depth > DEPTH_CAP {
+            self.depth -= 1;
+            return Err(parser_err(
+                self.pos(),
+                self.budget,
+                format_args!("Maximum parser nesting depth exceeded ({DEPTH_CAP})"),
+            ));
+        }
+        Ok(())
     }
 
     fn peek(&self) -> Option<u8> {
@@ -370,31 +389,41 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 self.tokens.try_push(tok)?;
             }
         }
+        let prev_kind = self.last_kind;
+        self.after_fn_name = prev_kind == Some(TokenKind::Function)
+            && matches!(kind, TokenKind::Name | TokenKind::Word)
+            && !quoted;
+        let is_time_p = prev_kind == Some(TokenKind::Time)
+            && !quoted
+            && matches!(kind, TokenKind::Word | TokenKind::Name)
+            && self.count <= TOKEN_CAP
+            && text.get(&self.bytes) == b"-p";
         self.last_kind = Some(kind);
-        self.expect_cmd = matches!(
-            kind,
-            TokenKind::Newline
-                | TokenKind::Semicolon
-                | TokenKind::Amp
-                | TokenKind::Pipe
-                | TokenKind::PipeAmp
-                | TokenKind::AndAnd
-                | TokenKind::OrOr
-                | TokenKind::LParen
-                | TokenKind::LBrace
-                | TokenKind::Then
-                | TokenKind::Else
-                | TokenKind::Elif
-                | TokenKind::Do
-                | TokenKind::Bang
-                | TokenKind::Time
-                | TokenKind::DSemi
-                | TokenKind::SemiAnd
-                | TokenKind::SemiSemiAnd
-                | TokenKind::If
-                | TokenKind::While
-                | TokenKind::Until
-        );
+        self.expect_cmd = is_time_p
+            || matches!(
+                kind,
+                TokenKind::Newline
+                    | TokenKind::Semicolon
+                    | TokenKind::Amp
+                    | TokenKind::Pipe
+                    | TokenKind::PipeAmp
+                    | TokenKind::AndAnd
+                    | TokenKind::OrOr
+                    | TokenKind::LParen
+                    | TokenKind::LBrace
+                    | TokenKind::Then
+                    | TokenKind::Else
+                    | TokenKind::Elif
+                    | TokenKind::Do
+                    | TokenKind::Bang
+                    | TokenKind::Time
+                    | TokenKind::DSemi
+                    | TokenKind::SemiAnd
+                    | TokenKind::SemiSemiAnd
+                    | TokenKind::If
+                    | TokenKind::While
+                    | TokenKind::Until
+            );
         Ok(())
     }
 
@@ -647,10 +676,18 @@ impl<'a, 'w> Lexer<'a, 'w> {
 
     fn can_start_dparen(&self) -> bool {
         self.expect_cmd
+            || self.after_fn_name
             || matches!(
                 self.last_kind,
                 None | Some(TokenKind::RParen) // e.g. `f() (( x++ ))`
             )
+    }
+
+    fn can_start_cond(&self) -> bool {
+        self.cond_depth == 0
+            && (self.expect_cmd
+                || self.after_fn_name
+                || matches!(self.last_kind, None | Some(TokenKind::RParen)))
     }
 
     /// Lookahead from `start` pointing at `((` to decide `DPAREN_START` vs two `LPAREN`s.
@@ -977,7 +1014,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     return TokenKind::Word;
                 }
                 b"}" => return TokenKind::RBrace,
-                b"[[" => return TokenKind::DBrackStart,
+                b"[[" if self.can_start_cond() => return TokenKind::DBrackStart,
                 b"]]" if self.cond_depth > 0 => return TokenKind::DBrackEnd,
                 _ => {}
             }
@@ -1034,6 +1071,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_double_quote(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_double_quote_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_double_quote_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         let open_line = self.line;
         self.copy_one(buf)?; // opening '"'
         while let Some(b) = self.peek() {
@@ -1089,6 +1133,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_brace_expand(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_brace_expand_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_brace_expand_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         // Consume `{`.
         self.copy_one(buf)?;
         let mut depth: u32 = 1;
@@ -1154,6 +1205,9 @@ impl<'a, 'w> Lexer<'a, 'w> {
 
     /// Disambiguate `$(( ... ))` from `$( ( ... ) )` starting at the first `(`.
     fn is_arith_subst(&self, start: usize) -> bool {
+        if self.depth >= DEPTH_CAP {
+            return false;
+        }
         let mut i = start + 2;
         let mut depth: i32 = 2;
         let mut in_sq = false;
@@ -1207,6 +1261,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_arith_subst(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_arith_subst_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_arith_subst_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         // Consume `((`.
         self.copy_one(buf)?;
         self.copy_one(buf)?;
@@ -1271,6 +1332,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_legacy_arith(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_legacy_arith_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_legacy_arith_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         self.copy_one(buf)?; // '['
         let mut depth: u32 = 1;
         while let Some(b) = self.peek() {
@@ -1312,7 +1380,14 @@ impl<'a, 'w> Lexer<'a, 'w> {
 
     /// Scans `$(...)`, `<(...)`, or `>(...)` starting at `(`, aware of quotes, comments,
     /// `case ... in ... esac` patterns, nested `$((...))`, and heredocs.
-    fn scan_proc_or_cmd_subst(&mut self, buf: &mut KVec<u8>, _open: u8) -> Result<(), Error> {
+    fn scan_proc_or_cmd_subst(&mut self, buf: &mut KVec<u8>, open: u8) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_proc_or_cmd_subst_inner(buf, open);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_proc_or_cmd_subst_inner(&mut self, buf: &mut KVec<u8>, _open: u8) -> Result<(), Error> {
         self.copy_one(buf)?; // '('
         let mut paren_depth: u32 = 1;
         let mut case_depth: u32 = 0;
@@ -1495,6 +1570,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_balanced_parens(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_balanced_parens_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_balanced_parens_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         self.copy_one(buf)?; // '('
         let mut depth: u32 = 1;
         while let Some(b) = self.peek() {
@@ -1531,6 +1613,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_array_literal(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_array_literal_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_array_literal_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         self.copy_one(buf)?; // '('
         let mut depth: u32 = 1;
         while let Some(b) = self.peek() {
@@ -1649,6 +1738,13 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     fn scan_balanced_brackets(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
+        self.enter_depth()?;
+        let res = self.scan_balanced_brackets_inner(buf);
+        self.depth -= 1;
+        res
+    }
+
+    fn scan_balanced_brackets_inner(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
         self.copy_one(buf)?; // '['
         let mut depth: u32 = 1;
         while let Some(b) = self.peek() {

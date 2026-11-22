@@ -40,6 +40,7 @@ pub fn parse_heredoc_word(
     while i < raw.len() {
         match raw[i] {
             b'\\' if raw.get(i + 1).is_some_and(|b| matches!(b, b'$' | b'`' | b'\\' | b'\n')) => {
+                ctx.step(err_pos)?;
                 if i > lit_start {
                     let s = ctx.ast.push_bytes(&raw[lit_start..i])?;
                     parts.try_push(WordPart::Literal(s))?;
@@ -53,6 +54,7 @@ pub fn parse_heredoc_word(
                 lit_start = i;
             }
             b'$' => {
+                ctx.step(err_pos)?;
                 if i > lit_start {
                     let s = ctx.ast.push_bytes(&raw[lit_start..i])?;
                     parts.try_push(WordPart::Literal(s))?;
@@ -63,6 +65,7 @@ pub fn parse_heredoc_word(
                 lit_start = i;
             }
             b'`' => {
+                ctx.step(err_pos)?;
                 if i > lit_start {
                     let s = ctx.ast.push_bytes(&raw[lit_start..i])?;
                     parts.try_push(WordPart::Literal(s))?;
@@ -105,6 +108,7 @@ pub fn parse_array_elements(
             }
             continue;
         }
+        ctx.step(err_pos)?;
         let start = i;
         while i < inner.len() && !matches!(inner[i], b' ' | b'\t' | b'\r' | b'\n') {
             match inner[i] {
@@ -176,63 +180,27 @@ fn parse_word_impl(
     }
 
     let mut parts = KVec::new_in(ctx.budget);
-    let mut i = 0;
-
-    // Leading tilde expansion `~` or `~user` (when unquoted at word start)
-    if allow_tilde && raw.first() == Some(&b'~') {
-        let mut end = 1;
-        let mut valid = true;
-        while end < raw.len() && raw[end] != b'/' {
-            let c = raw[end];
-            if matches!(c, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'{' | b'*' | b'?' | b'[') {
-                valid = false;
-                break;
-            }
-            end += 1;
-        }
-        if valid {
-            let user = if end > 1 {
-                Some(ctx.ast.push_bytes(&raw[1..end])?)
-            } else {
-                None
-            };
-            parts.try_push(WordPart::TildeExpand { user })?;
-            i = end;
-        }
-    }
-
+    let mut i = if allow_tilde && raw.first() == Some(&b'~') {
+        parse_leading_tilde(raw, &mut parts, ctx)?
+    } else {
+        0
+    };
     let mut lit_start = i;
+    let mut can_have_rbrace = true;
+    let mut can_have_rparen = true;
+    let mut can_have_rbracket = true;
 
     while i < raw.len() {
         let b = raw[i];
         match b {
             b'\\' => {
                 flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                if let Some(&next) = raw.get(i + 1) {
-                    if next == b'\n' {
-                        i += 2;
-                    } else {
-                        let s = ctx.ast.push_bytes(&[next])?;
-                        parts.try_push(WordPart::Escaped(s))?;
-                        i += 2;
-                    }
-                } else {
-                    let s = ctx.ast.push_bytes(b"\\")?;
-                    parts.try_push(WordPart::Escaped(s))?;
-                    i += 1;
-                }
+                i = parse_word_backslash(raw, i, &mut parts, ctx)?;
                 lit_start = i;
             }
             b'\'' => {
                 flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                let start = i + 1;
-                let end = raw[start..]
-                    .iter()
-                    .position(|&c| c == b'\'')
-                    .map_or(raw.len(), |p| start + p);
-                let s = ctx.ast.push_bytes(&raw[start..end])?;
-                parts.try_push(WordPart::SingleQuoted(s))?;
-                i = (end + 1).min(raw.len());
+                i = parse_word_single_quote(raw, i, &mut parts, ctx)?;
                 lit_start = i;
             }
             b'"' => {
@@ -244,23 +212,9 @@ fn parse_word_impl(
             }
             b'$' if raw.get(i + 1) == Some(&b'\'') => {
                 flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                let start = i + 2;
-                let mut end = start;
-                while end < raw.len() {
-                    if raw[end] == b'\\' && end + 1 < raw.len() {
-                        end += 2;
-                        continue;
-                    }
-                    if raw[end] == b'\'' {
-                        break;
-                    }
-                    end += 1;
-                }
-                let mut decoded = KBytes::new_in(ctx.budget);
-                decode_ansic(&raw[start..end], &mut decoded, ctx.budget)?;
-                let s = ctx.ast.push_bytes(&decoded)?;
-                parts.try_push(WordPart::AnsiCQuoted(s))?;
-                i = (end + 1).min(raw.len());
+                let (part, next_i) = parse_ansic_part(raw, i, ctx)?;
+                parts.try_push(part)?;
+                i = next_i;
                 lit_start = i;
             }
             b'$' if raw.get(i + 1) == Some(&b'"') => {
@@ -286,15 +240,15 @@ fn parse_word_impl(
             }
             b'<' | b'>' if raw.get(i + 1) == Some(&b'(') => {
                 flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                let output = b == b'>';
-                let (inner, next_i) = scan_cmd_subst_inner(raw, i + 1);
-                let body = parse_sub_script(inner, err_pos, ctx)?;
-                parts.try_push(WordPart::ProcessSubst { body, output })?;
+                let (part, next_i) = parse_word_proc_subst(raw, i, b == b'>', err_pos, ctx)?;
+                parts.try_push(part)?;
                 i = next_i;
                 lit_start = i;
             }
-            b'{' if allow_brace => {
-                if let Some((part, next_i)) = try_parse_brace(raw, i, err_pos, ctx)? {
+            b'{' if allow_brace && can_have_rbrace => {
+                if let Some((part, next_i)) =
+                    try_parse_brace(raw, i, err_pos, ctx, &mut can_have_rbrace)?
+                {
                     flush_lit(raw, lit_start, i, &mut parts, ctx)?;
                     parts.try_push(part)?;
                     i = next_i;
@@ -303,36 +257,17 @@ fn parse_word_impl(
                     i += 1;
                 }
             }
-            b'@' | b'*' | b'+' | b'?' | b'!' if allow_glob && raw.get(i + 1) == Some(&b'(') => {
-                if let Some(end) = find_matching_paren(raw, i + 1) {
+            b'@' | b'*' | b'+' | b'?' | b'!' | b'[' if allow_glob => {
+                if let Some((part, next_i)) = parse_word_glob(
+                    raw,
+                    i,
+                    &mut can_have_rparen,
+                    &mut can_have_rbracket,
+                    ctx,
+                )? {
                     flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                    let pattern = ctx.ast.push_bytes(&raw[i..=end])?;
-                    parts.try_push(WordPart::Glob { pattern })?;
-                    i = end + 1;
-                    lit_start = i;
-                } else if matches!(b, b'*' | b'?') {
-                    flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                    let pattern = ctx.ast.push_bytes(&raw[i..i + 1])?;
-                    parts.try_push(WordPart::Glob { pattern })?;
-                    i += 1;
-                    lit_start = i;
-                } else {
-                    i += 1;
-                }
-            }
-            b'*' | b'?' if allow_glob => {
-                flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                let pattern = ctx.ast.push_bytes(&raw[i..i + 1])?;
-                parts.try_push(WordPart::Glob { pattern })?;
-                i += 1;
-                lit_start = i;
-            }
-            b'[' if allow_glob => {
-                if let Some(end) = find_glob_bracket(raw, i) {
-                    flush_lit(raw, lit_start, i, &mut parts, ctx)?;
-                    let pattern = ctx.ast.push_bytes(&raw[i..=end])?;
-                    parts.try_push(WordPart::Glob { pattern })?;
-                    i = end + 1;
+                    parts.try_push(part)?;
+                    i = next_i;
                     lit_start = i;
                 } else {
                     i += 1;
@@ -346,6 +281,129 @@ fn parse_word_impl(
     let p_start = ctx.ast.parts.len();
     ctx.ast.parts.try_extend_from_slice(&parts)?;
     Ok(ctx.ast.push_word(Span::new(p_start, ctx.ast.parts.len()))?)
+}
+
+#[inline(never)]
+fn parse_leading_tilde(
+    raw: &[u8],
+    parts: &mut KVec<WordPart>,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<usize, Error> {
+    let mut end = 1;
+    while end < raw.len() && raw[end] != b'/' {
+        let c = raw[end];
+        if matches!(c, b'\'' | b'"' | b'\\' | b'$' | b'`' | b'{' | b'*' | b'?' | b'[') {
+            return Ok(0);
+        }
+        end += 1;
+    }
+    let user = if end > 1 {
+        Some(ctx.ast.push_bytes(&raw[1..end])?)
+    } else {
+        None
+    };
+    parts.try_push(WordPart::TildeExpand { user })?;
+    Ok(end)
+}
+
+#[inline(never)]
+fn parse_word_backslash(
+    raw: &[u8],
+    i: usize,
+    parts: &mut KVec<WordPart>,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<usize, Error> {
+    if let Some(&next) = raw.get(i + 1) {
+        if next == b'\n' {
+            return Ok(i + 2);
+        }
+        let s = ctx.ast.push_bytes(&[next])?;
+        parts.try_push(WordPart::Escaped(s))?;
+        Ok(i + 2)
+    } else {
+        let s = ctx.ast.push_bytes(b"\\")?;
+        parts.try_push(WordPart::Escaped(s))?;
+        Ok(i + 1)
+    }
+}
+
+#[inline(never)]
+fn parse_word_single_quote(
+    raw: &[u8],
+    i: usize,
+    parts: &mut KVec<WordPart>,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<usize, Error> {
+    let start = i + 1;
+    let end = raw[start..]
+        .iter()
+        .position(|&c| c == b'\'')
+        .map_or(raw.len(), |p| start + p);
+    let s = ctx.ast.push_bytes(&raw[start..end])?;
+    parts.try_push(WordPart::SingleQuoted(s))?;
+    Ok((end + 1).min(raw.len()))
+}
+
+#[inline(never)]
+fn parse_word_proc_subst(
+    raw: &[u8],
+    i: usize,
+    output: bool,
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<(WordPart, usize), Error> {
+    let Some((inner, next_i)) = scan_cmd_subst_inner(raw, i + 1) else {
+        return Err(parser_err(
+            err_pos,
+            ctx.budget,
+            format_args!("unexpected EOF while looking for matching `)'"),
+        ));
+    };
+    let body = parse_sub_script(inner, err_pos, ctx)?;
+    Ok((WordPart::ProcessSubst { body, output }, next_i))
+}
+
+#[inline(never)]
+fn parse_word_glob(
+    raw: &[u8],
+    i: usize,
+    can_have_rparen: &mut bool,
+    can_have_rbracket: &mut bool,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<Option<(WordPart, usize)>, Error> {
+    let b = raw[i];
+    if matches!(b, b'@' | b'*' | b'+' | b'?' | b'!') && raw.get(i + 1) == Some(&b'(') {
+        let matched = if *can_have_rparen {
+            let found = find_matching_paren(raw, i + 1);
+            if found.is_none() && !raw[i + 2..].contains(&b')') {
+                *can_have_rparen = false;
+            }
+            found
+        } else {
+            None
+        };
+        if let Some(end) = matched {
+            let pattern = ctx.ast.push_bytes(&raw[i..=end])?;
+            return Ok(Some((WordPart::Glob { pattern }, end + 1)));
+        }
+        if matches!(b, b'*' | b'?') {
+            let pattern = ctx.ast.push_bytes(&raw[i..i + 1])?;
+            return Ok(Some((WordPart::Glob { pattern }, i + 1)));
+        }
+        return Ok(None);
+    }
+    if matches!(b, b'*' | b'?') {
+        let pattern = ctx.ast.push_bytes(&raw[i..i + 1])?;
+        return Ok(Some((WordPart::Glob { pattern }, i + 1)));
+    }
+    if b == b'[' && *can_have_rbracket {
+        if let Some(end) = find_glob_bracket(raw, i) {
+            let pattern = ctx.ast.push_bytes(&raw[i..=end])?;
+            return Ok(Some((WordPart::Glob { pattern }, end + 1)));
+        }
+        *can_have_rbracket = false;
+    }
+    Ok(None)
 }
 
 fn flush_lit(
@@ -362,12 +420,37 @@ fn flush_lit(
     Ok(())
 }
 
+#[inline(never)]
+fn parse_ansic_part(
+    raw: &[u8],
+    dollar_idx: usize,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<(WordPart, usize), Error> {
+    let start = dollar_idx + 2;
+    let mut end = start;
+    while end < raw.len() {
+        if raw[end] == b'\\' && end + 1 < raw.len() {
+            end += 2;
+            continue;
+        }
+        if raw[end] == b'\'' {
+            break;
+        }
+        end += 1;
+    }
+    let mut decoded = KBytes::new_in(ctx.budget);
+    decode_ansic(&raw[start..end], &mut decoded, ctx.budget)?;
+    let s = ctx.ast.push_bytes(&decoded)?;
+    Ok((WordPart::AnsiCQuoted(s), (end + 1).min(raw.len())))
+}
+
 fn parse_double_quoted(
     raw: &[u8],
     open_idx: usize,
     err_pos: Pos,
     ctx: &mut ParseCtx<'_, '_>,
 ) -> Result<(WordPart, usize), Error> {
+    ctx.step(err_pos)?;
     let mut inner_parts = KVec::new_in(ctx.budget);
     let mut i = open_idx + 1;
     let mut lit_start = i;
@@ -427,20 +510,39 @@ fn parse_dollar(
     ctx: &mut ParseCtx<'_, '_>,
     in_dq: bool,
 ) -> Result<(WordPart, usize), Error> {
+    ctx.step(err_pos)?;
     let next = dollar_idx + 1;
     match raw.get(next).copied() {
         Some(b'{') => {
-            let (inner, end_after) = scan_braced_inner(raw, next);
+            let Some((inner, end_after)) = scan_braced_inner(raw, next) else {
+                return Err(parser_err(
+                    Pos { line: 0, col: 0 },
+                    ctx.budget,
+                    format_args!("unexpected EOF while looking for matching '}}'"),
+                ));
+            };
             let idx = parse_param_expand(inner, err_pos, ctx)?;
             Ok((WordPart::ParamExpand(idx), end_after))
         }
         Some(b'(') => {
             if raw.get(next + 1) == Some(&b'(') && is_arith_in_word(raw, next) {
-                let (inner, end_after) = scan_dparen_inner(raw, next);
+                let Some((inner, end_after)) = scan_dparen_inner(raw, next) else {
+                    return Err(parser_err(
+                        err_pos,
+                        ctx.budget,
+                        format_args!("unexpected EOF while looking for matching `)'"),
+                    ));
+                };
                 let arith = parse_arith(inner, err_pos, ctx)?;
                 Ok((WordPart::ArithExpand(arith), end_after))
             } else {
-                let (inner, end_after) = scan_cmd_subst_inner(raw, next);
+                let Some((inner, end_after)) = scan_cmd_subst_inner(raw, next) else {
+                    return Err(parser_err(
+                        err_pos,
+                        ctx.budget,
+                        format_args!("unexpected EOF while looking for matching `)'"),
+                    ));
+                };
                 let body = parse_sub_script(inner, err_pos, ctx)?;
                 Ok((
                     WordPart::CommandSubst {
@@ -452,7 +554,13 @@ fn parse_dollar(
             }
         }
         Some(b'[') => {
-            let (inner, end_after) = scan_bracket_arith_inner(raw, next);
+            let Some((inner, end_after)) = scan_bracket_arith_inner(raw, next) else {
+                return Err(parser_err(
+                    err_pos,
+                    ctx.budget,
+                    format_args!("unexpected EOF while looking for matching `]'"),
+                ));
+            };
             let arith = parse_arith(inner, err_pos, ctx)?;
             Ok((WordPart::ArithExpand(arith), end_after))
         }
@@ -491,11 +599,14 @@ fn parse_backtick(
     ctx: &mut ParseCtx<'_, '_>,
     in_dq: bool,
 ) -> Result<(WordPart, usize), Error> {
+    ctx.step(err_pos)?;
     let mut i = open_idx + 1;
+    let mut closed = false;
     let mut unescaped = KBytes::new_in(ctx.budget);
     while i < raw.len() {
         if raw[i] == b'`' {
             i += 1;
+            closed = true;
             break;
         }
         if raw[i] == b'\\' {
@@ -510,6 +621,13 @@ fn parse_backtick(
         }
         unescaped.try_push(raw[i])?;
         i += 1;
+    }
+    if !closed {
+        return Err(parser_err(
+            err_pos,
+            ctx.budget,
+            format_args!("unexpected EOF while looking for matching ``'"),
+        ));
     }
     let body = parse_sub_script(&unescaped, err_pos, ctx)?;
     Ok((
@@ -528,7 +646,18 @@ fn parse_param_expand(
     err_pos: Pos,
     ctx: &mut ParseCtx<'_, '_>,
 ) -> Result<u32, Error> {
-    // `${}` empty -> valid, expands to `""`.
+    ctx.step(err_pos)?;
+    ctx.enter_depth(err_pos)?;
+    let res = parse_param_expand_inner(inner, err_pos, ctx);
+    ctx.leave_depth();
+    res
+}
+
+fn parse_param_expand_inner(
+    inner: &[u8],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<u32, Error> {
     if inner.is_empty() {
         let p = ctx.ast.push_bytes(b"")?;
         return Ok(ctx.ast.push_param(ParamExpand {
@@ -536,110 +665,123 @@ fn parse_param_expand(
             op: None,
         })?);
     }
-
-    // Leading `#` -> length forms
-    if inner[0] == b'#' {
-        if inner.len() == 1 {
-            // `${#}` -> positional parameter count
-            let p = ctx.ast.push_bytes(b"#")?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter: p,
-                op: None,
-            })?);
-        }
-        let rest = &inner[1..];
-        let (name_end, multi_sub) = scan_param_name(rest);
-        if name_end == 0 || multi_sub {
-            let text = ctx.ast.push_bytes(inner)?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter: text,
-                op: Some(ParamOp::BadSubstitution { text }),
-            })?);
-        }
-        let param_slice = &rest[..name_end];
-        let tail = &rest[name_end..];
-        if tail.is_empty() {
-            let parameter = ctx.ast.push_bytes(param_slice)?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter,
-                op: Some(ParamOp::Length),
-            })?);
-        }
-        if tail[0] == b':' {
-            // `${#var:...}` -> deferred runtime bad substitution on `var`!
-            let parameter = ctx.ast.push_bytes(param_slice)?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter,
-                op: Some(ParamOp::LengthSliceError),
-            })?);
-        }
-        // Any other operator after `#var` (`${#x-y}`, `${#x/a/b}`, `${#x#p}`, etc.) -> parse-time error!
-        let inner_str = core::str::from_utf8(inner).unwrap_or("?");
-        return Err(parser_err(
-            err_pos,
-            ctx.budget,
-            format_args!("${{{inner_str}}}: bad substitution"),
-        ));
+    match inner[0] {
+        b'#' => parse_param_hash(inner, err_pos, ctx),
+        b'!' => parse_param_bang(inner, err_pos, ctx),
+        _ => parse_param_standard(inner, err_pos, ctx),
     }
+}
 
-    // Leading `!` -> indirection / array keys / var name prefix
-    if inner[0] == b'!' {
-        if inner.len() == 1 {
-            let p = ctx.ast.push_bytes(b"!")?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter: p,
-                op: None,
-            })?);
-        }
-        let rest = &inner[1..];
-        // `${!arr[@]}` / `${!arr[*]}`
-        if let Some(lb) = rest.iter().position(|&b| b == b'[') {
-            let arr = &rest[..lb];
-            let after = &rest[lb..];
-            if identifier(arr) && (after == b"[@]" || after == b"[*]") {
-                let array = ctx.ast.push_bytes(arr)?;
-                let star = after == b"[*]";
-                return Ok(ctx.ast.push_param(ParamExpand {
-                    parameter: array,
-                    op: Some(ParamOp::ArrayKeys { array, star }),
-                })?);
-            }
-        }
-        // `${!prefix*}` / `${!prefix@}`
-        if rest.len() >= 2 && matches!(rest.last(), Some(b'*' | b'@')) {
-            let pfx = &rest[..rest.len() - 1];
-            if identifier(pfx) {
-                let prefix = ctx.ast.push_bytes(pfx)?;
-                let star = *rest.last().unwrap() == b'*';
-                return Ok(ctx.ast.push_param(ParamExpand {
-                    parameter: prefix,
-                    op: Some(ParamOp::VarNamePrefix { prefix, star }),
-                })?);
-            }
-        }
-        // `${!var}` or `${!var<op>}`
-        let (name_end, multi_sub) = scan_param_name(rest);
-        if name_end == 0 || multi_sub {
-            let text = ctx.ast.push_bytes(inner)?;
-            return Ok(ctx.ast.push_param(ParamExpand {
-                parameter: text,
-                op: Some(ParamOp::BadSubstitution { text }),
-            })?);
-        }
-        let parameter = ctx.ast.push_bytes(&rest[..name_end])?;
-        let tail = &rest[name_end..];
-        let inner_op = if tail.is_empty() {
-            None
-        } else {
-            Some(parse_param_expand(rest, err_pos, ctx)?)
-        };
+#[inline(never)]
+fn parse_param_hash(
+    inner: &[u8],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<u32, Error> {
+    if inner.len() == 1 {
+        let p = ctx.ast.push_bytes(b"#")?;
         return Ok(ctx.ast.push_param(ParamExpand {
-            parameter,
-            op: Some(ParamOp::Indirection { inner_op }),
+            parameter: p,
+            op: None,
         })?);
     }
+    let rest = &inner[1..];
+    let (name_end, multi_sub) = scan_param_name(rest);
+    if name_end == 0 || multi_sub {
+        let text = ctx.ast.push_bytes(inner)?;
+        return Ok(ctx.ast.push_param(ParamExpand {
+            parameter: text,
+            op: Some(ParamOp::BadSubstitution { text }),
+        })?);
+    }
+    let param_slice = &rest[..name_end];
+    let tail = &rest[name_end..];
+    if tail.is_empty() {
+        let parameter = ctx.ast.push_bytes(param_slice)?;
+        return Ok(ctx.ast.push_param(ParamExpand {
+            parameter,
+            op: Some(ParamOp::Length),
+        })?);
+    }
+    if tail[0] == b':' {
+        let parameter = ctx.ast.push_bytes(param_slice)?;
+        return Ok(ctx.ast.push_param(ParamExpand {
+            parameter,
+            op: Some(ParamOp::LengthSliceError),
+        })?);
+    }
+    let inner_str = core::str::from_utf8(inner).unwrap_or("?");
+    Err(parser_err(
+        err_pos,
+        ctx.budget,
+        format_args!("${{{inner_str}}}: bad substitution"),
+    ))
+}
 
-    // Standard parameter name + optional operator
+#[inline(never)]
+fn parse_param_bang(
+    inner: &[u8],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<u32, Error> {
+    if inner.len() == 1 {
+        let p = ctx.ast.push_bytes(b"!")?;
+        return Ok(ctx.ast.push_param(ParamExpand {
+            parameter: p,
+            op: None,
+        })?);
+    }
+    let rest = &inner[1..];
+    if let Some(lb) = rest.iter().position(|&b| b == b'[') {
+        let arr = &rest[..lb];
+        let after = &rest[lb..];
+        if identifier(arr) && (after == b"[@]" || after == b"[*]") {
+            let array = ctx.ast.push_bytes(arr)?;
+            let star = after == b"[*]";
+            return Ok(ctx.ast.push_param(ParamExpand {
+                parameter: array,
+                op: Some(ParamOp::ArrayKeys { array, star }),
+            })?);
+        }
+    }
+    if rest.len() >= 2 && matches!(rest.last(), Some(b'*' | b'@')) {
+        let pfx = &rest[..rest.len() - 1];
+        if identifier(pfx) {
+            let prefix = ctx.ast.push_bytes(pfx)?;
+            let star = *rest.last().unwrap() == b'*';
+            return Ok(ctx.ast.push_param(ParamExpand {
+                parameter: prefix,
+                op: Some(ParamOp::VarNamePrefix { prefix, star }),
+            })?);
+        }
+    }
+    let (name_end, multi_sub) = scan_param_name(rest);
+    if name_end == 0 || multi_sub {
+        let text = ctx.ast.push_bytes(inner)?;
+        return Ok(ctx.ast.push_param(ParamExpand {
+            parameter: text,
+            op: Some(ParamOp::BadSubstitution { text }),
+        })?);
+    }
+    let parameter = ctx.ast.push_bytes(&rest[..name_end])?;
+    let tail = &rest[name_end..];
+    let inner_op = if tail.is_empty() {
+        None
+    } else {
+        Some(parse_param_expand(rest, err_pos, ctx)?)
+    };
+    Ok(ctx.ast.push_param(ParamExpand {
+        parameter,
+        op: Some(ParamOp::Indirection { inner_op }),
+    })?)
+}
+
+#[inline(never)]
+fn parse_param_standard(
+    inner: &[u8],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<u32, Error> {
     let (name_end, multi_sub) = scan_param_name(inner);
     if name_end == 0 || multi_sub {
         let text = ctx.ast.push_bytes(inner)?;
@@ -659,7 +801,6 @@ fn parse_param_expand(
         })?);
     }
 
-    // `${var!ref}` -> parse-time error!
     if tail[0] == b'!' {
         let inner_str = core::str::from_utf8(inner).unwrap_or("?");
         return Err(parser_err(
@@ -669,6 +810,20 @@ fn parse_param_expand(
         ));
     }
 
+    let op = parse_param_op(inner, tail, err_pos, ctx)?;
+    Ok(ctx.ast.push_param(ParamExpand {
+        parameter,
+        op: Some(op),
+    })?)
+}
+
+#[inline(never)]
+fn parse_param_op(
+    inner: &[u8],
+    tail: &[u8],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<ParamOp, Error> {
     let op = match tail {
         // Default / Assign / Error / Alternative (with or without `:`)
         [b':', b'-', rest @ ..] => {
@@ -844,11 +999,7 @@ fn parse_param_expand(
             ParamOp::BadSubstitution { text }
         }
     };
-
-    Ok(ctx.ast.push_param(ParamExpand {
-        parameter,
-        op: Some(op),
-    })?)
+    Ok(op)
 }
 
 fn opt_word(
@@ -1005,12 +1156,14 @@ fn try_parse_brace(
     open_idx: usize,
     err_pos: Pos,
     ctx: &mut ParseCtx<'_, '_>,
+    can_have_rbrace: &mut bool,
 ) -> Result<Option<(WordPart, usize)>, Error> {
     // Find matching `}` respecting quotes, escapes, `${...}`, and nested `{...}`.
     let mut i = open_idx + 1;
     let mut depth = 1u32;
     let mut in_sq = false;
     let mut in_dq = false;
+    let mut saw_rbrace = false;
     let mut commas = KVec::new_in(ctx.budget);
 
     while i < raw.len() && depth > 0 {
@@ -1035,6 +1188,9 @@ fn try_parse_brace(
         }
         match b {
             b'\\' if i + 1 < raw.len() => i += 2,
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                i = skip_ansic(raw, i);
+            }
             b'\'' => {
                 in_sq = true;
                 i += 1;
@@ -1044,7 +1200,9 @@ fn try_parse_brace(
                 i += 1;
             }
             b'$' if raw.get(i + 1) == Some(&b'{') => {
-                let (_, end) = scan_braced_inner(raw, i + 1);
+                let Some((_, end)) = scan_braced_inner(raw, i + 1) else {
+                    return Ok(None);
+                };
                 i = end;
             }
             b'{' => {
@@ -1052,6 +1210,7 @@ fn try_parse_brace(
                 i += 1;
             }
             b'}' => {
+                saw_rbrace = true;
                 depth -= 1;
                 if depth == 0 {
                     break;
@@ -1066,6 +1225,9 @@ fn try_parse_brace(
         }
     }
     if depth != 0 {
+        if !saw_rbrace {
+            *can_have_rbrace = false;
+        }
         return Ok(None);
     }
     let close_idx = i;
@@ -1073,21 +1235,7 @@ fn try_parse_brace(
 
     // Comma list `{a,b,...}`
     if !commas.is_empty() {
-        let mut items = KVec::new_in(ctx.budget);
-        let mut seg_start = open_idx + 1;
-        for &c_idx in commas.iter() {
-            let w = parse_word(&raw[seg_start..c_idx], err_pos, ctx)?;
-            items.try_push(BraceItem::Word(w))?;
-            seg_start = c_idx + 1;
-        }
-        let w = parse_word(&raw[seg_start..close_idx], err_pos, ctx)?;
-        items.try_push(BraceItem::Word(w))?;
-        let start = ctx.ast.brace_items.len();
-        ctx.ast.brace_items.try_extend_from_slice(&items)?;
-        return Ok(Some((
-            WordPart::BraceExpand(Span::new(start, ctx.ast.brace_items.len())),
-            close_idx + 1,
-        )));
+        return parse_brace_comma_list(raw, open_idx, close_idx, &commas, err_pos, ctx);
     }
 
     // Sequence `{start..end}` or `{start..end..step}`
@@ -1101,6 +1249,51 @@ fn try_parse_brace(
     }
 
     Ok(None)
+}
+
+#[inline(never)]
+fn parse_brace_comma_list(
+    raw: &[u8],
+    open_idx: usize,
+    close_idx: usize,
+    commas: &[usize],
+    err_pos: Pos,
+    ctx: &mut ParseCtx<'_, '_>,
+) -> Result<Option<(WordPart, usize)>, Error> {
+    ctx.step(err_pos)?;
+    ctx.enter_depth(err_pos)?;
+    let mut items = KVec::new_in(ctx.budget);
+    let mut seg_start = open_idx + 1;
+    for &c_idx in commas.iter() {
+        match parse_word(&raw[seg_start..c_idx], err_pos, ctx) {
+            Ok(w) => {
+                if let Err(e) = items.try_push(BraceItem::Word(w)) {
+                    ctx.leave_depth();
+                    return Err(e.into());
+                }
+            }
+            Err(e) => {
+                ctx.leave_depth();
+                return Err(e);
+            }
+        }
+        seg_start = c_idx + 1;
+    }
+    let last_w = match parse_word(&raw[seg_start..close_idx], err_pos, ctx) {
+        Ok(w) => w,
+        Err(e) => {
+            ctx.leave_depth();
+            return Err(e);
+        }
+    };
+    ctx.leave_depth();
+    items.try_push(BraceItem::Word(last_w))?;
+    let start = ctx.ast.brace_items.len();
+    ctx.ast.brace_items.try_extend_from_slice(&items)?;
+    Ok(Some((
+        WordPart::BraceExpand(Span::new(start, ctx.ast.brace_items.len())),
+        close_idx + 1,
+    )))
 }
 
 fn try_parse_brace_range(
@@ -1198,7 +1391,21 @@ fn parse_signed_i64(s: &[u8]) -> Option<i64> {
     Some(acc)
 }
 
-fn scan_braced_inner(raw: &[u8], open_brace: usize) -> (&[u8], usize) {
+fn skip_ansic(raw: &[u8], dollar_idx: usize) -> usize {
+    let mut i = dollar_idx + 2;
+    while i < raw.len() {
+        if raw[i] == b'\\' && i + 1 < raw.len() {
+            i += 2;
+        } else if raw[i] == b'\'' {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    raw.len()
+}
+
+fn scan_braced_inner(raw: &[u8], open_brace: usize) -> Option<(&[u8], usize)> {
     let mut i = open_brace + 1;
     let mut depth = 1u32;
     let mut in_sq = false;
@@ -1225,6 +1432,9 @@ fn scan_braced_inner(raw: &[u8], open_brace: usize) -> (&[u8], usize) {
         }
         match b {
             b'\\' if i + 1 < raw.len() => i += 2,
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                i = skip_ansic(raw, i);
+            }
             b'\'' => {
                 in_sq = true;
                 i += 1;
@@ -1240,14 +1450,14 @@ fn scan_braced_inner(raw: &[u8], open_brace: usize) -> (&[u8], usize) {
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return (&raw[open_brace + 1..i], i + 1);
+                    return Some((&raw[open_brace + 1..i], i + 1));
                 }
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    (&raw[open_brace + 1..raw.len()], raw.len())
+    None
 }
 
 fn is_arith_in_word(raw: &[u8], first_lparen: usize) -> bool {
@@ -1277,6 +1487,9 @@ fn is_arith_in_word(raw: &[u8], first_lparen: usize) -> bool {
         }
         match b {
             b'\\' if i + 1 < raw.len() => i += 2,
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                i = skip_ansic(raw, i);
+            }
             b'\'' => {
                 in_sq = true;
                 i += 1;
@@ -1302,7 +1515,7 @@ fn is_arith_in_word(raw: &[u8], first_lparen: usize) -> bool {
     false
 }
 
-fn scan_dparen_inner(raw: &[u8], first_lparen: usize) -> (&[u8], usize) {
+fn scan_dparen_inner(raw: &[u8], first_lparen: usize) -> Option<(&[u8], usize)> {
     let start = first_lparen + 2;
     let mut i = start;
     let mut depth = 2u32;
@@ -1330,6 +1543,9 @@ fn scan_dparen_inner(raw: &[u8], first_lparen: usize) -> (&[u8], usize) {
         }
         match b {
             b'\\' if i + 1 < raw.len() => i += 2,
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                i = skip_ansic(raw, i);
+            }
             b'\'' => {
                 in_sq = true;
                 i += 1;
@@ -1344,7 +1560,7 @@ fn scan_dparen_inner(raw: &[u8], first_lparen: usize) -> (&[u8], usize) {
             }
             b')' => {
                 if depth == 2 && raw.get(i + 1) == Some(&b')') {
-                    return (&raw[start..i], i + 2);
+                    return Some((&raw[start..i], i + 2));
                 }
                 depth = depth.saturating_sub(1);
                 i += 1;
@@ -1352,10 +1568,10 @@ fn scan_dparen_inner(raw: &[u8], first_lparen: usize) -> (&[u8], usize) {
             _ => i += 1,
         }
     }
-    (&raw[start..raw.len()], raw.len())
+    None
 }
 
-fn scan_bracket_arith_inner(raw: &[u8], open_bracket: usize) -> (&[u8], usize) {
+fn scan_bracket_arith_inner(raw: &[u8], open_bracket: usize) -> Option<(&[u8], usize)> {
     let start = open_bracket + 1;
     let mut i = start;
     let mut depth = 1u32;
@@ -1369,17 +1585,17 @@ fn scan_bracket_arith_inner(raw: &[u8], open_bracket: usize) -> (&[u8], usize) {
             b']' => {
                 depth -= 1;
                 if depth == 0 {
-                    return (&raw[start..i], i + 1);
+                    return Some((&raw[start..i], i + 1));
                 }
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    (&raw[start..raw.len()], raw.len())
+    None
 }
 
-fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> (&[u8], usize) {
+fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> Option<(&[u8], usize)> {
     let start = open_paren + 1;
     let mut i = start;
     let mut paren_depth = 1u32;
@@ -1429,6 +1645,11 @@ fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> (&[u8], usize) {
                 word_start = false;
                 wlen = 0;
             }
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                i = skip_ansic(raw, i);
+                word_start = false;
+                wlen = 0;
+            }
             b'\'' => {
                 in_sq = true;
                 i += 1;
@@ -1473,7 +1694,7 @@ fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> (&[u8], usize) {
                 } else {
                     paren_depth -= 1;
                     if paren_depth == 0 {
-                        return (&raw[start..i], i + 1);
+                        return Some((&raw[start..i], i + 1));
                     }
                     i += 1;
                     word_start = true;
@@ -1500,7 +1721,7 @@ fn scan_cmd_subst_inner(raw: &[u8], open_paren: usize) -> (&[u8], usize) {
             }
         }
     }
-    (&raw[start..raw.len()], raw.len())
+    None
 }
 
 fn find_matching_paren(raw: &[u8], open: usize) -> Option<usize> {

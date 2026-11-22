@@ -35,6 +35,23 @@ impl<'a, 'w> ParseCtx<'a, 'w> {
         }
         Ok(())
     }
+
+    pub fn enter_depth(&mut self, pos: Pos) -> Result<(), Error> {
+        self.depth += 1;
+        if self.depth > DEPTH_CAP {
+            self.depth -= 1;
+            return Err(parser_err(
+                pos,
+                self.budget,
+                format_args!("Maximum parser nesting depth exceeded ({DEPTH_CAP})"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn leave_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
 }
 
 pub fn parse_script(
@@ -44,7 +61,7 @@ pub fn parse_script(
     work: &mut dyn FnMut(u64) -> Result<(), ()>,
 ) -> Result<Ast, Error> {
     let lex_out = lex(source, max_heredoc_size, budget, work)?;
-    let token_count = lex_out.len();
+    let token_count = lex_out.len() + 1; // include synthetic EOF token per spec §6.1.2
     let mut ctx = ParseCtx {
         ast: Ast::new_in(budget),
         budget,
@@ -69,29 +86,21 @@ pub fn parse_sub_script(
     err_pos: Pos,
     ctx: &mut ParseCtx<'_, '_>,
 ) -> Result<Span, Error> {
-    ctx.depth += 1;
-    if ctx.depth > DEPTH_CAP {
-        return Err(parser_err(
-            err_pos,
-            ctx.budget,
-            format_args!("Maximum parser nesting depth exceeded ({DEPTH_CAP})"),
-        ));
-    }
-    let lex_out = lex(source, ctx.max_heredoc_size, ctx.budget, ctx.work)?;
-    ctx.cumulative_tokens = ctx.cumulative_tokens.saturating_add(lex_out.len());
-    if ctx.cumulative_tokens > TOKEN_CAP {
-        ctx.depth -= 1;
-        return Err(parser_err(
-            Pos { line: 1, col: 1 },
-            ctx.budget,
-            format_args!("Too many tokens: cumulative count exceeds limit of {TOKEN_CAP}"),
-        ));
-    }
-    let res = {
+    ctx.enter_depth(err_pos)?;
+    let res = (|| {
+        let lex_out = lex(source, ctx.max_heredoc_size, ctx.budget, ctx.work)?;
+        ctx.cumulative_tokens = ctx.cumulative_tokens.saturating_add(lex_out.len() + 1);
+        if ctx.cumulative_tokens > TOKEN_CAP {
+            return Err(parser_err(
+                Pos { line: 1, col: 1 },
+                ctx.budget,
+                format_args!("Too many tokens: cumulative count exceeds limit of {TOKEN_CAP}"),
+            ));
+        }
         let mut p = Parser::new(&lex_out, ctx);
         p.parse_root_list()
-    };
-    ctx.depth -= 1;
+    })();
+    ctx.leave_depth();
     res
 }
 
@@ -198,11 +207,12 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         }
     }
 
-    pub(super) fn skip_newlines(&mut self) {
+    pub(super) fn skip_newlines(&mut self) -> Result<(), Error> {
         while self.kind() == TokenKind::Newline {
             self.advance();
-            let _ = self.attach_pending_heredocs();
+            self.attach_pending_heredocs()?;
         }
+        Ok(())
     }
 
     fn attach_pending_heredocs(&mut self) -> Result<(), Error> {
@@ -237,7 +247,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         let mut top_count: usize = 0;
 
         loop {
-            self.skip_newlines();
+            self.skip_newlines()?;
             self.attach_pending_heredocs()?;
             if self.kind() == TokenKind::Eof {
                 break;
@@ -312,7 +322,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         let mut stmts = KVec::new_in(self.ctx.budget);
 
         loop {
-            self.skip_newlines();
+            self.skip_newlines()?;
             self.attach_pending_heredocs()?;
             if self.is_compound_list_end()
                 || (stmts.is_empty() && self.kind() == TokenKind::Semicolon)
@@ -403,7 +413,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
                 ListOp::Or
             };
             self.advance();
-            self.skip_newlines();
+            self.skip_newlines()?;
             ops.try_push(op)?;
             // Trailing `&&` / `||` followed by EOF or compound terminator -> empty no-op SimpleCmd.
             if self.is_empty_rhs_end() {
@@ -535,7 +545,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
             }
             let is_both = self.kind() == TokenKind::PipeAmp;
             self.advance();
-            self.skip_newlines();
+            self.skip_newlines()?;
             stderr_flags.try_push(is_both)?;
             if self.is_empty_rhs_end() {
                 let empty = self.ctx.ast.push_cmd(Command::Simple(SimpleCmd {
@@ -708,7 +718,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         let var = self.ctx.ast.push_bytes(self.lexeme())?;
         self.advance();
 
-        self.skip_newlines();
+        self.skip_newlines()?;
         let words = if self.kind() == TokenKind::In {
             self.advance();
             let mut list = KVec::new_in(self.ctx.budget);
@@ -730,7 +740,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
             None
         };
 
-        self.skip_newlines();
+        self.skip_newlines()?;
         self.expect(TokenKind::Do)?;
         let body = self.parse_compound_list()?;
         if body.is_empty() {
@@ -862,12 +872,12 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
             )));
         }
         let word = self.consume_word(false)?;
-        self.skip_newlines();
+        self.skip_newlines()?;
         self.expect(TokenKind::In)?;
 
         let mut items = KVec::new_in(self.ctx.budget);
         loop {
-            self.skip_newlines();
+            self.skip_newlines()?;
             if self.kind() == TokenKind::Esac || self.kind() == TokenKind::Eof {
                 break;
             }
@@ -888,7 +898,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
                 patterns.try_push(self.consume_case_pattern()?)?;
             }
             self.expect(TokenKind::RParen)?;
-            self.skip_newlines();
+            self.skip_newlines()?;
             let body = self.parse_compound_list()?;
             let terminator = match self.kind() {
                 TokenKind::DSemi => {
@@ -973,7 +983,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
             self.advance();
             self.expect(TokenKind::RParen)?;
         }
-        self.skip_newlines();
+        self.skip_newlines()?;
         let body = self.parse_function_body()?;
         let redirs = self.parse_trailing_redirs()?;
         Ok(self
@@ -987,7 +997,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         self.advance(); // name
         self.advance(); // `(`
         self.advance(); // `)`
-        self.skip_newlines();
+        self.skip_newlines()?;
         let body = self.parse_function_body()?;
         let redirs = self.parse_trailing_redirs()?;
         Ok(self
@@ -1041,7 +1051,7 @@ impl<'a, 'b, 'w> Parser<'a, 'b, 'w> {
         let line = self.pos().line;
         self.advance(); // consume `[[`
         let expr = self.parse_cond_or()?;
-        self.skip_newlines();
+        self.skip_newlines()?;
         self.expect(TokenKind::DBrackEnd)?;
         let redirs = self.parse_trailing_redirs()?;
         Ok(self
