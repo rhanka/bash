@@ -85,11 +85,13 @@ export function stripComments(src) {
 }
 
 /** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
-export function scanImports(raw) {
+export function scanImports(raw, { dynamic = true } = {}) {
   const src = stripComments(raw);
   const specifiers = [];
   for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
-  for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
+  if (dynamic) {
+    for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
+  }
   const nonLiteralDynamic = [...src.matchAll(DYNAMIC_ANY)].length > [...src.matchAll(DYNAMIC_LITERAL)].length;
   return { specifiers, nonLiteralDynamic, src };
 }

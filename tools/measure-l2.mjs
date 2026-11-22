@@ -7,20 +7,23 @@ import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { repoRoot, toolBin, toolsDir } from "./lib.mjs";
-import { stripComments } from "./gates.mjs";
+import { scanImports } from "./gates.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
 const HOST_SETUP =
   'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });';
 
-export function measureWarm(entry, node) {
+export function measureWarm(entry, node, seed) {
   const workloads = {
     M2: ["", "new Bash()"],
+    M_paired: ["", 'const r = await new Bash().exec("echo hi"); if (r.stdout !== "hi\\n" || r.stderr !== "" || r.exitCode !== 0) throw new Error("paired echo failed")'],
     M3a: ["const bash = new Bash();", 'await bash.exec("echo hi")'],
     M3aSync: ["const bash = new Bash();", 'bash.execSync("echo hi")'],
     M_host: [HOST_SETUP, 'await host.exec("noop")'],
   };
-  return Object.fromEntries(Object.entries(workloads).map(([name, [setup, op]]) => {
+  const names = seed === undefined ? Object.keys(workloads) : shuffled(Object.keys(workloads), { seed });
+  return Object.fromEntries(names.map((name) => {
+    const [setup, op] = workloads[name];
     const source = [
       'const { Bash, defineCommand } = await import(' + entry + ');',
       setup,
@@ -71,7 +74,7 @@ function runSeries(seed, coldCode, entry, node) {
     const samples = Object.fromEntries(order.map((kind) => [kind, JSON.parse(node(coldCode[kind]))]));
     cold.push({ order, samples });
   }
-  const warm = measureWarm(entry, node);
+  const warm = measureWarm(entry, node, seed);
   const full = (field) => distribution(cold.map(({ samples }) => samples["cold-full"][field]));
   const rss = {
     full: full("rss").median,
@@ -86,17 +89,16 @@ function runSeries(seed, coldCode, entry, node) {
   return { seed, cold, warm, rss, metrics };
 }
 
-function browserImports(tree, entry) {
+function browserImports(tree, entry, { dynamic = true } = {}) {
   const reached = new Set();
   const visit = (file) => {
     const path = relative(tree, file);
     if (reached.has(path)) return;
     reached.add(path);
-    const src = stripComments(readFileSync(file, "utf8"));
-    // Matches readable and minified static imports and re-exports with a literal specifier.
-    const pattern = /(?:^|[;\n}])\s*(?:export\s[^;]*?\sfrom\s*|import\s*[^;]*?from\s*)["'](\.[^"']+\.js)["']/g;
-    for (const match of src.matchAll(pattern)) {
-      visit(resolve(dirname(file), match[1]));
+    const { specifiers } = scanImports(readFileSync(file, "utf8"), { dynamic });
+    for (const spec of specifiers) {
+      if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+      visit(resolve(dirname(file), spec));
     }
   };
   visit(entry);
@@ -161,43 +163,74 @@ function sizes(tree, env) {
 }
 
 /**
- * The L2c package split (spec section 5): B is the raw bytes of the browser-reachable shipped
- * JS graph (shared code, glue and registry), N the raw bytes of all remaining shipped JS,
- * T = B + N, and Z the sum of per-file gzip level-9 lengths. Decimal bytes.
+ * The L2c package split (spec Annex H, 22/11 owner decision):
+ * - B_cold: raw bytes of the browser static import closure;
+ * - Z_cold: gzip level-9 sum of the eagerly loaded cold path (browser static closure + index/node loader);
+ * - B_total: raw bytes of the browser-reachable shipped JS graph including dynamic literal chunks;
+ * - N: raw bytes of all remaining shipped JS;
+ * - T = B_total + N (total raw shipped JS);
+ * - Z_total: per-file gzip level-9 sum of all shipped JS.
+ * Decimal bytes.
  */
 export function packageSplit(tree, env) {
   const files = packedJsFiles(tree, env);
   // The browser-reachable graph is the built entry: prefer the packed layout, which is also
   // what the installed trees carry.
-  const entry = existsSync(join(tree, "dist", "js", "browser.js"))
-    ? join(tree, "dist", "js", "browser.js")
-    : join(tree, "host", "browser.js");
-  const browser = browserImports(tree, entry);
+  const built = existsSync(join(tree, "dist", "js", "browser.js"));
+  const browserEntry = built ? join(tree, "dist", "js", "browser.js") : join(tree, "host", "browser.js");
+  const indexEntry = built ? join(tree, "dist", "js", "index.js") : join(tree, "host", "index.js");
+  const loadEntry = built ? join(tree, "dist", "js", "node", "load.js") : join(tree, "host", "node", "load.js");
+  const browserCold = browserImports(tree, browserEntry, { dynamic: false });
+  const browserAll = browserImports(tree, browserEntry, { dynamic: true });
+  const coldSet = new Set(browserCold);
+  if (existsSync(loadEntry)) {
+    for (const p of browserImports(tree, loadEntry, { dynamic: false })) coldSet.add(p);
+  }
+  const indexRel = relative(tree, indexEntry);
+  if (files.includes(indexRel)) coldSet.add(indexRel);
   const perFile = {};
-  let B = 0, N = 0, Z = 0;
+  let B_cold = 0, Z_cold = 0, B_total = 0, N = 0, Z_total = 0;
+  const browserColdFiles = [];
+  const coldFiles = [];
   const browserFiles = [];
   const nodeFiles = [];
   for (const path of files.sort()) {
     const s = perFile[path] = size(tree, path);
-    Z += s.gzip;
-    if (browser.has(path)) {
-      B += s.raw;
+    Z_total += s.gzip;
+    if (browserCold.has(path)) {
+      B_cold += s.raw;
+      browserColdFiles.push(path);
+    }
+    if (coldSet.has(path)) {
+      Z_cold += s.gzip;
+      coldFiles.push(path);
+    }
+    if (browserAll.has(path)) {
+      B_total += s.raw;
       browserFiles.push(path);
     } else {
       N += s.raw;
       nodeFiles.push(path);
     }
   }
-  return { B, N, T: B + N, Z, perFile, browserFiles, nodeFiles };
+  return {
+    B_cold, Z_cold, B_total, Z_total, N, T: B_total + N,
+    perFile, browserColdFiles, coldFiles, browserFiles, nodeFiles,
+  };
 }
 
 /**
- * The Gate L2 verdict function (spec section 6). Compares unrounded median-of-run medians against
- * the inclusive kernel thresholds and the fixed JS bounds, with the provisional browser cap
- * B <= 58,000 B decided by the owner on 21/11. Returns `{ verdict, kernel, js }` where
+ * The Gate L2 verdict function (spec Annex H, 22/11 owner decision). Compares unrounded
+ * median-of-run medians against the inclusive kernel thresholds and the five JS gates
+ * (cold path: B_cold <= 58,000 B, Z_cold <= 30,000 B; total shipped: B_total <= 75,000 B,
+ * Z_total <= 50,000 B, T <= 110,000 B). Returns `{ verdict, kernel, js, reason }` where
  * verdict is one of "go", "go-kernel-only" or "no-go". A red correctness suite forces "no-go".
  */
-export function decideGateL2({ m1, m2, m3a, m5, wasmRaw, wasmGzip, b, n, t, z, suitesPass }) {
+export function decideGateL2({
+  m1, m2, m3a, m5, wasmRaw, wasmGzip,
+  bCold, zCold, bTotal, zTotal, t,
+  suitesPass,
+}) {
   const kernel = {
     m1: m1 <= 25.0,
     m2: m2 <= 0.20,
@@ -206,16 +239,15 @@ export function decideGateL2({ m1, m2, m3a, m5, wasmRaw, wasmGzip, b, n, t, z, s
     wasm: wasmRaw <= 1500000 && wasmGzip <= 700000,
   };
   const js = {
-    n: n <= 40000,
-    t: t <= 60000,
-    z: z <= 30000,
-    b45: b <= 45000,
-    b58: b <= 58000,
-    b: b <= 58000,
+    bCold: bCold <= 58000,
+    zCold: zCold <= 30000,
+    bTotal: bTotal <= 75000,
+    zTotal: zTotal <= 50000,
+    t: t <= 110000,
   };
   if (!suitesPass) return { verdict: "no-go", kernel, js, reason: "correctness suite is red" };
   if (!Object.values(kernel).every(Boolean)) return { verdict: "no-go", kernel, js, reason: "kernel miss" };
-  if (!js.n || !js.t || !js.z || !js.b) {
+  if (!Object.values(js).every(Boolean)) {
     return { verdict: "go-kernel-only", kernel, js, reason: "JS-only miss" };
   }
   return { verdict: "go", kernel, js, reason: "all thresholds pass" };
@@ -249,7 +281,7 @@ function stageInstalled(source, dest, name, env) {
 function summarizeRuns(runs) {
   return Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
     const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
-    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
+    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min"), count: median("count") }];
   }));
 }
 
