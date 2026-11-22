@@ -275,7 +275,7 @@ test("[[ argument does not corrupt cond_depth and for-loop respects readonly var
   await usable(shell);
 });
 
-test("linear-time lookahead in dparen, brace, extglob, and subscript scans (work-bounded and linear scaling in Wasm)", async () => {
+test("linear-time lookahead in dparen, arith_subst, brace, extglob, and subscript scans (work-bounded and linear scaling in Wasm)", async () => {
   const ABS_CAP_MS = 2_000;
 
   // Min of 3 runs filters transient OS scheduling/GC pauses while still verifying every run.
@@ -331,9 +331,10 @@ test("linear-time lookahead in dparen, brace, extglob, and subscript scans (work
     assert.ok(ms < ABS_CAP_MS, `${label} took ${ms.toFixed(1)}ms (expected < ${ABS_CAP_MS}ms)`);
   }
 
-  // 2. Verify the kernel work counter is actively charged for all 4 lookahead families.
+  // 2. Verify the kernel work counter is actively charged for all 5 lookahead families.
   const workProbeCases = [
     ["dparen", "(( ".repeat(25_000) + "))"],
+    ["arith_subst", "echo $(( " + " ".repeat(50_000) + "1))"],
     ["brace", "echo " + "{".repeat(100_000) + "}"],
     ["extglob", "echo " + "@(".repeat(50_000) + ")"],
     ["subscript", "if false; then " + "a[ ".repeat(50_000) + "]=1; fi; echo ok"],
@@ -347,9 +348,10 @@ test("linear-time lookahead in dparen, brace, extglob, and subscript scans (work
     assert.equal(probe.last.limit, "maxWorkUnits", label);
   }
 
-  // 3. Load-independent N vs 4N time scaling check across all 4 families (linear ~4x, quadratic ~16x).
+  // 3. Load-independent N vs 4N time scaling check across all 5 families (linear ~4x, quadratic ~16x).
   const scalingCases = [
     ["dparen", (n) => "(( ".repeat(n) + "))", 5_000, 2],
+    ["arith_subst", (n) => "echo $(( " + " ".repeat(n) + "1))", 10_000, 0],
     ["brace", (n) => "if false; then echo " + "{".repeat(n) + "a,b" + "}".repeat(n) + "; fi; echo ok", 10_000, 0],
     ["extglob", (n) => "echo " + "@(".repeat(n) + ")", 10_000, 0],
     ["subscript", (n) => "if false; then " + "a[ ".repeat(n) + "]=1; fi; echo ok", 10_000, 0],
@@ -367,5 +369,14 @@ test("linear-time lookahead in dparen, brace, extglob, and subscript scans (work
       `${label} non-linear scaling: N=${n} took ${small.ms.toFixed(1)}ms, 4N=${n * 4} took ${large.ms.toFixed(1)}ms (ratio ${ratio.toFixed(2)}x, expected < 10x)`,
     );
   }
+
+  await usable(shell);
+});
+
+test("dparen prefix-fail memoization does not over-skip on depth/rparen bailouts", async () => {
+  const shell = new Bash({ executionLimitProfile: "normal" });
+  const dparenSkip = await shell.exec("(".repeat(10) + "1+" + "(".repeat(5) + "1" + ") ".repeat(12) + "))");
+  assert.equal(dparenSkip.exitCode, 2);
+  assert.match(dparenSkip.stderr, /Expected RPAREN, got EOF/);
   await usable(shell);
 });

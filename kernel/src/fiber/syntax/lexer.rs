@@ -303,6 +303,16 @@ impl<'a, 'w> Lexer<'a, 'w> {
         (self.work)(1).map_err(|()| Error::Work)
     }
 
+    #[inline]
+    fn charge_scan(&mut self, i: usize, next_charge_at: &mut usize) -> Result<(), Error> {
+        if i >= *next_charge_at {
+            let chunks = (i - *next_charge_at) / 32 + 1;
+            (self.work)(chunks as u64).map_err(|()| Error::Work)?;
+            *next_charge_at += chunks * 32;
+        }
+        Ok(())
+    }
+
     fn enter_depth(&mut self) -> Result<(), Error> {
         self.charge()?;
         self.depth += 1;
@@ -817,15 +827,16 @@ impl<'a, 'w> Lexer<'a, 'w> {
         let mut next_charge_at = i + 64;
 
         while i < self.src.len() {
-            if i >= next_charge_at {
-                let chunks = (i - next_charge_at) / 32 + 1;
-                for _ in 0..chunks {
-                    self.charge()?;
-                }
-                next_charge_at += chunks * 32;
-            }
-            if i > last_close || (depth as usize) > rem_rparens {
+            self.charge_scan(i, &mut next_charge_at)?;
+            if i > last_close {
                 let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                self.mark_dparen_prefix_fail(start, prefix_end, skip);
+                return Ok(false);
+            }
+            if (depth as usize) > rem_rparens {
+                let skip = (depth as usize)
+                    .saturating_sub(rem_rparens)
+                    .min((min_depth_after_prefix - 2).max(0) as usize);
                 self.mark_dparen_prefix_fail(start, prefix_end, skip);
                 return Ok(false);
             }
@@ -921,7 +932,10 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 b'(' => {
                     depth += 1;
                     if depth > max_valid_depth || (depth as usize) > rem_rparens {
-                        let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                        let limit = (max_valid_depth as usize).min(rem_rparens);
+                        let skip = (depth as usize)
+                            .saturating_sub(limit)
+                            .min((min_depth_after_prefix - 2).max(0) as usize);
                         self.mark_dparen_prefix_fail(start, prefix_end, skip);
                         return Ok(false);
                     }
@@ -1086,7 +1100,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                         }
                         Some(b'(') => {
                             self.copy_one(&mut buf)?; // $
-                            if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                            if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                                 self.scan_arith_subst(&mut buf)?;
                             } else {
                                 self.scan_proc_or_cmd_subst(&mut buf, b'(')?;
@@ -1271,7 +1285,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     }
                     Some(b'(') => {
                         self.copy_one(buf)?;
-                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                             self.scan_arith_subst(buf)?;
                         } else {
                             self.scan_proc_or_cmd_subst(buf, b'(')?;
@@ -1347,7 +1361,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     }
                     Some(b'(') => {
                         self.copy_one(buf)?;
-                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                             self.scan_arith_subst(buf)?;
                         } else {
                             self.scan_proc_or_cmd_subst(buf, b'(')?;
@@ -1372,22 +1386,24 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     /// Disambiguate `$(( ... ))` from `$( ( ... ) )` starting at the first `(`.
-    fn is_arith_subst(&mut self, start: usize) -> bool {
+    fn is_arith_subst(&mut self, start: usize) -> Result<bool, Error> {
         if self.depth >= DEPTH_CAP {
-            return false;
+            return Ok(false);
         }
         let (total_rparens, _) = self.rparen_stats();
         let mut rem_rparens = total_rparens.saturating_sub(self.rparens_seen);
         if rem_rparens == 0 {
-            return true;
+            return Ok(true);
         }
         let mut i = start + 2;
         let mut depth: i32 = 2;
         let mut in_sq = false;
         let mut in_dq = false;
+        let mut next_charge_at = i + 64;
         while i < self.src.len() {
+            self.charge_scan(i, &mut next_charge_at)?;
             if (depth as usize).saturating_sub(1) > rem_rparens {
-                return true;
+                return Ok(true);
             }
             let b = self.src[i];
             if in_sq {
@@ -1436,7 +1452,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 }
                 b')' => {
                     if depth == 2 {
-                        return self.src.get(i + 1) == Some(&b')');
+                        return Ok(self.src.get(i + 1) == Some(&b')'));
                     }
                     depth -= 1;
                     rem_rparens = rem_rparens.saturating_sub(1);
@@ -1446,7 +1462,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
             }
         }
         // Unclosed `$((` -> treat as arith subst or cmd subst (unclosed `)` at EOF).
-        true
+        Ok(true)
     }
 
     fn scan_arith_subst(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
@@ -1497,7 +1513,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     }
                     Some(b'(') => {
                         self.copy_one(buf)?;
-                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                             self.scan_arith_subst(buf)?;
                         } else {
                             self.scan_proc_or_cmd_subst(buf, b'(')?;
@@ -1648,7 +1664,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                         }
                         Some(b'(') => {
                             self.copy_one(buf)?;
-                            if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                            if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                                 self.scan_arith_subst(buf)?;
                             } else {
                                 self.scan_proc_or_cmd_subst(buf, b'(')?;
@@ -1836,7 +1852,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     }
                     Some(b'(') => {
                         self.copy_one(buf)?;
-                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at) {
+                        if self.peek_at(1) == Some(b'(') && self.is_arith_subst(self.at)? {
                             self.scan_arith_subst(buf)?;
                         } else {
                             self.scan_proc_or_cmd_subst(buf, b'(')?;
@@ -1888,13 +1904,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
         let mut in_dq = false;
         let mut next_charge_at = i + 64;
         while i < self.src.len() && depth > 0 {
-            if i >= next_charge_at {
-                let chunks = (i - next_charge_at) / 32 + 1;
-                for _ in 0..chunks {
-                    self.charge()?;
-                }
-                next_charge_at += chunks * 32;
-            }
+            self.charge_scan(i, &mut next_charge_at)?;
             if i > last_close || (depth as usize) > rem_rbrackets || depth > DEPTH_CAP + 2 {
                 return Ok(false);
             }

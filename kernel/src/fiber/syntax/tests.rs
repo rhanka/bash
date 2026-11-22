@@ -1128,3 +1128,120 @@ fn word_brace_and_extglob_lookahead_is_linear() {
         }
     }
 }
+
+// --- PR #21 review v3 fixes: dparen prefix skip bound & is_arith_subst work charging ---
+
+#[test]
+fn lexer_dparen_depth_exit_does_not_overskip_prefix() {
+    crate::mem::testing::reset(CEIL);
+    let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+    let mut charge = |_: u64| Ok(());
+
+    // Depth-limit exit (`depth = 203 > max_valid_depth = 202`): `start = 0` must skip only
+    // 1 paren so `start = 1` (`depth = 202`, 200 inner parens) is still lexed as `DParenStart`.
+    let depth_case = std::format!(
+        "{}{}{}{}{}",
+        "(".repeat(10),
+        "1+",
+        "(".repeat(193),
+        "1",
+        ")".repeat(203)
+    );
+    let toks = super::lexer::lex(depth_case.as_bytes(), 1 << 20, &b, &mut charge).unwrap();
+    assert_eq!(toks.at(0).kind, super::lexer::TokenKind::LParen);
+    assert_eq!(toks.at(1).kind, super::lexer::TokenKind::DParenStart);
+
+    // Remaining-rparen exit (`depth = 15 > rem_rparens = 14`): `start = 1` is `(( ... ))`
+    // inside one unclosed outer `(`, so parsing yields `Expected RPAREN, got EOF` rather than
+    // failing inside `1+(((((` as nested subshells.
+    let rparen_case = std::format!(
+        "{}{}{}{}{}{}",
+        "(".repeat(10),
+        "1+",
+        "(".repeat(5),
+        "1",
+        ") ".repeat(12),
+        "))"
+    );
+    let toks2 = super::lexer::lex(rparen_case.as_bytes(), 1 << 20, &b, &mut charge).unwrap();
+    assert_eq!(toks2.at(0).kind, super::lexer::TokenKind::LParen);
+    assert_eq!(toks2.at(1).kind, super::lexer::TokenKind::DParenStart);
+    let err = parse_err(&rparen_case);
+    assert!(
+        err.contains("Expected RPAREN, got EOF"),
+        "expected unclosed outer subshell EOF error, got: {err}"
+    );
+
+    // Remaining-rparen exit inside loop (`depth > rem_rparens` after quoted `')'`) must also
+    // skip only `depth - rem_rparens` parens rather than `min_depth_after_prefix - 2`.
+    let quoted_rparen_case = std::format!(
+        "{}{}{}{}",
+        "(".repeat(10),
+        "'))'1",
+        ") ".repeat(7),
+        "))"
+    );
+    let toks3 = super::lexer::lex(quoted_rparen_case.as_bytes(), 1 << 20, &b, &mut charge).unwrap();
+    assert_eq!(toks3.at(0).kind, super::lexer::TokenKind::LParen);
+    assert_eq!(toks3.at(1).kind, super::lexer::TokenKind::DParenStart);
+}
+
+#[test]
+fn lexer_is_arith_subst_charges_work_and_scales_linearly() {
+    crate::mem::testing::reset(CEIL);
+    let b = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+
+    // Single `$(( ... ))` scanning 20k bytes must actively charge work units and trip a tight cap.
+    let long_subst = std::format!("echo $(({}1))", " ".repeat(20_000));
+    let mut left = 200u64;
+    let mut tight_charge = |u: u64| {
+        if left < u {
+            Err(())
+        } else {
+            left -= u;
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        Ast::parse(long_subst.as_bytes(), 1 << 20, &b, &mut tight_charge),
+        Err(Error::Work)
+    ));
+
+    // Linear work scaling N vs 4N on single-level `$(( ... ))`.
+    let measure = |n: usize| -> u64 {
+        crate::mem::testing::reset(CEIL);
+        let src = std::format!("echo $(({}1))", " ".repeat(n));
+        let mut units = 0u64;
+        let mut charge = |u: u64| {
+            units += u;
+            Ok(())
+        };
+        Ast::parse(src.as_bytes(), 1 << 20, &b, &mut charge).unwrap();
+        units
+    };
+    let w_n = measure(5_000);
+    let w_4n = measure(20_000);
+    assert!(w_n >= 100, "expected charged work >= 100, got {w_n}");
+    assert!(w_4n <= w_n * 5, "non-linear scaling: w(5k)={w_n}, w(20k)={w_4n}");
+
+    // 199 nested `$((` over 4k bytes (within DEPTH_CAP = 200) must also trip a tight work cap.
+    let nested_subst = std::format!(
+        "{}{}1{}",
+        "$((".repeat(199),
+        " ".repeat(4_000),
+        "))".repeat(199)
+    );
+    let mut left_nested = 1_000u64;
+    let mut nested_charge = |u: u64| {
+        if left_nested < u {
+            Err(())
+        } else {
+            left_nested -= u;
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        Ast::parse(nested_subst.as_bytes(), 1 << 20, &b, &mut nested_charge),
+        Err(Error::Work)
+    ));
+}
