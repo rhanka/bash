@@ -6,14 +6,18 @@ import { readFileSync } from "node:fs";
 
 test("cold entries do not load the test-only probe", () => {
   for (const entry of ["@sentropic/bash", "@sentropic/bash/browser"]) {
-    const js = "const m = await import(process.argv[1]); if ('pipelineProbe' in m) process.exit(1);";
+    const js = `const m = await import(process.argv[1]); if ('pipelineProbe' in m) process.exit(1);`;
     const trace = spawnSync(process.execPath, ["--input-type=module", "-e", js, entry], {
       encoding: "utf8", env: { ...process.env, NODE_DEBUG: "esm" },
       stdio: ["ignore", "ignore", "pipe"],
     });
     assert.equal(trace.status, 0, trace.stderr);
-    assert.match(trace.stderr, /dist\/js\/kernel\/kernel\.js/);
+    // The packed entries resolve to the built minified graph, never to host sources.
+    assert.match(trace.stderr, /dist\/js\/shared\.js/);
+    assert.match(trace.stderr, entry.endsWith("browser") ? /dist\/js\/browser\.js/ : /dist\/js\/index\.js/);
+    assert.doesNotMatch(trace.stderr, /\/host\//);
     assert.doesNotMatch(trace.stderr, /\/probe\/probe\.js|browser-probe\.js/);
+    if (entry.endsWith("browser")) assert.doesNotMatch(trace.stderr, /dist\/js\/node\/load\.js/);
   }
 });
 

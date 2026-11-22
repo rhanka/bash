@@ -131,7 +131,11 @@ export function g2NoBareImport(ctx) {
   const link = oddEntries(ctx, [hostDir, ...jsDirs, typesDir]);
   if (link) return link;
   // Scripts: every file of host/, dist/js/ and dist/test/js/. A relative specifier must reach a regular script file in them.
+  // The node loader keeps its deferred builtin lookup after packing (as dist/js/node/load.js),
+  // so the rule recognizes it by file name in any packaged tree.
+  const shippedLoader = sep + join("node", "load.js");
   function checkScript(f, inNodeDir) {
+    inNodeDir = inNodeDir || f.endsWith(shippedLoader);
     const rel = relative(ctx.root, f);
     const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
