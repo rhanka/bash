@@ -1,7 +1,8 @@
 // One synchronous engine store with canonical resource intrinsics and post-return handling.
 import { KernelPoisonedError } from "../errors.js";
-import { Codec, trap, unsigned32 } from "./codec.js";
+import { Codec, LOWER_BUDGET, MAX_ONESHOT_BYTES, trap, unsigned32 } from "./codec.js";
 import { camelCase, functions, namespace, resourceKinds } from "./layout.js";
+import { SNAPSHOT_CEILING } from "../snapshot.js";
 
 export function instantiateEngine(getCoreModule, instantiateCore, options, coreName) {
   const wasm = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;
@@ -141,6 +142,9 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
     intrinsics["[resource-drop]" + kind] = (handle) => guestDrop(kind, handle);
   }
 
+  // One Codec per store, reused across calls (the store allows a single live call):
+  // avoids per-call allocation and keeps the DataView/bit scratch hot.
+  let codec = null;
   for (const fn of bindings) {
     const receiver = /^\[(method|static)\]([^.]+)\.(.+)$/.exec(fn.name);
     const resource = receiver && resources.get(receiver[2]);
@@ -165,7 +169,16 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
 
       try {
         const oneshotBytes = fn.name === "exec-oneshot" ? fn.params.size : undefined;
-        const codec = new Codec({ core, borrow, own: liftOwner, liftBudget: ceiling, oneshotBytes });
+        if (codec === null) {
+          codec = new Codec({ core, borrow, own: liftOwner, liftBudget: ceiling, oneshotBytes });
+        } else {
+          codec.core = core;
+          codec.borrow = borrow;
+          codec.own = liftOwner;
+          codec.oneshotBytes = oneshotBytes;
+          codec.lowerBudget = oneshotBytes === undefined ? LOWER_BUDGET : MAX_ONESHOT_BYTES - oneshotBytes;
+          codec.liftBudget = ceiling;
+        }
         const receiverArg = method ? { value: this } : undefined;
         let staged;
         try {
@@ -228,6 +241,8 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
       if (!vfsId || !shellId || vfsId === shellId) throw trap("restore returned invalid handles");
       const vfs = liftOwner("vfs", vfsId);
       const shell = liftOwner("shell", shellId);
+      // The restored store carries the default cap: later codecs cap aggregate copies there.
+      ceiling = SNAPSHOT_CEILING;
       return { vfs, shell };
     } catch (error) {
       throw fail(error);
