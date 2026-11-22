@@ -41,20 +41,19 @@ Implement the Wasm-owned default snapshot restore path, share and minify the fac
 - conductor/owner: `clarification` / `acknowledge` / `refuse`
 
 ## Plan / Todo (lot-based)
-- [ ] **Lot 0 — Baseline & constraints**
+- [x] **Lot 0 — Baseline & constraints**
   - [x] Confirm worktree `tmp/l2c-snapshot` and `harness check branch`.
   - [x] Confirm scope boundaries and declare `BRxx-EXn` exceptions if needed.
-- [ ] **Lot 1 — Deterministic snapshot and restoration**
-  - [ ] Capture the real default; prove quiescence; encode the difference inside the core.
-  - [ ] Private core ABI `__restore_default`, restore-only `pub(crate)` helper, allocator-owned page growth.
-  - [ ] Lot gate: `make lint` + `make test` + `make check-attribution ATTRIBUTION_RANGE=origin/main..HEAD`
-- [ ] **Lot 2 — Predicate, provenance, pipeline order**
-  - [ ] `isDefaultSnapshotConfig` predicate; provenance selection on both entries; image before component embed/new.
-- [ ] **Lot 3 — Package interface and size accounting**
-  - [ ] Minified facade via `oxc-minify`, shared chunk per package, staged declarations, size split B/N/T/Z vs both caps.
-- [ ] **Lot 4 — Binaryen measurement and Gate L2 rerun**
-  - [ ] `wasm-opt` behind the pin (report not measured when unpinned); Gate L2 on the packed default package.
+- [x] **Lot 1 — Deterministic snapshot and restoration**
+  - [x] Capture the real default; prove quiescence; encode the difference inside the core.
+  - [x] Private core ABI `__restore_default`, restore-only `pub(crate)` helper, allocator-owned page growth.
+- [x] **Lot 2 — Predicate, provenance, pipeline order**
+  - [x] `isDefaultSnapshotConfig` predicate; provenance selection on both entries; image before component embed/new.
+- [x] **Lot 3 — Package interface and size accounting**
+  - [x] Minified facade via `oxc-minify`, shared chunk per package, staged declarations, size split B/N/T/Z vs both caps.
+- [x] **Lot 4 — Binaryen measurement and Gate L2 rerun**
+  - [x] `wasm-opt` behind the pin (report not measured when unpinned); Gate L2 on the packed default package.
 - [ ] **Lot N — Final validation**
-  - [ ] `make check`
+  - [x] `make check`
   - [ ] PR body = this `BRANCH.md`; CI green on the PR.
   - [ ] Owner sign-off; remove `BRANCH.md` in the last commit before merge.
