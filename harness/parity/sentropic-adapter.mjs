@@ -21,6 +21,10 @@ export default {
     }
     if (init.env !== undefined) options.env = init.env;
     if (init.cwd !== undefined) options.cwd = init.cwd;
+    let trace = [];
+    let coverage = [];
+    if (init.capture?.trace) options.trace = (ev) => trace.push(ev);
+    if (init.capture?.coverage) options.coverage = { hit: (feature) => coverage.push(feature) };
     const bash = new Bash(options);
 
     return {
@@ -49,8 +53,16 @@ export default {
         return entries;
       },
 
-      takeTrace: () => [],
-      takeCoverage: () => [],
+      takeTrace() {
+        const out = trace;
+        trace = [];
+        return out;
+      },
+      takeCoverage() {
+        const out = coverage;
+        coverage = [];
+        return out;
+      },
       dispose() {},
     };
   },
