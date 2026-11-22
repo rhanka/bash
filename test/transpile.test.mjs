@@ -104,8 +104,10 @@ for (const mode of ["throws", "returns a wrapper"]) {
     const root = encode("/");
     assert.deepEqual(vfs.op({ tag: "exists", val: root }), { tag: "ok", val: { tag: "flag", val: true } });
     assert.throws(() => vfs.mountVfs(root, vfs), { code: "unsupported" });
-    assert.throws(() => vfs.mountHost(root, 1), { code: "unsupported" });
-    assert.throws(() => vfs.unmount(root), { code: "unsupported" });
+    vfs.mountHost(root, 1);
+    assert.throws(() => vfs.mountHost(root, 2), { code: "exists" });
+    vfs.unmount(root);
+    assert.throws(() => vfs.unmount(root), { code: "not-found" });
     assert.deepEqual(vfs.takeDirty(), []);
     const usedBytes = vfs.usedBytes();
     assert.ok(usedBytes > 0n && usedBytes < 1n << 20n);

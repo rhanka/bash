@@ -4,7 +4,7 @@ use super::kernel::exports::sentropic::bash::engine as E;
 use super::kernel::exports::sentropic::bash::types as T;
 use super::rt;
 use crate::fiber::{self, CallError, Chan, Fiber, HostReq, Outcome, Status, Step};
-use crate::fs::{self, Code, Ok_, Op, Vfs};
+use crate::fs::{self, BatchList, BatchOk, BatchOp, BatchResult, Code, HostKind, HostStat, Ok_, Op, Vfs};
 use crate::limits::{self, Resolved};
 use crate::mem::{self, Budget, KRc, LimitId, MemError};
 use crate::shell::{Config, CreateError, ProcessInfo, Shell};
@@ -178,28 +178,34 @@ fn fs_code(c: Code) -> T::FsErrorCode {
         Code::NotEmpty => T::FsErrorCode::NotEmpty,
         Code::Permission => T::FsErrorCode::Permission,
         Code::Invalid => T::FsErrorCode::Invalid,
+        Code::LinkLoop => T::FsErrorCode::LinkLoop,
+        Code::TooLarge => T::FsErrorCode::TooLarge,
         Code::NoSpace => T::FsErrorCode::NoSpace,
+        Code::Busy => T::FsErrorCode::Busy,
+        Code::CrossDevice => T::FsErrorCode::CrossDevice,
+        Code::ReadOnly => T::FsErrorCode::ReadOnly,
         Code::Unsupported => T::FsErrorCode::Unsupported,
+        Code::Io => T::FsErrorCode::Io,
     }
 }
 
-fn fs_code_name(c: &T::FsErrorCode) -> &'static str {
+fn fs_code_in(c: &T::FsErrorCode) -> Code {
     match c {
-        T::FsErrorCode::NotFound => "not-found",
-        T::FsErrorCode::Exists => "exists",
-        T::FsErrorCode::NotDirectory => "not-directory",
-        T::FsErrorCode::IsDirectory => "is-directory",
-        T::FsErrorCode::NotEmpty => "not-empty",
-        T::FsErrorCode::Permission => "permission",
-        T::FsErrorCode::Invalid => "invalid",
-        T::FsErrorCode::LinkLoop => "link-loop",
-        T::FsErrorCode::TooLarge => "too-large",
-        T::FsErrorCode::NoSpace => "no-space",
-        T::FsErrorCode::Busy => "busy",
-        T::FsErrorCode::CrossDevice => "cross-device",
-        T::FsErrorCode::ReadOnly => "read-only",
-        T::FsErrorCode::Unsupported => "unsupported",
-        T::FsErrorCode::Io => "io",
+        T::FsErrorCode::NotFound => Code::NotFound,
+        T::FsErrorCode::Exists => Code::Exists,
+        T::FsErrorCode::NotDirectory => Code::NotDirectory,
+        T::FsErrorCode::IsDirectory => Code::IsDirectory,
+        T::FsErrorCode::NotEmpty => Code::NotEmpty,
+        T::FsErrorCode::Permission => Code::Permission,
+        T::FsErrorCode::Invalid => Code::Invalid,
+        T::FsErrorCode::LinkLoop => Code::LinkLoop,
+        T::FsErrorCode::TooLarge => Code::TooLarge,
+        T::FsErrorCode::NoSpace => Code::NoSpace,
+        T::FsErrorCode::Busy => Code::Busy,
+        T::FsErrorCode::CrossDevice => Code::CrossDevice,
+        T::FsErrorCode::ReadOnly => Code::ReadOnly,
+        T::FsErrorCode::Unsupported => Code::Unsupported,
+        T::FsErrorCode::Io => Code::Io,
     }
 }
 
@@ -217,7 +223,14 @@ fn op_path(op: T::FsOp) -> Vec<u8> {
         T::FsOp::WriteFile(w) => w.path,
         T::FsOp::Mkdir(m) => m.path,
         T::FsOp::Remove(r) => r.path,
-        _ => Vec::new(),
+        T::FsOp::Walk(w) => w.root,
+        T::FsOp::WriteLazy(w) => w.path,
+        T::FsOp::CreateExclusive(c) => c.path,
+        T::FsOp::Copy(p) | T::FsOp::Rename(p) | T::FsOp::HardLink(p) => p.source,
+        T::FsOp::Symlink(p) => p.target,
+        T::FsOp::Chmod(c) => c.path,
+        T::FsOp::Utimes(u) => u.path,
+        T::FsOp::AllPaths => Vec::new(),
     }
 }
 
@@ -274,12 +287,12 @@ impl E::GuestVfs for VfsRes {
         Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
     }
 
-    fn mount_host(&self, path: Vec<u8>, _mount_id: u32) -> Result<(), T::FsError> {
-        Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
+    fn mount_host(&self, path: Vec<u8>, mount_id: u32) -> Result<(), T::FsError> {
+        self.0.mount_host(&path, mount_id).map_err(|c| T::FsError { code: fs_code(c), path })
     }
 
     fn unmount(&self, path: Vec<u8>) -> Result<(), T::FsError> {
-        Err(T::FsError { code: T::FsErrorCode::Unsupported, path })
+        self.0.unmount(&path).map_err(|c| T::FsError { code: fs_code(c), path })
     }
 
     fn take_dirty(&self) -> Vec<T::ChangedFile> {
@@ -415,12 +428,86 @@ fn transfer_limit(stdout_bytes: bool) -> T::ExecResult {
     }
 }
 
+const MAX_BATCH_VALUE: usize = 1 << 20;
+
+fn batch_bytes(bytes: &[u8]) -> Result<Vec<u8>, MemError> {
+    if bytes.len() > MAX_BATCH_VALUE {
+        return Err(MemError::Overflow);
+    }
+    copy(bytes)
+}
+
+/// Bytes one batch op carries across the ABI (paths plus the write payload).
+fn batch_op_bytes(op: &BatchOp) -> usize {
+    let bytes = |b: &[u8]| b.len();
+    match op {
+        BatchOp::Stat(p) | BatchOp::Lstat(p) | BatchOp::Exists(p) | BatchOp::ReadLink(p)
+        | BatchOp::RealPath(p) | BatchOp::ReadDir(p) | BatchOp::ReadDirPlus(p) => bytes(p),
+        BatchOp::Walk { root, .. } => bytes(root),
+        BatchOp::ReadFile { path, .. } => bytes(path),
+        BatchOp::WriteFile { path, data, .. } => bytes(path).saturating_add(bytes(data)),
+        BatchOp::WriteLazy { path, .. } => bytes(path),
+        BatchOp::CreateExclusive { path, .. } => bytes(path),
+        BatchOp::Mkdir { path, .. } => bytes(path),
+        BatchOp::Remove { path, .. } => bytes(path),
+        BatchOp::Copy { source, target, .. } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Rename { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Symlink { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::HardLink { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Chmod { path, .. } => bytes(path),
+        BatchOp::Utimes { path, .. } => bytes(path),
+        BatchOp::AllPaths => 0,
+    }
+}
+
+/// Total payload of a batch. D6.4 caps every canonical ABI value at 1 MiB; the
+/// batch as a whole stays near the same bound so the driver never lowers and
+/// transfers more than headroom allows. One full 1 MiB payload chunk plus its
+/// path and record metadata must still fit, so paths get a small slack.
+const MAX_BATCH_SLOP: usize = 64 << 10;
+
+fn batch_total_bytes(ops: &[BatchOp]) -> usize {
+    ops.iter().map(batch_op_bytes).fold(0usize, |a, b| a.saturating_add(b))
+}
+
+fn batch_op_out(op: &BatchOp) -> Result<T::FsOp, MemError> {
+    Ok(match op {
+        BatchOp::Stat(p) => T::FsOp::Stat(batch_bytes(p)?),
+        BatchOp::Lstat(p) => T::FsOp::Lstat(batch_bytes(p)?),
+        BatchOp::Exists(p) => T::FsOp::Exists(batch_bytes(p)?),
+        BatchOp::ReadLink(p) => T::FsOp::ReadLink(batch_bytes(p)?),
+        BatchOp::RealPath(p) => T::FsOp::RealPath(batch_bytes(p)?),
+        BatchOp::ReadDir(p) => T::FsOp::ReadDir(batch_bytes(p)?),
+        BatchOp::ReadDirPlus(p) => T::FsOp::ReadDirPlus(batch_bytes(p)?),
+        BatchOp::AllPaths => T::FsOp::AllPaths,
+        BatchOp::Walk { root, max_depth, max_entries } => T::FsOp::Walk(T::WalkReq { root: batch_bytes(root)?, max_depth: *max_depth, max_entries: *max_entries }),
+        BatchOp::ReadFile { path, offset, len } => T::FsOp::ReadFile(T::ReadReq { path: batch_bytes(path)?, offset: *offset, len: *len }),
+        BatchOp::WriteFile { path, data, offset, truncate, mode, mtime_ms } => T::FsOp::WriteFile(T::WriteReq { path: batch_bytes(path)?, data: batch_bytes(data)?, offset: *offset, truncate: *truncate, mode: *mode, mtime_ms: *mtime_ms }),
+        BatchOp::WriteLazy { path, mode, mtime_ms } => T::FsOp::WriteLazy(T::LazyReq { path: batch_bytes(path)?, mode: *mode, mtime_ms: *mtime_ms }),
+        BatchOp::CreateExclusive { path, mode, directory } => T::FsOp::CreateExclusive(T::CreateReq { path: batch_bytes(path)?, mode: *mode, directory: *directory }),
+        BatchOp::Mkdir { path, recursive, mode } => T::FsOp::Mkdir(T::MkdirReq { path: batch_bytes(path)?, recursive: *recursive, mode: *mode }),
+        BatchOp::Remove { path, recursive, force } => T::FsOp::Remove(T::RemoveReq { path: batch_bytes(path)?, recursive: *recursive, force: *force }),
+        BatchOp::Copy { source, target, recursive } => T::FsOp::Copy(T::PairReq { source: batch_bytes(source)?, target: batch_bytes(target)?, recursive: *recursive }),
+        BatchOp::Chmod { path, mode } => T::FsOp::Chmod(T::ChmodReq { path: batch_bytes(path)?, mode: *mode }),
+        BatchOp::Utimes { path, atime_ms, mtime_ms } => T::FsOp::Utimes(T::UtimesReq { path: batch_bytes(path)?, atime_ms: *atime_ms, mtime_ms: *mtime_ms }),
+        BatchOp::Rename { source, target } => T::FsOp::Rename(T::PairReq { source: batch_bytes(source)?, target: batch_bytes(target)?, recursive: false }),
+        BatchOp::Symlink { source, target } => T::FsOp::Symlink(T::PairReq { source: batch_bytes(source)?, target: batch_bytes(target)?, recursive: false }),
+        BatchOp::HardLink { source, target } => T::FsOp::HardLink(T::PairReq { source: batch_bytes(source)?, target: batch_bytes(target)?, recursive: false }),
+    })
+}
+
 fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
     Ok(match r {
-        HostReq::FsStat { mount_id, path } => {
-            let ops = collect(core::iter::once(path), |p| Ok(T::FsOp::Stat(copy(p)?)))?;
-            // fs-op contains a discriminant and its largest arm (the write-file record).
-            rt::prepare_lowering(&[(ops.len(), 72, 8)])?;
+        HostReq::FsBatch { mount_id, ops } => {
+            let op_size = 72; // Discriminant and the largest arm, write-file.
+            if ops.len() > MAX_BATCH_VALUE / op_size {
+                return Err(MemError::Overflow);
+            }
+            if batch_total_bytes(ops) > MAX_BATCH_VALUE + MAX_BATCH_SLOP {
+                return Err(MemError::Overflow);
+            }
+            let ops = collect(ops.iter(), batch_op_out)?;
+            rt::prepare_lowering(&[(ops.len(), op_size, 8)])?;
             T::HostReq::FsBatch(T::FsBatchReq { mount_id: *mount_id, ops })
         }
         HostReq::LazyFile(p) => T::HostReq::LazyFile(copy(p)?),
@@ -480,13 +567,61 @@ fn net_code_name(c: &T::NetErrorCode) -> &'static str {
     }
 }
 
+fn host_kind(kind: &T::NodeKind) -> HostKind {
+    match kind {
+        T::NodeKind::File => HostKind::File,
+        T::NodeKind::Directory => HostKind::Directory,
+        T::NodeKind::Symlink => HostKind::Symlink,
+    }
+}
+
+fn host_stat(s: &T::Stat) -> HostStat {
+    HostStat { kind: host_kind(&s.kind), size: s.size, mode: s.mode, mtime_ms: s.mtime_ms, dev: s.dev, ino: s.ino }
+}
+
+impl<'a> BatchList<'a, &'a [u8]> for Vec<Vec<u8>> {
+    fn len(&self) -> usize { Vec::len(self) }
+    fn at(&'a self, index: usize) -> Option<&'a [u8]> {
+        self.get(index).map(Vec::as_slice)
+    }
+}
+
+impl<'a> BatchList<'a, (&'a [u8], HostKind)> for Vec<T::DirEntry> {
+    fn len(&self) -> usize { Vec::len(self) }
+    fn at(&'a self, index: usize) -> Option<(&'a [u8], HostKind)> {
+        self.get(index).map(|entry| (entry.name.as_slice(), host_kind(&entry.kind)))
+    }
+}
+
+impl<'a> BatchList<'a, (&'a [u8], HostStat)> for Vec<T::WalkEntry> {
+    fn len(&self) -> usize { Vec::len(self) }
+    fn at(&'a self, index: usize) -> Option<(&'a [u8], HostStat)> {
+        self.get(index).map(|entry| (entry.path.as_slice(), host_stat(&entry.info)))
+    }
+}
+
+impl<'a> BatchList<'a, BatchResult<'a>> for Vec<T::FsResult> {
+    fn len(&self) -> usize { Vec::len(self) }
+    fn at(&'a self, index: usize) -> Option<BatchResult<'a>> {
+        Some(match self.get(index)? {
+            Ok(ok) => Ok(match ok {
+                T::FsOk::None => BatchOk::None,
+                T::FsOk::Flag(flag) => BatchOk::Flag(*flag),
+                T::FsOk::Info(info) => BatchOk::Info(host_stat(info)),
+                T::FsOk::Path(path) => BatchOk::Path(path),
+                T::FsOk::Data(data) => BatchOk::Data(data),
+                T::FsOk::Paths(paths) => BatchOk::Paths(paths),
+                T::FsOk::Entries(entries) => BatchOk::Entries(entries),
+                T::FsOk::EntriesPlus(entries) => BatchOk::EntriesPlus(entries),
+            }),
+            Err(error) => Err((fs_code_in(&error.code), &error.path)),
+        })
+    }
+}
+
 fn outcome_in(o: &T::HostOutcome) -> Outcome<'_> {
     match o {
-        T::HostOutcome::Fs(list) => match list.first() {
-            Some(Ok(_)) => Outcome::Fs(None),
-            Some(Err(e)) => Outcome::Fs(Some(fs_code_name(&e.code))),
-            None => Outcome::Fs(Some("io")),
-        },
+        T::HostOutcome::Fs(list) => Outcome::Fs(list),
         T::HostOutcome::Data(d) => Outcome::Data(d),
         T::HostOutcome::CommandExit(n) => Outcome::CommandExit(*n),
         T::HostOutcome::Fetched(r) => Outcome::Fetched(r.status),
@@ -698,3 +833,39 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
 }
 
 super::kernel::export!(Kernel with_types_in super::kernel);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::KVec;
+    use crate::util::bytes_in;
+
+    fn write_op(scratch: &Budget, len: usize) -> BatchOp {
+        let fill = std::vec![7u8; len];
+        BatchOp::WriteFile {
+            path: bytes_in(b"/f", scratch).unwrap(),
+            data: bytes_in(&fill, scratch).unwrap(),
+            offset: Some(0),
+            truncate: true,
+            mode: None,
+            mtime_ms: None,
+        }
+    }
+
+    #[test]
+    fn oversized_batches_are_refused_before_lowering() {
+        crate::mem::testing::reset(1 << 30);
+        let scratch = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+        // Two 600 KiB payloads fit the per-value cap but exceed the batch bound
+        // (1 MiB plus path slack, D6.4): the batch is refused before lowering.
+        let mut ops = KVec::new_in(&scratch);
+        ops.try_push(write_op(&scratch, 600 << 10)).unwrap();
+        ops.try_push(write_op(&scratch, 600 << 10)).unwrap();
+        assert!(batch_total_bytes(&ops) > MAX_BATCH_VALUE);
+        assert!(matches!(req_out(&HostReq::FsBatch { mount_id: 1, ops }), Err(MemError::Overflow)));
+        // A single chunk stays under the bound.
+        let mut small = KVec::new_in(&scratch);
+        small.try_push(write_op(&scratch, 16)).unwrap();
+        assert_eq!(batch_total_bytes(&small), 18);
+    }
+}

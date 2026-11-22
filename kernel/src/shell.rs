@@ -158,6 +158,10 @@ impl Shell {
     }
 
     fn layout(&self, default_layout: bool) -> Result<(), CreateError> {
+        // A host mount over `/` owns the layout: the facade seeds it through the adapter.
+        if self.root.resolve_host_mount(b"/").is_some() {
+            return Ok(());
+        }
         let dirs: [&[u8]; 8] = [b"/bin", b"/usr", b"/usr/bin", b"/dev", b"/dev/fd", b"/proc", b"/proc/self", b"/proc/self/fd"];
         let invalid = |_| CreateError::Invalid("cannot initialize system filesystem layout");
         for dir in dirs {
