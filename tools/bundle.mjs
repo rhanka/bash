@@ -94,7 +94,11 @@ function isRegexStart(segs, buf) {
   const code = segs.filter((s) => s.code).map((s) => s.text).join("") + buf;
   const m = code.match(/([^\s])/g);
   const prev = m ? m[m.length - 1] : "";
-  return prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev);
+  if (prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev)) return true;
+  // A `/` after a keyword that cannot end an expression (as in `return /re/`) opens a
+  // regex literal, never division: without this the literal body is treated as code and a
+  // later rename can rewrite identifiers inside the pattern (host/core/driver.js does this).
+  return /\b(?:return|typeof|case|throw|do|else|in|of|new|delete|void|yield|await|instanceof)\s*$/.test(code);
 }
 
 const IMPORT = /^[ \t]*import\s+(.+?)\s+from\s*["']([^"']+)["'];?[ \t]*$/;
@@ -419,48 +423,6 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
   return { code: bodies.join("\n\n"), mapping, header: keptHeader };
 }
 
-function bundleShared(modules, sharedIds, root, externals = new Map()) {
-  const order = [...sharedIds];
-  const index = new Map(order.map((id, i) => [id, i]));
-  const parts = [];
-  const keptHeader = [];
-  for (const id of order) {
-    const rec = modules.get(id);
-    const params = [];
-    const args = [];
-    for (const imp of rec.imports) {
-      if (imp.namespace) throw new Error(rec.file + ": namespace imports are entry-only");
-      if (externals.has(imp.target)) {
-        keptHeader.push("import { " + imp.names.map(({ imported, local }) =>
-          imported === local ? local : imported + " as " + local).join(", ") +
-          " } from " + JSON.stringify(externals.get(imp.target)) + ";");
-        continue;
-      }
-      if (!index.has(imp.target)) throw new Error(rec.file + ": import escapes the shared set " + imp.target);
-      for (const { imported, local } of imp.names) {
-        const provider = modules.get(imp.target);
-        if (!declaredExports(provider).includes(imported)) {
-          throw new Error(rec.file + ": no export " + imported);
-        }
-        params.push(local);
-        args.push("__mod" + index.get(imp.target) + "." + imported);
-      }
-    }
-    for (const name of declaredExports(rec)) {
-      if (params.includes(name)) throw new Error(rec.file + ": import shadows an export: " + name);
-    }
-    const body = stripExportKeyword(stripImportLines(rec.src)).trim();
-    if (/\bimport\.meta\b/.test(stripStrings(body))) {
-      throw new Error(rec.file + ": import.meta cannot be bundled");
-    }
-    const returned = declaredExports(rec);
-    parts.push("// " + relative(root, id) + "\nconst __mod" + index.get(id) + " = ((" +
-      params.join(", ") + ") => {\n" + body + "\nreturn { " + returned.join(", ") + " };\n})( " +
-      args.join(", ") + " );");
-  }
-  return { parts, index, header: [...new Set(keptHeader)] };
-}
-
 function stripStrings(src) {
   return splitCode(src).map((seg) => (seg.code ? seg.text : " ")).join("");
 }
@@ -549,6 +511,11 @@ async function minifyFile(name, code) {
   if (!out.code) throw new Error("oxc-minify " + name + ": empty output");
   return out.code;
 }
+
+// Pure units exported for the collision-fixture suite (test/bundle-flatten.test.mjs):
+// splitCode proves renames never touch strings, comments, template raw text or regex
+// literals; flattenShared proves cross-module collisions alpha-rename instead of colliding.
+export { splitCode, flattenShared };
 
 // Packs one package: the shared browser-safe chunk plus the entry files, minified. `files`
 // names the entry sources and outputs; `alias` swaps the engine adapter; `externals` maps kept
