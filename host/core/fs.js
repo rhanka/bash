@@ -88,10 +88,14 @@ export function addFiles(fs, files, base = "/") {
     let options;
     if (value !== null && typeof value === "object" && !(value instanceof Uint8Array)) {
       content = value.content;
-      options = { mode: value.mode, mtime: value.mtime };
+      // An omitted mtime seeds virtual time (the epoch), never the host clock,
+      // so identical initial files compare equal across runs.
+      options = { mode: value.mode, mtime: value.mtime ?? new Date(0) };
+    } else {
+      options = { mtime: new Date(0) };
     }
     if (typeof content !== "string" && !(content instanceof Uint8Array)) throw new TypeError(`files: the content of ${path} must be a string or bytes`);
-    fs.writeFileSync(p, content, undefined, options);
+    fs.writeFileSync(p, content, options);
   }
 }
 
@@ -118,6 +122,8 @@ export function createInMemoryFs(loader) {
       const limits = profileLimits(profile);
       const maxBytes = internal?.maxFileSystemBytes ?? limits.maxFileSystemBytes;
       const ceiling = hooks?.ceilingBytes ?? PROFILES[profile].ceiling;
+      // A caller-provided holder co-locates this volume with an execution store
+      // (L7c separate mode); otherwise the volume owns a fresh VFS-only store.
       const holder = internal?.holder ?? new Holder(loader, hooks, ceiling);
       const st = {
         holder, vfs: null, lazy: new Set(), owner: internal?.owner ?? null,
@@ -208,7 +214,7 @@ export function createInMemoryFs(loader) {
       const p = resolve("/", path);
       const recursive = !!options?.recursive;
       const encoded = this.#encodePath(p, "mkdir");
-      const run = (inst) => this.#unwrap(inst, { tag: "mkdir", val: { path: encoded, recursive, mode: undefined } }, "mkdir", p);
+      const run = (inst) => this.#unwrap(inst, { tag: "mkdir", val: { path: encoded, recursive, mode: options?.mode } }, "mkdir", p);
       const holder = this.#state().holder;
       if (holder.instance) {
         holder.instance.check();
@@ -216,8 +222,13 @@ export function createInMemoryFs(loader) {
       } else holder.stage(run);
     }
 
-    writeFileSync(path, content, encoding, options) {
-      this.#writeSync(resolve("/", path), encodeContent(content, encodingOf(encoding)), options);
+    writeFileSync(path, content, options) {
+      let encoding;
+      let extra;
+      if (options === undefined || options === null || typeof options === "string") encoding = options ?? undefined;
+      else if (typeof options === "object") ({ encoding, ...extra } = options);
+      else throw new TypeError("write options must be an encoding string or an object");
+      this.#writeSync(resolve("/", path), encodeContent(content, encodingOf(encoding)), extra);
     }
 
     /** Stores a lazy file; reading it rejects with NotSupportedError in this version. */
