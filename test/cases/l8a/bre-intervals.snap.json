@@ -1,0 +1,52 @@
+{
+  "case": "l8a/bre-intervals",
+  "caseHash": "1e18876082202e5253ddfaf41a20d6c95b40370761831db2e03a23b7bca1448c",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "aab\naaab\naaaab\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "a{,2}b\n"
+    }
+  ]
+}
