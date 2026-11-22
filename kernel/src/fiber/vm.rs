@@ -3,13 +3,13 @@ use super::expand::{Argument, Delimiters, Expander, Scalar, BYTE_CHUNK};
 use super::syntax::{assignment, Command, Link, PartKind, Pipe, Span};
 use super::*;
 use crate::cmd::{coverage_id, CommandSpec, COVERAGE_FEATURES};
-use crate::fs::{Code, Kind};
+use crate::fs::{BatchOp, Code, HostKind, HostStat, Kind};
 use crate::mem::KMap;
 use crate::util::OrderedNames;
 
 pub(super) struct Vm {
     frames: KVec<Frame>,
-    simple: Option<Simple>,
+    pub(super) simple: Option<Simple>,
     functions: KMap<KBytes, u32>,
     command_count: u64,
     call_depth: u64,
@@ -79,7 +79,7 @@ struct Assignment {
     position: Option<usize>,
 }
 
-struct Simple {
+pub(super) struct Simple {
     entered: bool,
     word: usize,
     assignment: Option<Assignment>,
@@ -91,16 +91,55 @@ struct Simple {
     delims: Delimiters,
     last_arg: KBytes,
     dispatch_ready: bool,
-    path: PathSearch,
+    pub(super) path: PathSearch,
 }
 
 #[derive(Default)]
-struct PathSearch {
+pub(super) struct PathSearch {
     started: bool,
     explicit_left: Option<usize>,
     start: usize,
     end: usize,
     candidate: Option<(core::ops::Range<usize>, usize)>,
+    pub(super) resolve_cache: Option<(KBytes, ResolveOutcome)>,
+    /// Test-command namespace (`__*`): resolved against the kernel map only,
+    /// never suspended on a host mount, exactly as before host mounts existed.
+    /// No host file can implement a test command, so nothing observable changes
+    /// except the spared round trips (the directory-batching gate counts them).
+    local_only: bool,
+}
+
+/// What a command-path stat found. Host mounts resolve through `FsBatch`; the
+/// kernel map is consulted directly. Both feed the same dispatch decision.
+#[derive(Clone, Copy)]
+pub(crate) enum ResolveOutcome {
+    File(u32),
+    Dir,
+    Missing,
+    /// Seen but not usable here (local permission shadow or similar).
+    Denied,
+}
+
+impl ResolveOutcome {
+    pub(crate) fn of_stat(stat: HostStat) -> Self {
+        match stat.kind {
+            HostKind::File => Self::File(stat.mode),
+            HostKind::Directory | HostKind::Symlink => Self::Dir,
+        }
+    }
+}
+
+/// Result of a command-path stat lookup: usable now, or suspended on a host call.
+enum Lookup {
+    Ready(ResolveOutcome),
+    /// Normalized path whose stat must be fetched from its host mount.
+    Suspend(KBytes),
+}
+
+/// Result of `find_command`: dispatchable now, or suspended on a host stat.
+enum Find {
+    Ready(Option<Dispatch>),
+    Suspend(KBytes),
 }
 
 impl Fiber {
@@ -312,7 +351,18 @@ impl Fiber {
                             self.update_status()?;
                             return Ok(None);
                         }
-                        Flow::Host(pending, req) => return Ok(Some(self.host(pending, req))),
+                        Flow::Host(pending, req) => {
+                            // A resolve suspension keeps the dispatch state and its
+                            // frame so the path re-derives against the stored stat
+                            // on resume.
+                            if matches!(pending, Pending::ResolveStat) {
+                                self.vm.simple = Some(simple);
+                                self.vm
+                                    .frames
+                                    .try_push(Frame::SimpleCmd(words, first_arg))?;
+                            }
+                            return Ok(Some(self.host(pending, req)));
+                        }
                         Flow::Fail(fail) => return Err(fail),
                     }
                 }
@@ -578,6 +628,8 @@ impl Fiber {
         last_arg: &mut KBytes,
         search: &mut PathSearch,
     ) -> Result<Option<Flow>, Fail> {
+        // The test-command namespace resolves kernel-locally (see `local_only`).
+        search.local_only = name.rsplit(|&c| c == b'/').next().is_some_and(|base| base.starts_with(b"__"));
         if !search.started {
             if search.explicit_left.is_some() || name.contains(&b'/') {
                 let left = search.explicit_left.get_or_insert_with(|| {
@@ -587,8 +639,7 @@ impl Fiber {
                     return Ok(None);
                 }
                 let path = self.resolve_path(&self.cwd, name)?;
-                let args = self.finish_dispatch(args, last_arg)?;
-                return self.explicit_path(name, &path, args).map(Some);
+                return self.explicit_path(name, &path, search, args, last_arg);
             }
             if self.shell.coverage {
                 const BUILTINS: core::ops::Range<usize> = 12..71;
@@ -615,8 +666,12 @@ impl Fiber {
                 return Ok(Some(Flow::Next));
             }
         }
-        let Some(command) = self.find_command(name, search)? else {
+        let Some(found) = self.find_command(name, search)? else {
             return Ok(None);
+        };
+        let command = match found {
+            Find::Suspend(path) => return self.emit_resolve(path),
+            Find::Ready(command) => command,
         };
         let args = self.finish_dispatch(args, last_arg)?;
         if let Some(command) = command {
@@ -715,16 +770,76 @@ impl Fiber {
         (mode & 0o111 != 0).then_some(Dispatch::Script)
     }
 
+    /// Stats one normalized command path, consulting a host mount through a
+    /// suspended `FsBatch` stat when the mount covers the path.
+    fn stat_lookup(&self, search: &mut PathSearch, path: &[u8]) -> Result<Lookup, Fail> {
+        if let Some((cached, outcome)) = &search.resolve_cache {
+            if cached.as_slice() == path {
+                return Ok(Lookup::Ready(*outcome));
+            }
+        }
+        if !search.local_only && self.shell.root.resolve_host_mount(path).is_some() {
+            if !self.shell.granted(G_HOST_FS) {
+                return Ok(Lookup::Ready(ResolveOutcome::Missing));
+            }
+            return Ok(Lookup::Suspend(bytes_in(path, &self.scratch)?));
+        }
+        match self.shell.root.stat_normalized(path) {
+            Ok(s) if s.kind == Kind::File => Ok(Lookup::Ready(ResolveOutcome::File(s.mode))),
+            Ok(_) => Ok(Lookup::Ready(ResolveOutcome::Dir)),
+            Err(Code::NotFound | Code::NotDirectory) => Ok(Lookup::Ready(ResolveOutcome::Missing)),
+            Err(Code::NoSpace) => Err(Fail::Mem(MemError::Ceiling)),
+            Err(_) => Ok(Lookup::Ready(ResolveOutcome::Denied)),
+        }
+    }
+
+    fn resolve_req(&self, path: &[u8]) -> Result<HostReq, Fail> {
+        let (id, rest) = self
+            .shell
+            .root
+            .resolve_host_mount(path)
+            .ok_or(Fail::Mem(MemError::Ceiling))?;
+        let mut ops = KVec::new_in(&self.scratch);
+        ops.try_push(BatchOp::Stat(bytes_in(rest, &self.scratch)?))?;
+        self.host_fs_batch(id, ops)
+            .map_err(|_| Fail::Mem(MemError::Ceiling))
+    }
+
+    /// Suspends dispatch on a host stat for `path`. The `Simple` frame (with its
+    /// `PathSearch`) is stashed by the caller so the path re-derives on resume.
+    fn emit_resolve(&mut self, path: KBytes) -> Result<Option<Flow>, Fail> {
+        if !self.tick() {
+            return Ok(None);
+        }
+        let req = self.resolve_req(&path)?;
+        self.resolve_want = Some(path);
+        Ok(Some(Flow::Host(Pending::ResolveStat, req)))
+    }
+
+    fn lookup_outcome(&self, path: &[u8], name: &[u8], outcome: ResolveOutcome) -> Option<Dispatch> {
+        match outcome {
+            ResolveOutcome::File(mode) => self.file_dispatch(path, name, mode),
+            _ => None,
+        }
+    }
+
     fn explicit_path(
         &mut self,
         original: &[u8],
         path: &[u8],
-        args: KVec<KBytes>,
-    ) -> Result<Flow, Fail> {
-        match self.shell.root.stat_normalized(path) {
-            Ok(s) if s.kind == Kind::File => {
+        search: &mut PathSearch,
+        args: &mut KVec<KBytes>,
+        last_arg: &mut KBytes,
+    ) -> Result<Option<Flow>, Fail> {
+        let outcome = match self.stat_lookup(search, path)? {
+            Lookup::Ready(outcome) => outcome,
+            Lookup::Suspend(path) => return self.emit_resolve(path),
+        };
+        let args = self.finish_dispatch(args, last_arg)?;
+        match outcome {
+            ResolveOutcome::File(mode) => {
                 let base = path.rsplit(|&c| c == b'/').next().unwrap_or_default();
-                if let Some(command) = self.file_dispatch(path, base, s.mode) {
+                if let Some(command) = self.file_dispatch(path, base, mode) {
                     return self.invoke(
                         command,
                         if matches!(command, Dispatch::Script) {
@@ -733,17 +848,18 @@ impl Fiber {
                             base
                         },
                         args,
-                    );
+                    ).map(Some);
                 }
                 self.command_error(original, b"Permission denied", 126)?;
             }
-            Err(Code::NotFound | Code::NotDirectory) => {
+            ResolveOutcome::Missing => {
                 self.command_error(original, b"No such file or directory", 127)?
             }
-            Err(Code::NoSpace) => return Err(Fail::Mem(MemError::Ceiling)),
-            _ => self.command_error(original, b"Permission denied", 126)?,
+            ResolveOutcome::Dir | ResolveOutcome::Denied => {
+                self.command_error(original, b"Permission denied", 126)?
+            }
         }
-        Ok(Flow::Next)
+        Ok(Some(Flow::Next))
     }
 
     fn resolve_path(&self, cwd: &[u8], name: &[u8]) -> Result<KBytes, Fail> {
@@ -755,26 +871,38 @@ impl Fiber {
 
     // The outer option indicates whether the search finished in this slice.
     fn find_command(
-        &self,
+        &mut self,
         name: &[u8],
         search: &mut PathSearch,
-    ) -> Result<Option<Option<Dispatch>>, Fail> {
+    ) -> Result<Option<Find>, Fail> {
         if name.is_empty() {
-            return Ok(Some(None));
+            return Ok(Some(Find::Ready(None)));
         }
-        let lookup = |path: &[u8]| match self.shell.root.stat_normalized(path) {
-            Ok(s) if s.kind == Kind::File => Ok(self.file_dispatch(path, name, s.mode)),
-            Err(Code::NoSpace) => Err(Fail::Mem(MemError::Ceiling)),
-            _ => Ok(None),
-        };
-        let mut table = self.shell.paths.borrow_mut();
+        // The recorded path is re-checked without holding the table borrow across
+        // the (possibly suspending) stat. The table slot is consumed only once
+        // the stat is in hand, so a resume re-derives the same path and hits
+        // the stored outcome instead of skipping it.
         if !search.started {
-            search.started = true;
-            if let Some(path) = table.get(name) {
-                if let Some(command) = lookup(path)? {
-                    return Ok(Some(Some(command)));
-                }
-                table.remove(name);
+            let recorded: Option<KBytes> = self
+                .shell
+                .paths
+                .borrow()
+                .get(name)
+                .map(|p| bytes_in(p, &self.scratch))
+                .transpose()
+                .map_err(|_| Fail::Mem(MemError::Ceiling))?;
+            match recorded {
+                Some(path) => match self.stat_lookup(search, &path)? {
+                    Lookup::Ready(outcome) => {
+                        search.started = true;
+                        if let Some(command) = self.lookup_outcome(&path, name, outcome) {
+                            return Ok(Some(Find::Ready(Some(command))));
+                        }
+                        self.shell.paths.borrow_mut().remove(name);
+                    }
+                    Lookup::Suspend(path) => return Ok(Some(Find::Suspend(path))),
+                },
+                None => search.started = true,
             }
         }
         let path = self
@@ -788,10 +916,20 @@ impl Fiber {
                 }
                 let dir = self.resolve_path(&self.cwd, &path[dir.clone()])?;
                 let resolved = self.resolve_path(&dir, name)?;
-                search.candidate = None;
-                if let Some(command) = lookup(&resolved)? {
-                    table.try_insert(bytes_in(name, &self.shell.meta)?, resolved)?;
-                    return Ok(Some(Some(command)));
+                match self.stat_lookup(search, &resolved)? {
+                    Lookup::Ready(outcome) => {
+                        // The candidate is consumed only once its stat is in
+                        // hand; a suspend leaves it for the resume to re-derive.
+                        search.candidate = None;
+                        if let Some(command) = self.lookup_outcome(&resolved, name, outcome) {
+                            self.shell
+                                .paths
+                                .borrow_mut()
+                                .try_insert(bytes_in(name, &self.shell.meta)?, resolved)?;
+                            return Ok(Some(Find::Ready(Some(command))));
+                        }
+                    }
+                    Lookup::Suspend(path) => return Ok(Some(Find::Suspend(path))),
                 }
             }
             if search.end == path.len() {
@@ -827,13 +965,14 @@ impl Fiber {
                 search.candidate = Some((dir, extra));
             }
         }
-        if matches!(
-            self.shell.root.stat_normalized(b"/usr/bin"),
-            Err(Code::NotFound)
-        ) {
-            return Ok(Some(self.active_command(name)));
+        // Fallback for host-backed filesystems without a `/usr/bin` of their own:
+        // when `/usr/bin` is missing wherever the mounts say it should be, an active
+        // command dispatches whatever `PATH` holds.
+        match self.stat_lookup(search, b"/usr/bin")? {
+            Lookup::Ready(ResolveOutcome::Missing) => Ok(Some(Find::Ready(self.active_command(name)))),
+            Lookup::Ready(_) => Ok(Some(Find::Ready(None))),
+            Lookup::Suspend(path) => Ok(Some(Find::Suspend(path))),
         }
-        Ok(Some(None))
     }
 
     fn write_error(&mut self, name: &[u8], message: &[u8]) -> Result<(), Fail> {

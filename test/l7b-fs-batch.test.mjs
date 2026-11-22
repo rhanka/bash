@@ -129,12 +129,37 @@ test("filesystem batches fall back to required custom object methods and map err
   ]);
 });
 
+test("batched listings charge the lowered walk-entry size (56 bytes)", () => fixture(async (root) => {
+  const fs = new ReadWriteFs({ root });
+  await fs.writeFile("/a", "a");
+  await fs.writeFile("/b", "b");
+  const walk = (headroom) => serve(fs, [op("walk", { root: enc("/"), maxDepth: 4, maxEntries: 30 })], {}, headroom);
+  const paths = (outcome) => outcome.val[0].val.val.map(({ path }) => dec(path));
+  // fixed = 64 plus the 1-byte root path; budget = floor(headroom / 2) - 65.
+  // Two 2-byte names at 58 bytes each: a budget of 107 fits the first entry
+  // but not the second, while 117 fits both.
+  assert.deepEqual(paths(await walk(344)), ["/a"]);
+  // A pre-fix 48-byte charge would fit both entries at the same headroom.
+  assert.deepEqual(paths(await walk(362)), ["/a", "/b"]);
+  // read-dir-plus entries carry the same 56-byte record: two 5-byte paths at
+  // 61 bytes each fit one entry in a budget of 108 (110 minus the 2-byte dir
+  // path) but not two.
+  await fs.mkdir("/d");
+  await fs.writeFile("/d/f1", "1");
+  await fs.writeFile("/d/f2", "2");
+  const plus = (headroom) => serve(fs, [pathOp("read-dir-plus", "/d")], {}, headroom);
+  const names = (outcome) => outcome.val[0].val.val.map(({ path }) => dec(path));
+  assert.deepEqual(names(await plus(348)), ["/d/f1"]);
+  assert.deepEqual(names(await plus(388)), ["/d/f1", "/d/f2"]);
+}));
+
 test("kernel-test batch returns six typed results and files cross the ABI in chunks", () => fixture(async (root) => {
   const fs = new OverlayFs({ root });
   const body = "x".repeat((1 << 20) + 17);
   writeFileSync(join(root, "large"), body);
   const seen = [];
-  const b = bash({ fs }, { onHostCall: (request) => { seen.push(request.tag); } });
+  const batches = [];
+  const b = bash({ fs }, { onHostCall: (request) => { seen.push(request.tag); batches.push(request.val); } });
   const batch = await b.exec("__fsbatch 1");
   assert.equal(batch.exitCode, 0, batch.stderr);
   assert.equal(batch.stdout, "ok none\nok none\nok none\nok entries\nok info\nok none\n");
@@ -145,8 +170,25 @@ test("kernel-test batch returns six typed results and files cross the ABI in chu
   assert.ok(read.stdout === body);
   assert.deepEqual(seen, ["fs-batch", "fs-batch", "fs-batch"]);
   const text = "雪".repeat(360_000);
+  const before = batches.length;
   const write = await b.exec("__write /large-output " + text);
   assert.equal(write.exitCode, 0, write.stderr);
   assert.ok(await b.readFile("/large-output") === text);
-  assert.deepEqual(seen, ["fs-batch", "fs-batch", "fs-batch", "fs-batch"]);
+  // D6.4: one payload chunk per host call, never a multi-chunk batch, and no
+  // batch carries more than 1 MiB plus path slack.
+  const calls = batches.slice(before);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].ops.length, 1);
+  assert.equal(calls[1].ops.length, 1);
+  assert.equal(calls[0].ops[0].val.data.length, 1 << 20);
+  assert.equal(calls[1].ops[0].val.data.length, Buffer.byteLength(text) - (1 << 20));
+  for (const call of calls) {
+    let total = 0;
+    for (const op of call.ops) {
+      const v = op.val ?? {};
+      for (const bytes of [v.path, v.data, v.source, v.target, v.root]) if (bytes) total += bytes.length;
+    }
+    assert.ok(total <= (1 << 20) + (64 << 10), `batch carries ${total} bytes`);
+  }
+  assert.deepEqual(seen, ["fs-batch", "fs-batch", "fs-batch", "fs-batch", "fs-batch"]);
 }));

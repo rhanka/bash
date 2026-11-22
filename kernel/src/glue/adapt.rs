@@ -437,6 +437,39 @@ fn batch_bytes(bytes: &[u8]) -> Result<Vec<u8>, MemError> {
     copy(bytes)
 }
 
+/// Bytes one batch op carries across the ABI (paths plus the write payload).
+fn batch_op_bytes(op: &BatchOp) -> usize {
+    let bytes = |b: &[u8]| b.len();
+    match op {
+        BatchOp::Stat(p) | BatchOp::Lstat(p) | BatchOp::Exists(p) | BatchOp::ReadLink(p)
+        | BatchOp::RealPath(p) | BatchOp::ReadDir(p) | BatchOp::ReadDirPlus(p) => bytes(p),
+        BatchOp::Walk { root, .. } => bytes(root),
+        BatchOp::ReadFile { path, .. } => bytes(path),
+        BatchOp::WriteFile { path, data, .. } => bytes(path).saturating_add(bytes(data)),
+        BatchOp::WriteLazy { path, .. } => bytes(path),
+        BatchOp::CreateExclusive { path, .. } => bytes(path),
+        BatchOp::Mkdir { path, .. } => bytes(path),
+        BatchOp::Remove { path, .. } => bytes(path),
+        BatchOp::Copy { source, target, .. } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Rename { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Symlink { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::HardLink { source, target } => bytes(source).saturating_add(bytes(target)),
+        BatchOp::Chmod { path, .. } => bytes(path),
+        BatchOp::Utimes { path, .. } => bytes(path),
+        BatchOp::AllPaths => 0,
+    }
+}
+
+/// Total payload of a batch. D6.4 caps every canonical ABI value at 1 MiB; the
+/// batch as a whole stays near the same bound so the driver never lowers and
+/// transfers more than headroom allows. One full 1 MiB payload chunk plus its
+/// path and record metadata must still fit, so paths get a small slack.
+const MAX_BATCH_SLOP: usize = 64 << 10;
+
+fn batch_total_bytes(ops: &[BatchOp]) -> usize {
+    ops.iter().map(batch_op_bytes).fold(0usize, |a, b| a.saturating_add(b))
+}
+
 fn batch_op_out(op: &BatchOp) -> Result<T::FsOp, MemError> {
     Ok(match op {
         BatchOp::Stat(p) => T::FsOp::Stat(batch_bytes(p)?),
@@ -468,6 +501,9 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
         HostReq::FsBatch { mount_id, ops } => {
             let op_size = 72; // Discriminant and the largest arm, write-file.
             if ops.len() > MAX_BATCH_VALUE / op_size {
+                return Err(MemError::Overflow);
+            }
+            if batch_total_bytes(ops) > MAX_BATCH_VALUE + MAX_BATCH_SLOP {
                 return Err(MemError::Overflow);
             }
             let ops = collect(ops.iter(), batch_op_out)?;
@@ -797,3 +833,39 @@ fn oneshot(req: T::OneshotReq) -> Result<T::OneshotResult, T::KernelError> {
 }
 
 super::kernel::export!(Kernel with_types_in super::kernel);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::KVec;
+    use crate::util::bytes_in;
+
+    fn write_op(scratch: &Budget, len: usize) -> BatchOp {
+        let fill = std::vec![7u8; len];
+        BatchOp::WriteFile {
+            path: bytes_in(b"/f", scratch).unwrap(),
+            data: bytes_in(&fill, scratch).unwrap(),
+            offset: Some(0),
+            truncate: true,
+            mode: None,
+            mtime_ms: None,
+        }
+    }
+
+    #[test]
+    fn oversized_batches_are_refused_before_lowering() {
+        crate::mem::testing::reset(1 << 30);
+        let scratch = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+        // Two 600 KiB payloads fit the per-value cap but exceed the batch bound
+        // (1 MiB plus path slack, D6.4): the batch is refused before lowering.
+        let mut ops = KVec::new_in(&scratch);
+        ops.try_push(write_op(&scratch, 600 << 10)).unwrap();
+        ops.try_push(write_op(&scratch, 600 << 10)).unwrap();
+        assert!(batch_total_bytes(&ops) > MAX_BATCH_VALUE);
+        assert!(matches!(req_out(&HostReq::FsBatch { mount_id: 1, ops }), Err(MemError::Overflow)));
+        // A single chunk stays under the bound.
+        let mut small = KVec::new_in(&scratch);
+        small.try_push(write_op(&scratch, 16)).unwrap();
+        assert_eq!(batch_total_bytes(&small), 18);
+    }
+}

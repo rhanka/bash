@@ -1,7 +1,7 @@
 //! Native tests of the shell VM. The test-only commands need `--features test-commands`.
 use super::*;
-use crate::fs::Vfs;
-use crate::shell::{Config, G_CUSTOM};
+use crate::fs::{BatchList, BatchOk, BatchResult, Code, HostKind, HostStat, Vfs};
+use crate::shell::{Config, G_CUSTOM, G_HOST_FS};
 
 const CEIL: u64 = 1 << 30;
 
@@ -366,4 +366,182 @@ mod commands {
         assert_eq!(r.env.get(b"B").unwrap().value.as_slice(), b"2");
         assert!(sh.env.get(b"B").is_none(), "the shell's environment is untouched");
     }
+
+    #[test]
+    fn chained_reads_park_on_empty_fuel_and_resume() {
+        let sh = mounted(b"/");
+        let mut f = fib(&sh, "__cat /big");
+        let (epoch, req) = run_until_test(&mut f);
+        assert!(matches!(req, HostReq::FsBatch { .. }));
+        // A full 1 MiB chunk wants to chain: with no fuel left the fiber parks
+        // instead of chaining at fuel zero.
+        f.fuel.set(0);
+        f.fuel_credit.set(0);
+        let full = FsStub { stat: None, data: std::vec![0u8; 1 << 20], err: None };
+        assert!(matches!(f.resume(epoch, Outcome::Fs(&full)).unwrap(), Step::OutOfFuel));
+        // The next slice re-emits the parked chain for offset 1 MiB.
+        let Step::Host { epoch: chained, req } = f.run(100) else { panic!("expected the parked chain") };
+        match req {
+            HostReq::FsBatch { mount_id, ops } => {
+                assert_eq!(mount_id, 1);
+                match &ops[..] {
+                    [BatchOp::ReadFile { offset, len, .. }] => assert_eq!((*offset, *len), (1 << 20, 1 << 20)),
+                    _ => panic!("expected a chained read"),
+                }
+            }
+            _ => panic!("expected an fs-batch host call"),
+        }
+        let tail = FsStub { stat: None, data: std::vec![b'x'; 17], err: None };
+        let Step::Done(r) = f.resume(chained, Outcome::Fs(&tail)).unwrap() else { panic!() };
+        assert_eq!(r.exit, 0);
+        assert_eq!(drain(&mut f, false).len(), (1 << 20) + 17);
+    }
+}
+
+// A single-op `Fs` answer for resolve tests: a stat, a read, or an error.
+struct FsStub {
+    stat: Option<(bool, u32)>,
+    data: std::vec::Vec<u8>,
+    err: Option<Code>,
+}
+
+impl<'a> BatchList<'a, BatchResult<'a>> for FsStub {
+    fn len(&self) -> usize { 1 }
+    fn at(&'a self, index: usize) -> Option<BatchResult<'a>> {
+        if index != 0 {
+            return None;
+        }
+        if let Some(code) = self.err {
+            return Some(Err((code, b"/probe")));
+        }
+        if !self.data.is_empty() {
+            return Some(Ok(BatchOk::Data(&self.data)));
+        }
+        match self.stat {
+            Some((true, mode)) => Some(Ok(BatchOk::Info(HostStat {
+                kind: HostKind::File, size: 0, mode, mtime_ms: 0, dev: 0, ino: 7,
+            }))),
+            Some((false, mode)) => Some(Ok(BatchOk::Info(HostStat {
+                kind: HostKind::Directory, size: 0, mode, mtime_ms: 0, dev: 0, ino: 8,
+            }))),
+            None => Some(Err((Code::NotFound, b"/probe"))),
+        }
+    }
+}
+
+fn file_stub(mode: u32) -> FsStub {
+    FsStub { stat: Some((true, mode)), data: std::vec::Vec::new(), err: None }
+}
+
+fn dir_stub() -> FsStub {
+    FsStub { stat: Some((false, 0o755)), data: std::vec::Vec::new(), err: None }
+}
+
+fn mounted(at: &[u8]) -> KRc<Shell> {
+    crate::mem::testing::reset(CEIL);
+    let meta = Budget::root(LimitId::HEADROOM, u64::MAX).unwrap();
+    let vfs = Vfs::create(1 << 20, LimitId(30)).unwrap();
+    vfs.mount_host(at, 1).unwrap();
+    let vfs = KRc::try_new_in(vfs, &meta).ok().unwrap();
+    let cfg = Config {
+        profile: 1, overrides: &[], grants: G_HOST_FS, custom_commands: &[],
+        env: &[], cwd: Some(b"/"), ..Config::default()
+    };
+    let sh = Shell::create(vfs, &cfg, CEIL).unwrap();
+    KRc::try_new_in(sh, &meta).ok().unwrap()
+}
+
+fn stat_path(req: &HostReq) -> std::vec::Vec<u8> {
+    match req {
+        HostReq::FsBatch { mount_id, ops } => {
+            assert_eq!(*mount_id, 1);
+            match &ops[..] {
+                [BatchOp::Stat(p)] => p.as_slice().to_vec(),
+                other => panic!("expected one stat op, got {}", other.len()),
+            }
+        }
+        _ => panic!("expected an fs-batch host call"),
+    }
+}
+
+fn drive_resolve(f: &mut Fiber, path: &[u8], stub: &FsStub) -> Step {
+    let Step::Host { epoch, req } = f.run(100_000) else { panic!("expected a host stat call") };
+    assert_eq!(stat_path(&req), path);
+    f.resume(epoch, Outcome::Fs(stub)).unwrap()
+}
+
+/// Drives `f` until it emits a non-resolve host call, answering command-path
+/// probes as missing (bare `__` test commands resolve like any other name).
+#[cfg(feature = "test-commands")]
+fn run_until_test(f: &mut Fiber) -> (u64, HostReq) {
+    let missing = FsStub { stat: None, data: std::vec::Vec::new(), err: None };
+    let mut step = f.run(100_000);
+    loop {
+        match step {
+            Step::Host { epoch, req } if f.resolve_want.is_some() => {
+                step = f.resume(epoch, Outcome::Fs(&missing)).unwrap();
+            }
+            Step::Host { epoch, req } => return (epoch, req),
+            Step::OutOfFuel => step = f.run(100_000),
+            Step::Done(r) => panic!("finished early with {}", r.exit),
+        }
+    }
+}
+
+#[test]
+fn explicit_host_path_resolves_through_a_stat_batch() {
+    let sh = mounted(b"/");
+    // The stub exists on the host mount: dispatch it instead of failing 127.
+    let mut f = fib(&sh, "/bin/echo hi");
+    let Step::Done(r) = drive_resolve(&mut f, b"/bin/echo", &file_stub(0o644)) else { panic!() };
+    assert_eq!(r.exit, 0);
+    assert_eq!(drain(&mut f, false), "hi\n");
+    // A host directory is not executable: 126, like the kernel map.
+    let mut f = fib(&sh, "/bin");
+    let Step::Done(r) = drive_resolve(&mut f, b"/bin", &dir_stub()) else { panic!() };
+    assert_eq!(r.exit, 126);
+    // An unreadable host path reads as missing: 127.
+    let mut f = fib(&sh, "/bin/echo");
+    let Step::Done(r) = drive_resolve(&mut f, b"/bin/echo", &FsStub { stat: None, data: std::vec::Vec::new(), err: None }) else { panic!() };
+    assert_eq!(r.exit, 127);
+    assert_eq!(drain(&mut f, true), "bash: /bin/echo: No such file or directory\n");
+}
+
+#[test]
+fn path_search_and_usrbin_fallback_read_the_host_mount() {
+    // A `PATH` hit on the mount dispatches without touching the fallback.
+    // Each case uses a fresh shell: the path table is per shell, and a recorded
+    // hit would answer before `/usr/bin` is consulted.
+    let sh = mounted(b"/");
+    let mut f = fib(&sh, "echo hi");
+    let Step::Done(r) = drive_resolve(&mut f, b"/usr/bin/echo", &file_stub(0o644)) else { panic!() };
+    assert_eq!(r.exit, 0);
+    assert_eq!(drain(&mut f, false), "hi\n");
+    // With `PATH=''` and a host `/usr/bin`, the registry fallback must not fire.
+    let sh = mounted(b"/");
+    let mut f = fib(&sh, "PATH='' echo hi");
+    let Step::Host { epoch, req } = f.run(100_000) else { panic!() };
+    assert_eq!(stat_path(&req), b"/usr/bin");
+    let Step::Done(r) = f.resume(epoch, Outcome::Fs(&dir_stub())).unwrap() else { panic!() };
+    assert_eq!(r.exit, 127);
+    // Without a host `/usr/bin`, the fallback still runs host-less commands.
+    let sh = mounted(b"/");
+    let mut f = fib(&sh, "PATH='' echo hi");
+    let Step::Done(r) = drive_resolve(&mut f, b"/usr/bin", &FsStub { stat: None, data: std::vec::Vec::new(), err: None }) else { panic!() };
+    assert_eq!(r.exit, 0);
+    assert_eq!(drain(&mut f, false), "hi\n");
+}
+
+#[test]
+fn host_fs_batch_charges_fuel_per_op() {
+    let sh = shell(1, &[], G_HOST_FS, &[]);
+    let f = fib(&sh, "true");
+    f.fuel.set(1000);
+    f.fuel_credit.set(0);
+    let mut ops = KVec::new_in(&f.scratch);
+    for _ in 0..10 {
+        ops.try_push(BatchOp::Stat(bytes_in(b"/x", &f.scratch).unwrap())).unwrap();
+    }
+    f.host_fs_batch(1, ops).unwrap();
+    assert!(f.fuel.get() < 1000, "ten ops must spend fuel");
 }
