@@ -1,0 +1,21 @@
+{
+  "id": "l8a/bre-groups-and-alt",
+  "steps": [
+    {
+      "script": "grep -- 'a\\(bc\\)*d\\|e'",
+      "stdin": "ad\naabcd\naxe\ne\n"
+    },
+    {
+      "script": "grep -- '\\(*abc\\)'",
+      "stdin": "*abc\nabc\n**abc\n"
+    },
+    {
+      "script": "grep -- '*abc'",
+      "stdin": "*abc\nabc\n**abc\n"
+    }
+  ],
+  "tags": [
+    "bre"
+  ],
+  "title": "BRE groups and alternation, with leading star literal after open and at start"
+}

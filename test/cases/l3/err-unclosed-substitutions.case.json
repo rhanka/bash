@@ -1,0 +1,22 @@
+{
+  "id": "l3/err-unclosed-substitutions",
+  "steps": [
+    {
+      "script": "echo ${x"
+    },
+    {
+      "script": "echo $(echo hi"
+    },
+    {
+      "script": "echo `echo hi"
+    },
+    {
+      "script": "echo <(echo hi"
+    }
+  ],
+  "tags": [
+    "errors",
+    "lexer"
+  ],
+  "title": "Unclosed parameter, command, backtick, and process substitutions"
+}

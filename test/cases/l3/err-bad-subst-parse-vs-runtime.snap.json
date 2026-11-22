@@ -1,0 +1,109 @@
+{
+  "case": "l3/err-bad-subst-parse-vs-runtime",
+  "caseHash": "a2ea0e68aff2e3a50d2a628623cbfe9974d6518a63b560b2d49c482d7629d71d",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:13: ${#x-y}: bad substitution\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:15: ${#x/a/b}: bad substitution\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:12: ${x!y}: bad substitution\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "?": "1",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 1,
+      "stderr": "bash: %: bad substitution\n",
+      "stdout": "a\n"
+    },
+    {
+      "env": {
+        "?": "1",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 1,
+      "stderr": "bash: x: bad substitution\n",
+      "stdout": "a\n"
+    }
+  ]
+}

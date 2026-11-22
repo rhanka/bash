@@ -1,0 +1,13 @@
+{
+  "id": "l8a/perl-shorthands-hex-quote",
+  "steps": [
+    {
+      "script": "grep -Po -- '\\Q(a+b)\\E\\x41\\x{3b1}\\d+\\s+\\w+'",
+      "stdin": "(a+b)Aα123 xyz\nnomatch\n"
+    }
+  ],
+  "tags": [
+    "perl"
+  ],
+  "title": "Perl literal quoting with hex escapes, digit, space, and word runs"
+}

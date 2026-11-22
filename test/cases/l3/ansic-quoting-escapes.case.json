@@ -1,0 +1,21 @@
+{
+  "id": "l3/ansic-quoting-escapes",
+  "steps": [
+    {
+      "script": "echo $'a\\nb\\tc\\\\\\'\"'"
+    },
+    {
+      "script": "echo -n $'\\x41\\x9\\xz\\xc3\\xa9'"
+    },
+    {
+      "script": "echo -n $'\\u03b1-\\u41'"
+    },
+    {
+      "script": "echo -n $'\\U0041-\\?\\q'"
+    }
+  ],
+  "tags": [
+    "quoting"
+  ],
+  "title": "ANSI-C quoting escapes, hex rules, unicode escapes, and literal backslashes"
+}

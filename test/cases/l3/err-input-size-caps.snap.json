@@ -1,0 +1,31 @@
+{
+  "case": "l3/err-input-size-caps",
+  "caseHash": "bd9d016068e13371c7d039d8b7ee47e1eff18f4497e4e4c53047c299c52971e6",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 126,
+      "stderr": "bash: script input size limit exceeded (12 bytes)\n",
+      "stdout": ""
+    }
+  ]
+}

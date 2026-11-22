@@ -1,0 +1,24 @@
+{
+  "id": "l3/comments-and-continuations",
+  "steps": [
+    {
+      "script": "ec\\\nho hi"
+    },
+    {
+      "script": "echo ${x:-a\\\nb}"
+    },
+    {
+      "script": "echo hi \\\n| cat"
+    },
+    {
+      "script": "echo hi # trailing comment"
+    },
+    {
+      "script": "echo a#b"
+    }
+  ],
+  "tags": [
+    "lexer"
+  ],
+  "title": "Backslash-newline continuations and hash comments versus glued hashes"
+}

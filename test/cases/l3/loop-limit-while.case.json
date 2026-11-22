@@ -1,0 +1,18 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxLoopIterations": 3
+    }
+  },
+  "id": "l3/loop-limit-while",
+  "steps": [
+    {
+      "script": "while echo w; do echo body; done"
+    }
+  ],
+  "tags": [
+    "limits",
+    "while"
+  ],
+  "title": "While loop exceeding maxLoopIterations exits 126 with the while message"
+}

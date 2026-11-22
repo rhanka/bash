@@ -1,0 +1,24 @@
+{
+  "id": "l8a/glob-brackets-negation",
+  "steps": [
+    {
+      "script": "( case 'b' in [^a]) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case 'b' in [!a]) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case '!' in [!a]) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case ']' in []-]) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case '7' in [[:digit:]]) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Glob bracket caret negation versus literal bang members"
+}

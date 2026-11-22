@@ -1,0 +1,20 @@
+{
+  "id": "l3/normalize-heredoc-quotes",
+  "steps": [
+    {
+      "script": "  # don't break\n  x='multi\nline'\n  echo \"two\nlines\"\n  cat <<A <<B\n    bodyA\nA\n    bodyB\nB\n  echo after:$?"
+    },
+    {
+      "script": "  cat <<EOF\n  hello\n    EOF\n  echo done:$?"
+    },
+    {
+      "rawScript": true,
+      "script": "  echo spaced"
+    }
+  ],
+  "tags": [
+    "heredoc",
+    "normalize"
+  ],
+  "title": "Indented script with comments, multiline quotes, double heredoc, and rawScript bypass"
+}

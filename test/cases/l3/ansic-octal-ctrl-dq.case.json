@@ -1,0 +1,21 @@
+{
+  "env": {
+    "USER": "bob"
+  },
+  "id": "l3/ansic-octal-ctrl-dq",
+  "steps": [
+    {
+      "script": "echo -n $'\\101-\\0101-\\061'"
+    },
+    {
+      "script": "echo -n \"$'a\\nb'\""
+    },
+    {
+      "script": "$\"hello $USER\""
+    }
+  ],
+  "tags": [
+    "quoting"
+  ],
+  "title": "ANSI-C octal greed, double-quoted dollar-single-quote, and locale quoting"
+}

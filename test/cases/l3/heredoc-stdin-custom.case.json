@@ -1,0 +1,24 @@
+{
+  "id": "l3/heredoc-stdin-custom",
+  "steps": [
+    {
+      "env": {
+        "USER": "bob"
+      },
+      "script": "cat <<EOF\nhello $USER\nEOF"
+    },
+    {
+      "script": "cat <<-EOF\n\tstripped\n\tEOF"
+    },
+    {
+      "script": "cat <<'EOF'\nliteral $USER\nEOF"
+    },
+    {
+      "script": "echo ok <<EOF\nunterminated"
+    }
+  ],
+  "tags": [
+    "heredoc"
+  ],
+  "title": "Heredoc expansion, tab stripping, quoted literal, and EOF termination"
+}

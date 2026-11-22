@@ -1,0 +1,13 @@
+{
+  "id": "l8a/perl-keep-and-lazy",
+  "steps": [
+    {
+      "script": "grep -Po -- '(?i:ab)\\d+\\K[a-z]+?'",
+      "stdin": "AB12xyz\nab34qrs\n"
+    }
+  ],
+  "tags": [
+    "perl"
+  ],
+  "title": "Perl match-start reset with a lazy trailing class"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "l3/while-until-basic",
+  "steps": [
+    {
+      "script": "s=\".\"\nwhile [ \"$s\" != \"....\" ]; do s=\"$s.\"; done\necho \"s=$s\"\ni=0\nuntil [ \"$i\" -ge 3 ]; do i=$((i + 1)); done\necho \"i=$i\"\nwhile false; do echo no; done\necho \"w=$?\"\nuntil true; do echo no; done\necho \"u=$?\""
+    }
+  ],
+  "tags": [
+    "until",
+    "while"
+  ],
+  "title": "While countdown, until loop, and zero-trip while and until"
+}

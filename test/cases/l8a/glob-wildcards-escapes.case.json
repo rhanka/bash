@@ -1,0 +1,21 @@
+{
+  "id": "l8a/glob-wildcards-escapes",
+  "steps": [
+    {
+      "script": "( case 'a*b?c' in 'a*b'?c) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case 'hello' in *) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case 'a?b' in a\\?b) echo match ;; *) echo no ;; esac )"
+    },
+    {
+      "script": "( case 'a*b' in a\\*b) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Glob wildcards with quoted literals and unquoted backslash escapes"
+}

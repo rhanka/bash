@@ -1,0 +1,39 @@
+{
+  "id": "l3/err-operators-and-case-terms",
+  "steps": [
+    {
+      "script": ";"
+    },
+    {
+      "script": ";;"
+    },
+    {
+      "script": ";&"
+    },
+    {
+      "script": ";;&"
+    },
+    {
+      "script": "| echo a"
+    },
+    {
+      "script": "|& echo a"
+    },
+    {
+      "script": "&& echo a"
+    },
+    {
+      "script": "|| echo a"
+    },
+    {
+      "script": "& echo a"
+    },
+    {
+      "script": "echo a;; echo b"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Leading operators and case terminators outside case are syntax errors"
+}

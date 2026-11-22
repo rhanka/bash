@@ -1,0 +1,12 @@
+{
+  "id": "l8a/extglob-nested",
+  "steps": [
+    {
+      "script": "( shopt -s extglob; case 'foo_12_bar' in @(foo|baz)_+([0-9])_?(bar|qux)) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "extglob"
+  ],
+  "title": "Nested extglob groups over digits with alternation"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "l3/function-compound-bodies",
+  "steps": [
+    {
+      "script": "f_sub() ( x=9; echo $x )\nf_if() if echo -n; then echo yes; fi\nx=1\nf_sub\necho $x\nf_if\nfoo-bar() { echo hyp; }\nfoo-bar"
+    }
+  ],
+  "tags": [
+    "function"
+  ],
+  "title": "Function definitions with subshell, if, and hyphenated-name bodies"
+}

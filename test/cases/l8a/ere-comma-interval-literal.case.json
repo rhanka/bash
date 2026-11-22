@@ -1,0 +1,13 @@
+{
+  "id": "l8a/ere-comma-interval-literal",
+  "steps": [
+    {
+      "script": "grep -E -- 'a{,2}b'",
+      "stdin": "a{,2}b\nab\naab\nb\n"
+    }
+  ],
+  "tags": [
+    "ere"
+  ],
+  "title": "ERE comma-first interval is literal text outside sed"
+}

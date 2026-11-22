@@ -1,0 +1,12 @@
+{
+  "id": "l8a/glob-nocasematch",
+  "steps": [
+    {
+      "script": "( shopt -s nocasematch; case 'HeLLo.TXT' in *.txt) echo match ;; *) echo no ;; esac )"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Case-insensitive glob match under nocasematch"
+}

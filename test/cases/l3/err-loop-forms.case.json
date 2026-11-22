@@ -1,0 +1,28 @@
+{
+  "id": "l3/err-loop-forms",
+  "steps": [
+    {
+      "script": "while echo a; echo b; done"
+    },
+    {
+      "script": "while echo a; do echo b"
+    },
+    {
+      "script": "while echo a; do done"
+    },
+    {
+      "script": "until echo a; do done"
+    },
+    {
+      "script": "for x in a b; echo $x; done"
+    },
+    {
+      "script": "for ((i=0; i<2; i++; i++)); do echo $i; done"
+    }
+  ],
+  "tags": [
+    "errors",
+    "loops"
+  ],
+  "title": "Malformed while, until, for, and C-style for statements"
+}
