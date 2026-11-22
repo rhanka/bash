@@ -44,8 +44,8 @@ async function expectLimit(shell, probe, limit, stderr, script, opts) {
 }
 
 function commandPressure(cap) {
-  if ((cap + 1) * 3 <= 100_000) return "echo x\n".repeat(cap + 1);
-  // A flat list exceeds the independent lexer cap before this profile's command cap.
+  if (cap + 1 <= 10_000 && (cap + 1) * 3 <= 100_000) return "echo x\n".repeat(cap + 1);
+  // A flat list exceeds the independent parser caps (10_000 statements / 100_000 tokens) before this profile's command cap.
   const levels = Math.ceil(Math.log2(cap + 1));
   const script = ["f0() { echo x; }"];
   for (let i = 1; i <= levels; i++) script.push("f" + i + "() { f" + (i - 1) + "; f" + (i - 1) + "; }");
@@ -198,7 +198,7 @@ test("the parser caps apply before the VM runs a stage", async () => {
   const tokens = await shell.exec("echo x\n".repeat(33_334));
   assert.equal(tokens.exitCode, 2);
   assert.equal(tokens.stdout, "");
-  assert.equal(tokens.stderr, "bash: syntax error: Parse error at 1:1: Too many tokens: 100002 exceeds limit of 100000\n");
+  assert.equal(tokens.stderr, "bash: syntax error: Parse error at 1:1: Too many tokens: 100003 exceeds limit of 100000\n");
   const nested = await shell.exec("{ ".repeat(201) + "echo x;" + " };".repeat(201));
   assert.equal(nested.exitCode, 2);
   assert.equal(nested.stdout, "");
