@@ -165,6 +165,8 @@ pub enum Fail {
     CallDepth(KBytes),
     ExecDepth,
     Work,
+    LoopLimit(&'static str),
+    DeferredSyntax(KBytes),
     BadSubstitution(KBytes),
     Readonly(KBytes),
     Mem(MemError),
@@ -234,6 +236,7 @@ impl Write for Diagnostic {
 }
 
 struct Program {
+    #[allow(dead_code)]
     source: KBytes,
     ast: Ast,
 }
@@ -1055,11 +1058,27 @@ impl Fiber {
                 Some(format_args!("bash: syntax error: Parse error at 1:1: Input too large: {units} bytes exceeds limit of 1000000\n")));
             return Some(self.done_step());
         }
-        let ast = match Ast::parse(&source, &self.live) {
+        let max_heredoc = limits::index_of("maxHeredocSize")
+            .map_or(u64::MAX, |i| self.shell.lim.vals[i]);
+        let work_cell = self.work.clone();
+        let work_cap = self.shell.lim.vals[I_WORK_UNITS];
+        let mut charge = |units: u64| -> Result<(), ()> {
+            let next = work_cell.get().checked_add(units).ok_or(())?;
+            if next > work_cap {
+                return Err(());
+            }
+            work_cell.set(next);
+            Ok(())
+        };
+        let ast = match Ast::parse(&source, max_heredoc, &self.live, &mut charge) {
             Ok(ast) => ast,
             Err(syntax::Error::Memory(e)) => {
                 drop(source);
                 return Some(self.end_fail(Fail::Mem(e)));
+            }
+            Err(syntax::Error::Work) => {
+                drop(source);
+                return Some(self.end_fail(Fail::Work));
             }
             Err(error) => {
                 drop(source);
@@ -1067,7 +1086,7 @@ impl Fiber {
                 return Some(self.done_step());
             }
         };
-        if let Err(e) = self.start_vm(ast.entry) {
+        if let Err(e) = self.start_vm(ast.root) {
             drop(ast);
             drop(source);
             return Some(self.end_fail(e));
@@ -1241,6 +1260,27 @@ impl Fiber {
                     lim[I_WORK_UNITS]
                 );
                 "maxWorkUnits"
+            }
+            Fail::LoopLimit(kind) => {
+                let cap = limits::index_of("maxLoopIterations")
+                    .map_or(u64::MAX, |i| lim[i]);
+                let _ = writeln!(
+                    text,
+                    "bash: {kind} loop: too many iterations ({cap}), increase executionLimits.maxLoopIterations"
+                );
+                "maxLoopIterations"
+            }
+            Fail::DeferredSyntax(msg) => {
+                self.stdout.clear();
+                self.out_total = 0;
+                let msg = core::str::from_utf8(&msg).unwrap_or("syntax error");
+                self.finish_early(
+                    2,
+                    Status::Completed,
+                    None,
+                    Some(format_args!("bash: syntax error: Parse error at 1:1: {msg}\n")),
+                );
+                return self.done_step();
             }
             Fail::Mem(MemError::Limit(id)) if id == limits::id_of_index(I_LIVE_BYTES) => {
                 let _ = writeln!(
