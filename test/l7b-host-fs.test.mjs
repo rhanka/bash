@@ -9,6 +9,7 @@ import { Bash, OverlayFs, ReadWriteFs } from "@sentropic/bash";
 import * as browser from "@sentropic/bash/browser";
 import { bash, dec, enc } from "./kt.mjs";
 import { repoRoot, scratch } from "./helpers.mjs";
+import { hostTestConfig } from "../host/node/host-paths.js";
 
 async function fixture(run) {
   const dir = scratch("test-host-fs");
@@ -493,3 +494,155 @@ test("Linux Node open flags reject a symlink leaf and permit a real directory", 
       fs.closeSync(fd);
     }
   }));
+
+test("finding 1: command resolution and options.files reach host mounts", () => fixture(async (root) => {
+  const overlay = new OverlayFs({ root });
+  const seen = [];
+  const b = bash({ fs: overlay }, { onHostCall: (request) => seen.push(request.tag) });
+  // An explicit host path dispatches instead of failing 127 ...
+  const explicit = await b.exec("/bin/echo hi");
+  assert.equal(explicit.exitCode, 0, explicit.stderr);
+  assert.equal(explicit.stdout, "hi\n");
+  assert.ok(seen.includes("fs-batch"));
+  // ... a bare name resolves through the mount ...
+  const before = seen.length;
+  const bare = await b.exec("echo again");
+  assert.equal(bare.exitCode, 0, bare.stderr);
+  assert.equal(bare.stdout, "again\n");
+  assert.ok(seen.length > before);
+  // ... but PATH='' with a seeded /usr/bin does not fall back (fresh shell, so
+  // no recorded path answers first, per the path-table gate).
+  assert.equal((await bash({ fs: overlay }).exec("PATH='' echo hi")).exitCode, 127);
+  // A host fs without /usr/bin still runs commands through the fallback,
+  // consulting the mount first.
+  const rwSeen = [];
+  const fallback = bash({ fs: new ReadWriteFs({ root }) }, { onHostCall: (request) => rwSeen.push(request.tag) });
+  assert.equal((await fallback.exec("echo hi")).exitCode, 0);
+  assert.deepEqual(rwSeen, ["fs-batch", "fs-batch", "fs-batch"]);
+  // options.files land in the host fs, not the shadowed kernel volume.
+  const withFiles = bash({ fs: new OverlayFs({ root, mountPoint: "/" }), files: { "/hello.txt": "HI" } });
+  assert.equal(await withFiles.readFile("/hello.txt"), "HI");
+  assert.equal((await withFiles.exec("__cat /hello.txt")).stdout, "HI");
+  // ReadWriteFs (no synchronous seed methods) seeds in the background.
+  const rwFiles = bash({ fs: new ReadWriteFs({ root }), files: { "/rw.txt": "RW" } });
+  assert.equal(await rwFiles.readFile("/rw.txt"), "RW");
+  assert.equal((await rwFiles.exec("__cat /rw.txt")).stdout, "RW");
+  // Lazy file values are rejected on host mounts instead of going missing.
+  assert.throws(() => bash({ fs: new OverlayFs({ root }), files: { "/x": () => "lazy" } }), { name: "TypeError" });
+}));
+
+test("finding 3: '..' never skips an intermediate symlink", () => fixture(async (root, dir) => {
+  fs.writeFileSync(join(root, "inside"), "INSIDE");
+  const outside = join(dir, "outside");
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, join(root, "out-dir"));
+  fs.mkdirSync(join(root, "level", "sub"), { recursive: true });
+  fs.writeFileSync(join(root, "level", "value"), "LEVEL");
+  fs.symlinkSync("level/sub", join(root, "shortcut"));
+  for (const Adapter of [ReadWriteFs, OverlayFs]) {
+    const overlay = Adapter === OverlayFs;
+    const adapter = new Adapter({ root, mountPoint: "/" });
+    const code = overlay ? "ENOENT" : "EACCES";
+    // A `..` collapsing across `out-dir` must not skip its check.
+    await assert.rejects(adapter.readFile("/out-dir/../inside"), { code });
+    await assert.rejects(adapter.stat("/out-dir/../inside"), { code });
+    if (overlay) assert.equal(await adapter.exists("/out-dir/../inside"), false);
+    else await assert.rejects(adapter.writeFile("/out-dir/../inside", "x"), { code });
+  }
+  for (const Adapter of [ReadWriteFs, OverlayFs]) {
+    const adapter = new Adapter({ root, mountPoint: "/", allowSymlinks: true });
+    assert.equal(await adapter.readFile("/shortcut/../value"), "LEVEL");
+    assert.equal(await adapter.realpath("/shortcut/../value"), "/level/value");
+  }
+}));
+
+test("finding 4: the root opens directly and works without procfs descriptors", () => fixture(async (root, dir) => {
+  fs.writeFileSync(join(root, "sentinel"), "S");
+  // Traverse-only ancestors above the root need no read permission.
+  const locked = join(dir, "locked");
+  const inner = join(locked, "root");
+  fs.mkdirSync(inner, { recursive: true });
+  fs.writeFileSync(join(inner, "file"), "DATA");
+  fs.chmodSync(locked, 0o111);
+  try {
+    for (const Adapter of [ReadWriteFs, OverlayFs]) {
+      const adapter = Adapter === OverlayFs ? new Adapter({ root: inner, mountPoint: "/" }) : new Adapter({ root: inner });
+      assert.equal(await adapter.readFile("/file"), "DATA");
+      await adapter.writeFile("/new", "N");
+      assert.equal(await adapter.readFile("/new"), "N");
+    }
+  } finally {
+    fs.chmodSync(locked, 0o755);
+  }
+  // Without /proc/self/fd the adapters fall back to validated canonical paths.
+  hostTestConfig.forceFallback = true;
+  try {
+    const rw = new ReadWriteFs({ root });
+    assert.equal(await rw.readFile("/sentinel"), "S");
+    await rw.writeFile("/w", "W");
+    assert.equal(fs.readFileSync(join(root, "w"), "utf8"), "W");
+    assert.equal(await rw.exists("/missing"), false);
+    const overlay = new OverlayFs({ root, mountPoint: "/" });
+    assert.equal(await overlay.readFile("/sentinel"), "S");
+    await overlay.writeFile("/w2", "W");
+    assert.equal(await overlay.readFile("/w2"), "W");
+  } finally {
+    hostTestConfig.forceFallback = false;
+  }
+}));
+
+test("finding 5: maxFileReadSize applies to memory-copied host files", () => fixture(async (root) => {
+  fs.writeFileSync(join(root, "big"), "x".repeat(20 << 20));
+  for (const [method, args, target] of [
+    ["chmod", [0o600], "/big"], ["utimes", [new Date(1000), new Date(2000)], "/big"],
+    ["appendFile", ["+"], "/big"], ["cp", ["/big", "/copy"], "/copy"], ["link", ["/big", "/linked"], "/linked"],
+  ]) {
+    const overlay = new OverlayFs({ root, mountPoint: "/" });
+    if (method === "cp") await overlay.cp(...args);
+    else if (method === "link") await overlay.link(...args);
+    else await overlay[method]("/big", ...args);
+    await assert.rejects(overlay.readFile(target), { code: "EFBIG" });
+    await assert.rejects(overlay.readFileBuffer(target), { code: "EFBIG" });
+  }
+  const overlay = new OverlayFs({ root, mountPoint: "/" });
+  await assert.rejects(overlay.readFile("/big"), { code: "EFBIG" });
+  assert.equal(fs.readFileSync(join(root, "big"), "utf8").length, 20 << 20);
+}));
+
+test("finding 7: dot command names do not corrupt the seeded layout", () => fixture(async (root) => {
+  const overlay = new OverlayFs({ root });
+  const cmd = (name) => ({ name, execute: () => ({ stdout: "", stderr: "", exitCode: 0 }) });
+  const sandbox = bash({ fs: overlay, customCommands: [cmd("."), cmd("..")] });
+  assert.equal((await overlay.stat("/bin")).isDirectory, true);
+  assert.equal((await overlay.stat("/usr/bin")).isDirectory, true);
+  sandbox.registerCommand(cmd("."));
+  sandbox.registerCommand(cmd(".."));
+  assert.equal((await overlay.stat("/bin")).isDirectory, true);
+  assert.equal((await overlay.stat("/usr/bin")).isDirectory, true);
+}));
+
+test("finding 8: virtual paths survive error sanitizing", () => fixture(async (root) => {
+  for (const Adapter of [ReadWriteFs, OverlayFs]) {
+    const adapter = new Adapter({ root, mountPoint: "/" });
+    await assert.rejects(adapter.readFile("/tmp/foo"), {
+      message: "ENOENT: no such file or directory, open '/tmp/foo'",
+    });
+    await assert.rejects(adapter.stat("/usr/bar"), {
+      message: "ENOENT: no such file or directory, stat '/usr/bar'",
+    });
+  }
+}));
+
+test("finding 10: recursive cp follows contained links when allowed", () => fixture(async (root) => {
+  fs.mkdirSync(join(root, "a"));
+  fs.writeFileSync(join(root, "a", "file"), "DATA");
+  fs.symlinkSync("a", join(root, "link"));
+  fs.symlinkSync("file", join(root, "a", "alias"));
+  const rw = new ReadWriteFs({ root, allowSymlinks: true });
+  await rw.cp("/link", "/copy", { recursive: true });
+  assert.equal(await rw.readFile("/copy/file"), "DATA");
+  await rw.cp("/a", "/a2", { recursive: true });
+  assert.equal(await rw.readFile("/a2/alias"), "DATA");
+  const strict = new ReadWriteFs({ root });
+  await assert.rejects(strict.cp("/a", "/a3", { recursive: true }), { code: "EIO" });
+}));

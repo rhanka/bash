@@ -2,7 +2,7 @@ import { concat, latin1FromBytes, utf8 } from "../core/bytes.js";
 import { dirname, resolvePath } from "../core/paths.js";
 import { checkedPath, errno, fsFailure, outside, rewriteError, special } from "./fs-errors.js";
 import {
-  HostPaths, decodeContent, encodeContent, formatStat, inDirectory, listHost, readRegular, resolveVirtual,
+  HostPaths, absoluteVirtual, decodeContent, encodeContent, formatStat, inDirectory, listHost, readRegular, resolveVirtual,
 } from "./host-paths.js";
 
 function beneath(dir, name) {
@@ -65,7 +65,7 @@ export class OverlayFs {
   #checkWrite(op, path, ...other) {
     checkedPath(op, path, ...other);
     if (this.#readOnly) throw errno("EROFS", op, path);
-    return resolvePath("/", path);
+    return absoluteVirtual(path);
   }
 
   #hidden(virtual) {
@@ -79,39 +79,66 @@ export class OverlayFs {
     return resolvePath(this.#mount, suffix.replace(/^\//, ""));
   }
 
-  #lookup(virtual, op, path, leaf, run, hops = 0) {
-    const parts = virtual.split("/").filter(Boolean);
-    let prefix = "";
-    for (let i = 0; i < parts.length; i++) {
-      prefix += "/" + parts[i];
-      const node = this.#entries.get(prefix);
-      if (!node) continue;
-      const final = i === parts.length - 1;
-      if (node.kind === "symlink" && (!final || !leaf)) {
-        if (!this.#host.allowSymlinks) return run({ blocked: true, virtual });
-        if (hops === 40) throw errno("ELOOP", op, path);
-        const target = resolvePath(dirname(prefix), node.target);
-        if (beneath(this.#mount, prefix) && !beneath(this.#mount, target)) throw outside(path);
-        return this.#lookup(resolvePath(target, parts.slice(i + 1).join("/")), op, path, leaf, run, hops + 1);
+  #suffixOf(raw) {
+    if (raw === this.#mount) return "/";
+    if (this.#mount === "/") return raw;
+    if (raw.startsWith(this.#mount + "/")) return raw.slice(this.#mount.length);
+    return null;
+  }
+
+  #lookup(virtual, op, path, leaf, run, hops = 0, strict = false) {
+    // `..` is resolved against the scanned prefix (never lexically pre-collapsed)
+    // so an intermediate symlink is still checked; the raw `..`-preserving path
+    // is what the host validates, and its canonical answer re-enters here.
+    // `strict` rejects a `..` climbing above the root and is used for symlink
+    // targets, mirroring the host adapter's `mv` escape gate.
+    const raw = virtual.split("/").filter((part) => part !== "" && part !== ".");
+    const resolved = [];
+    let blockedScan = false;
+    for (let i = 0; i < raw.length; i++) {
+      const part = raw[i];
+      if (part === "..") {
+        if (resolved.length) resolved.pop();
+        continue;
       }
-      if (!final && node.kind !== "directory") throw errno("ENOTDIR", op, path);
+      const prefix = `/${[...resolved, part].join("/")}`;
+      const node = this.#entries.get(prefix);
+      if (node) {
+        const final = i === raw.length - 1;
+        if (node.kind === "symlink" && (!final || !leaf)) {
+          // Denied symlinks block the host subtree but still allow memory-layer
+          // writes below them; keep scanning so the reported path stays resolved.
+          if (!this.#host.allowSymlinks) blockedScan = true;
+          else {
+            if (hops === 40) throw errno("ELOOP", op, path);
+            // The target applies to the resolved prefix, so a `..` in the
+            // remainder collapses against resolved directories only.
+            const target = resolvePath(dirname(prefix), node.target);
+            if (beneath(this.#mount, prefix) && !beneath(this.#mount, target)) throw outside(path);
+            return this.#lookup(resolvePath(target, raw.slice(i + 1).join("/")), op, path, leaf, run, hops + 1, strict);
+          }
+        } else if (!blockedScan && !final && node.kind !== "directory") throw errno("ENOTDIR", op, path);
+      }
+      resolved.push(part);
     }
-    const memory = this.#entries.get(virtual);
-    const own = memory && { memory, info: this.#memoryStat(memory), virtual };
-    if ((own && own.memory.kind !== "directory") || !beneath(this.#mount, virtual) || this.#hidden(virtual)) {
-      return run(own ?? { virtual });
+    const v = `/${resolved.join("/")}`;
+    if (blockedScan) return run({ blocked: true, virtual: v });
+    const suffix = beneath(this.#mount, v) ? this.#suffixOf(virtual) : null;
+    const memory = this.#entries.get(v);
+    const own = memory && { memory, info: this.#memoryStat(memory), virtual: v };
+    if ((own && own.memory.kind !== "directory") || suffix === null || this.#hidden(v)) {
+      return run(own ?? { virtual: v });
     }
     try {
-      const suffix = virtual === this.#mount ? "/" : this.#mount === "/" ? virtual : virtual.slice(this.#mount.length);
-      return this.#host.use(suffix, op, { leaf, ignoreLinks: true, display: path }, (entry) => {
-        if (entry.blocked) return run(own ?? { ...entry, virtual });
+      return this.#host.use(suffix, op, { leaf, ignoreLinks: true, display: path, strictDotDot: strict }, (entry) => {
+        if (entry.blocked) return run(own ?? { ...entry, virtual: v });
         const actual = this.#mounted(this.#host.virtual(entry.canonical));
-        if (actual !== virtual) {
+        if (actual !== v) {
           if (hops === 40) throw errno("ELOOP", op, path);
-          return this.#lookup(actual, op, path, leaf, run, hops + 1);
+          return this.#lookup(actual, op, path, leaf, run, hops + 1, strict);
         }
         if (own) return run({ ...own, host: entry.info?.isDirectory() ? entry : undefined });
-        return run(entry.info ? { info: formatStat(entry.info), host: entry, virtual } : { virtual });
+        return run(entry.info ? { info: formatStat(entry.info), host: entry, virtual: v } : { virtual: v });
       });
     } catch (error) {
       throw rewriteError(error, op, path);
@@ -175,21 +202,28 @@ export class OverlayFs {
 
   mkdirSync(path, options) {
     checkedPath("mkdir", path);
-    const p = resolvePath("/", path);
-    const node = this.#entries.get(p);
-    if (node) {
-      if (!options?.recursive) throw errno("EEXIST", "mkdir", path);
-      return;
-    }
-    const changes = new Map();
-    if (p !== "/") this.#parents(changes, p, "mkdir", path, !!options?.recursive, true);
-    changes.set(p, this.#dir());
-    this.#commit(changes);
+    // Resolve through the lookup so `..` and symlinks settle before the memory
+    // map is keyed; the lookup itself is side-effect free.
+    this.#lookup(absoluteVirtual(path), "mkdir", path, true, (entry) => {
+      const p = entry.virtual;
+      const node = this.#entries.get(p);
+      if (node) {
+        if (!options?.recursive) throw errno("EEXIST", "mkdir", path);
+        return;
+      }
+      if (entry.info && !options?.recursive) throw errno("EEXIST", "mkdir", path);
+      const changes = new Map();
+      if (p !== "/") this.#parents(changes, p, "mkdir", path, !!options?.recursive, true);
+      changes.set(p, this.#dir());
+      this.#commit(changes);
+    });
   }
 
   writeFileSync(path, content) {
     checkedPath("write", path);
-    this.#write(resolvePath("/", path), path, content, undefined, true);
+    this.#lookup(absoluteVirtual(path), "write", path, false, (entry) => {
+      this.#write(entry.virtual, path, content, undefined, true);
+    });
   }
 
   #write(p, path, content, options, memoryOnly = false) {
@@ -228,7 +262,7 @@ export class OverlayFs {
   async exists(path) {
     if (path.includes("\0")) return false;
     try {
-      return this.#lookup(resolvePath("/", path), "access", path, false, (entry) => !!entry?.info);
+      return this.#lookup(absoluteVirtual(path), "access", path, false, (entry) => !!entry?.info);
     } catch (error) {
       if (["ENOENT", "ENOTDIR", "EACCES", "ELOOP"].includes(error.code)) return false;
       throw error;
@@ -237,20 +271,28 @@ export class OverlayFs {
 
   async stat(path) {
     checkedPath("stat", path);
-    return this.#lookup(resolvePath("/", path), "stat", path, false, (entry) => requireEntry(entry, "stat", path).info);
+    return this.#lookup(absoluteVirtual(path), "stat", path, false, (entry) => requireEntry(entry, "stat", path).info);
   }
 
   async lstat(path) {
     checkedPath("lstat", path);
-    return this.#lookup(resolvePath("/", path), "lstat", path, true, (entry) => requireEntry(entry, "lstat", path).info);
+    return this.#lookup(absoluteVirtual(path), "lstat", path, true, (entry) => requireEntry(entry, "lstat", path).info);
   }
 
   async readFileBuffer(path) {
     checkedPath("open", path);
-    return this.#lookup(resolvePath("/", path), "open", path, false, (entry) => {
+    return this.#lookup(absoluteVirtual(path), "open", path, false, (entry) => {
       requireEntry(entry, "open", path);
       if (entry.info.isDirectory) throw fsFailure("EIO", `open '${path}'`);
-      if (entry.memory) return Uint8Array.from(entry.memory.data);
+      // `maxFileReadSize` applies to memory entries as well: metadata and copy
+      // operations may pull a large host file into memory, but reading it back
+      // must not bypass the cap (L7b §6).
+      if (entry.memory) {
+        if (this.#maxRead && entry.info.size > this.#maxRead) {
+          throw fsFailure("EFBIG", `file too large, read '${path}' (${entry.info.size} bytes, max ${this.#maxRead})`);
+        }
+        return Uint8Array.from(entry.memory.data);
+      }
       return readRegular(entry.host, this.#maxRead, path);
     });
   }
@@ -309,7 +351,7 @@ export class OverlayFs {
 
   async readdirWithFileTypes(path) {
     checkedPath("scandir", path);
-    return this.#lookup(resolvePath("/", path), "scandir", path, false, (entry) => this.#listing(entry, path));
+    return this.#lookup(absoluteVirtual(path), "scandir", path, false, (entry) => this.#listing(entry, path));
   }
 
   async readdir(path) { return (await this.readdirWithFileTypes(path)).map(({ name }) => name); }
@@ -381,7 +423,7 @@ export class OverlayFs {
   #copy(src, dest, op, recursive) {
     const destination = this.#checkWrite(op, dest, src);
     const to = this.#lookup(destination, op, dest, true, (entry) => entry.virtual);
-    const source = resolvePath("/", src);
+    const source = absoluteVirtual(src);
     const changes = new Map();
     const from = this.#lookup(source, op, src, true, (entry) => {
       requireEntry(entry, op, src);
@@ -435,11 +477,16 @@ export class OverlayFs {
   async symlink(target, path) {
     checkedPath("symlink", target, path);
     if (!this.#host.allowSymlinks || this.#readOnly) throw errno("EPERM", "symlink", path);
-    const p = resolvePath("/", path);
-    const resolved = resolvePath(dirname(p), target);
-    if (beneath(this.#mount, p) && !beneath(this.#mount, resolved)) throw outside(path);
-    this.#lookup(resolved, "symlink", path, false, () => {});
-    this.#lookup(p, "symlink", path, true, (entry) => {
+    // Resolve the link path itself first: the target is read against the
+    // resolved parent, never against a lexically collapsed prefix.
+    this.#lookup(absoluteVirtual(path), "symlink", path, true, (entry) => {
+      const base = dirname(entry.virtual);
+      const resolved = target.startsWith("/") ? absoluteVirtual(target) : resolvePath(base, target);
+      let targetVirtual = null;
+      this.#lookup(resolved, "symlink", path, false, (targetEntry) => {
+        targetVirtual = targetEntry.virtual;
+      }, 0, true);
+      if (beneath(this.#mount, entry.virtual) && !beneath(this.#mount, targetVirtual)) throw outside(path);
       if (entry?.info) throw errno("EEXIST", "symlink", path);
       const changes = new Map();
       this.#parents(changes, entry.virtual, "symlink", path, false);
@@ -450,7 +497,7 @@ export class OverlayFs {
 
   async link(src, dest) {
     const p = this.#checkWrite("link", dest, src);
-    this.#lookup(resolvePath("/", src), "link", src, false, (entry) => {
+    this.#lookup(absoluteVirtual(src), "link", src, false, (entry) => {
       requireEntry(entry, "link", src);
       if (!entry.info.isFile) throw errno("EPERM", "link", src);
       this.#lookup(p, "link", dest, true, (target) => {
@@ -467,7 +514,7 @@ export class OverlayFs {
 
   async readlink(path) {
     checkedPath("readlink", path);
-    return this.#lookup(resolvePath("/", path), "readlink", path, true, (entry) => {
+    return this.#lookup(absoluteVirtual(path), "readlink", path, true, (entry) => {
       requireEntry(entry, "readlink", path);
       if (!entry.info.isSymbolicLink) throw errno("EINVAL", "readlink", path);
       return entry.memory?.target ?? this.#host.readlink(entry.host, path, this.#mount);
@@ -476,6 +523,6 @@ export class OverlayFs {
 
   async realpath(path) {
     checkedPath("realpath", path);
-    return this.#lookup(resolvePath("/", path), "realpath", path, false, (entry) => requireEntry(entry, "realpath", path).virtual);
+    return this.#lookup(absoluteVirtual(path), "realpath", path, false, (entry) => requireEntry(entry, "realpath", path).virtual);
   }
 }
