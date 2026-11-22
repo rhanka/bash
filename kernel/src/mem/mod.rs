@@ -117,7 +117,7 @@ pub mod testing {
 }
 
 /// Grows linear memory by exactly `pages` for a snapshot restore, through the allocator that
-/// owns `memory.grow`. The restored image carries the heap metadata itself, so no free block is
+/// owns growth. The restored image carries the heap metadata itself, so no free block is
 /// inserted. Fails (growing nothing) when the final size would exceed the explicit 268,435,456 B
 /// default cap or the engine refuses the growth. Restore-only: ordinary allocations never call it.
 #[cfg(target_arch = "wasm32")]
