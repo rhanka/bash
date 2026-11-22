@@ -1,0 +1,16 @@
+{
+  "cwd": "/w",
+  "files": {
+    "/w/a.txt": ""
+  },
+  "id": "l4/glob-nullglob-failglob",
+  "steps": [
+    {
+      "script": "echo *.nomatch; shopt -s nullglob; echo pre *.nomatch post; shopt -s failglob; echo *.nomatch; echo after:$?"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globbing with default fallback, nullglob, and failglob"
+}

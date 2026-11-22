@@ -1,0 +1,15 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l4/coverage-all-16",
+  "steps": [
+    {
+      "script": "HOME=/h; x=AbC; r=x; a=(1 2); P_1=9; k=\"${!a[*]}\"; p=\"${!P_*}\"; echo ~ ${u:-d} ${v:=e} ${v:+f} ${#x} ${x:0:2} ${x#A} ${x/b/B} ${x^} ${x@Q} ${!r} \"m=${!a[*]}\" \"n=${!P_*}\" $v; echo ${unset:?done}"
+    }
+  ],
+  "tags": [
+    "coverage"
+  ],
+  "title": "All 16 bash:expansion:* coverage identifiers emitted prior to fatal error_if_unset"
+}

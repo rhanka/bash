@@ -1,0 +1,13 @@
+{
+  "id": "l4/proc-subst-in-and-out",
+  "steps": [
+    {
+      "script": "cat <(echo from_proc) <(printf 'two\\n'); printf 'pipe_me\\n' > >(cat > /captured.txt); echo status:$?; cat /captured.txt"
+    }
+  ],
+  "tags": [
+    "subst",
+    "fs"
+  ],
+  "title": "Input and output process substitution, drain, status preservation, and /dev/fd cleanup"
+}

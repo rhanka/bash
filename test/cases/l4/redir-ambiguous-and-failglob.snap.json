@@ -1,0 +1,33 @@
+{
+  "case": "l4/redir-ambiguous-and-failglob",
+  "caseHash": "eb3aa97d34f776ce7e2bab2c8f5e3ef6012f97fe4acee6c93b3704c44974fc3e",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "failglob:globskipdots",
+        "HOME": "/",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "x": "a b"
+      },
+      "exitCode": 0,
+      "stderr": "bash: $x: ambiguous redirect\nbash: /r/f*: ambiguous redirect\nbash: no match: /r/nope*\n",
+      "stdout": "s1:1\ns2:1\ns3:1\n"
+    }
+  ]
+}

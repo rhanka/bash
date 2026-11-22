@@ -1,0 +1,13 @@
+{
+  "id": "l4/globstar-cap-6",
+  "steps": [
+    {
+      "script": "shopt -s globstar; echo /**/**/**/**/**/**"
+    }
+  ],
+  "tags": [
+    "limits",
+    "glob"
+  ],
+  "title": "Globstar pattern exceeding 5 ** segments exits 126"
+}

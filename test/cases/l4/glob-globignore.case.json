@@ -1,0 +1,20 @@
+{
+  "cwd": "/gi",
+  "files": {
+    "/gi/.dot": "",
+    "/gi/1a.txt": "",
+    "/gi/a.log": "",
+    "/gi/b.txt": "",
+    "/gi/sub/keep.log": ""
+  },
+  "id": "l4/glob-globignore",
+  "steps": [
+    {
+      "script": "shopt -s globstar; GLOBIGNORE='*.log:[[:digit:]]*'; echo * */*"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globbing with GLOBIGNORE bracket patterns and pathname matching"
+}

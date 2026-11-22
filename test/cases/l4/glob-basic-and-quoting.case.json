@@ -1,0 +1,19 @@
+{
+  "cwd": "/w",
+  "files": {
+    "/w/.hid": "",
+    "/w/[x].txt": "",
+    "/w/a.txt": "",
+    "/w/b.txt": ""
+  },
+  "id": "l4/glob-basic-and-quoting",
+  "steps": [
+    {
+      "script": "echo *.txt '[x]'* \"*.txt\"; set -f; echo *.txt; set +f"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globbing with unquoted, partially quoted, fully quoted, and noglob"
+}

@@ -1,0 +1,18 @@
+{
+  "files": {
+    "/g/a/b/deep.rs": "",
+    "/g/a/b/skip.md": "",
+    "/g/a/mid.rs": "",
+    "/g/root.rs": ""
+  },
+  "id": "l4/glob-globstar",
+  "steps": [
+    {
+      "script": "echo /g/**/*.rs; shopt -s globstar; echo /g/**/*.rs"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globstar ** expansion with globstar off versus on"
+}
