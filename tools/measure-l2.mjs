@@ -93,7 +93,9 @@ function browserImports(tree, entry) {
     if (reached.has(path)) return;
     reached.add(path);
     const src = stripComments(readFileSync(file, "utf8"));
-    for (const match of src.matchAll(/(?:^|[;\n])\s*(?:export\s+[^;]*?\s+from\s*|import\s+(?:[^;]*?\s+from\s*)?)["'](\.[^"']+\.js)["']/g)) {
+    // Matches readable and minified static imports and re-exports with a literal specifier.
+    const pattern = /(?:^|[;\n}])\s*(?:export\s[^;]*?\sfrom\s*|import\s*[^;]*?from\s*)["'](\.[^"']+\.js)["']/g;
+    for (const match of src.matchAll(pattern)) {
       visit(resolve(dirname(file), match[1]));
     }
   };
@@ -150,12 +152,112 @@ function sizes(tree, env) {
   };
 }
 
+/**
+ * The L2c package split (spec section 5): B is the raw bytes of the browser-reachable shipped
+ * JS graph (shared code, glue and registry), N the raw bytes of all remaining shipped JS,
+ * T = B + N, and Z the sum of per-file gzip level-9 lengths. Decimal bytes.
+ */
+export function packageSplit(tree, env) {
+  const files = packedJsFiles(tree, env);
+  // The browser-reachable graph is the built entry: prefer the packed layout, which is also
+  // what the installed trees carry.
+  const entry = existsSync(join(tree, "dist", "js", "browser.js"))
+    ? join(tree, "dist", "js", "browser.js")
+    : join(tree, "host", "browser.js");
+  const browser = browserImports(tree, entry);
+  const perFile = {};
+  let B = 0, N = 0, Z = 0;
+  const browserFiles = [];
+  const nodeFiles = [];
+  for (const path of files.sort()) {
+    const s = perFile[path] = size(tree, path);
+    Z += s.gzip;
+    if (browser.has(path)) {
+      B += s.raw;
+      browserFiles.push(path);
+    } else {
+      N += s.raw;
+      nodeFiles.push(path);
+    }
+  }
+  return { B, N, T: B + N, Z, perFile, browserFiles, nodeFiles };
+}
+
+function packPackage(source, destDir, env) {
+  const out = execFileSync("npm", ["pack", "--offline", "--json", "--ignore-scripts", "--pack-destination", destDir],
+    { cwd: source, env, encoding: "utf8" });
+  const info = JSON.parse(out)[0];
+  return join(destDir, info.filename);
+}
+
+function installTarball(tarball, consumer, env) {
+  mkdirSync(consumer, { recursive: true });
+  writeFileSync(join(consumer, "package.json"),
+    JSON.stringify({ name: "bench-consumer", version: "0.0.0", private: true, type: "module" }));
+  execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    { cwd: consumer, env, stdio: "pipe" });
+}
+
+/** Packs and installs one deliverable offline; returns the installed package root. */
+function stageInstalled(source, dest, name, env) {
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  const tarball = packPackage(source, dest, env);
+  const consumer = join(dest, "consumer");
+  installTarball(tarball, consumer, env);
+  return join(consumer, "node_modules", name);
+}
+
+function summarizeRuns(runs) {
+  return Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
+    const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
+    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
+  }));
+}
+
+function seriesFor(label, entry, node) {
+  const coldCode = {
+    baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
+    "cold-import": [
+      'const start = performance.now();',
+      'await import(' + entry + ');',
+      'console.log(JSON.stringify({ tImport: performance.now() - start }));',
+    ].join("\n"),
+    "cold-full": [
+      'const start = performance.now();',
+      'const { Bash } = await import(' + entry + ');',
+      'const imported = performance.now();',
+      'const bash = new Bash();',
+      'const constructed = performance.now();',
+      'await bash.exec("echo hi");',
+      'const executed = performance.now();',
+      'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
+      '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
+    ].join("\n"),
+  };
+  const assertion = [
+    'const { Bash, defineCommand } = await import(' + entry + ');',
+    'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
+    'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
+    HOST_SETUP,
+    'const result = await host.exec("noop");',
+    'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
+  ].join("\n");
+  node(assertion);
+  const runs = [];
+  for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
+    console.error(label + " repetition " + (runs.length + 1));
+    runs.push(runSeries(seed, coldCode, entry, node));
+  }
+  return { summary: summarizeRuns(runs), runs };
+}
+
 async function main(args) {
   const [flag, value, ...extra] = args;
   const variant = value ?? "committed";
   if (extra.length || (flag !== undefined && (flag !== "--variant" || !value)) ||
-      !["committed", "minified", "unminified", "wasm-opt"].includes(variant)) {
-    throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt]");
+      !["committed", "minified", "unminified", "wasm-opt", "jco"].includes(variant)) {
+    throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt|jco]");
   }
 
   const root = join(repoRoot, "tmp", "bench-l2");
@@ -193,6 +295,39 @@ async function main(args) {
     dirty: run("git", ["--no-optional-locks", "status", "--porcelain"]).length !== 0,
   };
 
+  if (variant === "committed" || variant === "jco") {
+    // The packed default release, installed offline, with the matching Option D control.
+    const packages = variant === "committed"
+      ? [["default", repoRoot, "@sentropic/bash"], ["jco", join(repoRoot, "packages", "bash-jco"), "@sentropic/bash-jco"]]
+      : [["jco", join(repoRoot, "packages", "bash-jco"), "@sentropic/bash-jco"]];
+    const measured = {};
+    for (const [label, source, name] of packages) {
+      const tree = stageInstalled(source, join(dest, "install-" + label), name, env);
+      const entry = JSON.stringify(pathToFileURL(join(tree, "dist", "js", "index.js")).href);
+      measured[label] = { tree, ...seriesFor(variant + "/" + label, entry, node) };
+      measured[label].sizes = sizes(tree, env);
+      measured[label].split = packageSplit(tree, env);
+    }
+    const result = { variant, environment, wasmOpt, measured };
+    // Backwards-compatible top-level aliases for the default package.
+    if (measured.default) {
+      result.summary = measured.default.summary;
+      result.sizes = measured.default.sizes;
+      result.split = measured.default.split;
+      result.runs = measured.default.runs;
+      result.control = { summary: measured.jco.summary, sizes: measured.jco.sizes, split: measured.jco.split };
+    } else {
+      result.summary = measured.jco.summary;
+      result.sizes = measured.jco.sizes;
+      result.split = measured.jco.split;
+      result.runs = measured.jco.runs;
+    }
+    writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
+    console.log(JSON.stringify({ variant, wasmOpt, summary: result.summary, split: result.split,
+      control: result.control?.summary }, null, 2));
+    return;
+  }
+
   let tree = repoRoot;
   if (variant !== "committed") {
     tree = join(dest, "tree");
@@ -204,45 +339,7 @@ async function main(args) {
     cpSync(generated, join(tree, "dist", "js", "kernel"), { recursive: true });
   }
   const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
-  const assertion = [
-    'const { Bash, defineCommand } = await import(' + entry + ');',
-    'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
-    'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
-    HOST_SETUP,
-    'const result = await host.exec("noop");',
-    'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
-  ].join("\n");
-  node(assertion);
-
-  const coldCode = {
-    baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
-    "cold-import": [
-      'const start = performance.now();',
-      'await import(' + entry + ');',
-      'console.log(JSON.stringify({ tImport: performance.now() - start }));',
-    ].join("\n"),
-    "cold-full": [
-      'const start = performance.now();',
-      'const { Bash } = await import(' + entry + ');',
-      'const imported = performance.now();',
-      'const bash = new Bash();',
-      'const constructed = performance.now();',
-      'await bash.exec("echo hi");',
-      'const executed = performance.now();',
-      'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
-      '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
-    ].join("\n"),
-  };
-
-  const runs = [];
-  for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
-    console.error(variant + " repetition " + (runs.length + 1));
-    runs.push(runSeries(seed, coldCode, entry, node));
-  }
-  const summary = Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
-    const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
-    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
-  }));
+  const { summary, runs } = seriesFor(variant, entry, node);
   const result = { variant, environment, wasmOpt, summary, sizes: sizes(tree, env), runs };
   writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
   console.log(JSON.stringify({ variant, wasmOpt, summary, sizes: result.sizes }, null, 2));
