@@ -16,6 +16,7 @@ Ship Node host filesystem adapters and kernel-to-host filesystem batches with co
   - `BRANCH.md`
   - `kernel/src/fs.rs`
   - `kernel/src/fiber.rs`
+  - `kernel/src/fiber/vm.rs`
   - `kernel/src/fiber/testcmd.rs`
   - `kernel/src/bindings/adapt.rs`
   - `kernel/src/glue/adapt.rs`
