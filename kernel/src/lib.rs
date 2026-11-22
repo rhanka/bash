@@ -11,10 +11,12 @@ pub mod cmd;
 pub mod fiber;
 pub mod format;
 pub mod fs;
+pub mod glob;
 pub mod hash;
 pub mod limits;
 pub mod mem;
 pub mod num;
+pub mod regex;
 pub mod shell;
 pub mod util;
 
