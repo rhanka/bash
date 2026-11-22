@@ -27,19 +27,16 @@ export class Holder {
     const inst = new Instance(mod, this.hooks);
     // A restore-first queue installs the validated default (or its ordinary setup on refusal)
     // instead of the eager `configure`: the first staged function owns store creation.
+    // The fresh store commits to `this.instance` only after the whole queue succeeds; a
+    // failure discards it as one unit and leaves no stopped store behind.
     const restoreFirst = this.expectRestore || this.queue[0]?.restoreFirst === true;
     this.expectRestore = false;
-    if (!restoreFirst) {
-      inst.call(() => inst.engine.configure(BigInt(this.ceiling)));
-    }
-    this.instance = inst;
     const queue = this.queue;
     this.queue = [];
-    if (!restoreFirst) {
-      for (const fn of queue) fn(inst);
-      return;
-    }
     try {
+      if (!restoreFirst) {
+        inst.call(() => inst.engine.configure(BigInt(this.ceiling)));
+      }
       for (const fn of queue) fn(inst);
     } catch (error) {
       // A failed construction discards its fresh store as one unit.
@@ -50,6 +47,7 @@ export class Holder {
       }
       throw error;
     }
+    this.instance = inst;
   }
 
   /** Raises the ceiling when a shell attached later needs more. */
