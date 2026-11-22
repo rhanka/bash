@@ -316,3 +316,97 @@ test("the image covers a nonzero-to-zero word and stays sorted, bounded and disj
   assert.ok(manifest.finalPages * 65536 <= 268435456);
   assert.equal(manifest.stackPointer, 1048576);
 });
+
+test("the constructor reads each option once, so a hostile second read cannot slip past the predicate", async () => {
+  const { PREDICATE_OPTIONS } = await import("../host/core/snapshot.js");
+  const reads = Object.create(null);
+  const options = {};
+  for (const name of ["files", "env", "cwd", "fs", "executionLimits", "executionLimitProfile",
+    "maxCallDepth", "maxCommandCount", "maxLoopIterations", "fetch", "network", "python",
+    "javascript", "commands", "sleep", "customCommands", "logger", "trace", "coverage",
+    "defenseInDepth", "processInfo"]) {
+    reads[name] = 0;
+    Object.defineProperty(options, name, {
+      enumerable: true, configurable: true,
+      get() {
+        reads[name]++;
+        return undefined;
+      },
+    });
+  }
+  let seen = null;
+  const { Bash } = createFacade(loaderFor(prodCore()));
+  options[INTERNAL] = { inspect: (s) => { seen = s; } };
+  const bash = new Bash(options);
+  assert.deepEqual(setupNames(seen.calls), ["__restore_default"]);
+  assert.equal((await bash.exec("echo hi")).stdout, "hi\n");
+  for (const name of Object.keys(reads)) {
+    assert.equal(reads[name], 1, name + " was read " + reads[name] + " times");
+  }
+  void PREDICATE_OPTIONS;
+});
+
+test("a hostile getter returning a grant on first read and undefined on second read uses the ordinary setup", async () => {
+  const evil = { tag: "evil" };
+  let reads = 0;
+  const options = {};
+  Object.defineProperty(options, "fs", {
+    enumerable: true, configurable: true,
+    get() {
+      reads++;
+      return reads === 1 ? evil : undefined;
+    },
+  });
+  let seen = null;
+  const { Bash } = createFacade(loaderFor(prodCore()));
+  options[INTERNAL] = { inspect: (s) => { seen = s; } };
+  const bash = new Bash(options);
+  // The constructor must classify the single-read value (the evil fs) as non-default.
+  // A two-read predicate would see `undefined` on its second read and wrongly restore.
+  assert.deepEqual(setupNames(seen.calls), ["configure", "[static]vfs.create", "[static]shell.create"]);
+  assert.ok(!seen.calls.includes("__restore_default"));
+  assert.equal((await bash.exec("echo hi")).stdout, "hi\n");
+});
+
+test("a restored store caps later lifts at the default ceiling, not at the initial memory size", async () => {
+  const { Codec } = await import("../host/core/abi/codec.js");
+  const { bash } = await build({});
+  let observed = null;
+  const original = Codec.prototype.liftSequence;
+  Codec.prototype.liftSequence = function (...args) {
+    observed ??= this.liftBudget;
+    return original.apply(this, args);
+  };
+  try {
+    assert.equal(bash.getCwd(), "/home/user");
+  } finally {
+    Codec.prototype.liftSequence = original;
+  }
+  assert.equal(observed, 268435456);
+});
+
+test("a failed staged attach leaves no stopped store behind", async () => {
+  const { Holder } = await import("../host/core/holder.js");
+  const mod = prodCore();
+  const loader = {
+    syncModule: () => null,
+    asyncModule: () => Promise.resolve(mod),
+    precompile: () => Promise.resolve(),
+  };
+  const holder = new Holder(loader, undefined, 268435456);
+  holder.stage(() => { throw new Error("boom"); });
+  await assert.rejects(async () => holder.attach(mod), /boom/);
+  assert.equal(holder.instance, null);
+  holder.stage(() => {});
+  holder.attach(mod);
+  assert.ok(holder.instance);
+});
+
+test("the snapshot image coalesces small gaps instead of emitting byte-split ranges", async () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, "tmp", "snapshot-kernel.json"), "utf8"));
+  assert.ok(manifest.ranges.length < 100, "expected coalesced ranges, got " + manifest.ranges.length);
+  for (let i = 1; i < manifest.ranges.length; i++) {
+    const gap = manifest.ranges[i].dst - (manifest.ranges[i - 1].dst + manifest.ranges[i - 1].len);
+    assert.ok(gap > 64, "gap " + gap + " should have been coalesced");
+  }
+});
