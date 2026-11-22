@@ -7,11 +7,14 @@ export class Holder {
    * @param {{ syncModule(): WebAssembly.Module | null, asyncModule(): Promise<WebAssembly.Module> }} loader
    * @param {object | undefined} hooks internal options
    * @param {number} ceiling memory ceiling in bytes
+   * @param {{ expectRestore?: boolean }} [options] when true, the first attach skips the eager
+   *   `configure`: a restore-first staged function owns store creation (spec L2c 4.4-4.6)
    */
-  constructor(loader, hooks, ceiling) {
+  constructor(loader, hooks, ceiling, options) {
     this.loader = loader;
     this.hooks = hooks;
     this.ceiling = ceiling;
+    this.expectRestore = options?.expectRestore === true;
     this.instance = null;
     this.queue = [];
     this.pending = null;
@@ -22,11 +25,31 @@ export class Holder {
 
   attach(mod) {
     const inst = new Instance(mod, this.hooks);
-    inst.call(() => inst.engine.configure(BigInt(this.ceiling)));
+    // A restore-first queue installs the validated default (or its ordinary setup on refusal)
+    // instead of the eager `configure`: the first staged function owns store creation.
+    const restoreFirst = this.expectRestore || this.queue[0]?.restoreFirst === true;
+    this.expectRestore = false;
+    if (!restoreFirst) {
+      inst.call(() => inst.engine.configure(BigInt(this.ceiling)));
+    }
     this.instance = inst;
     const queue = this.queue;
     this.queue = [];
-    for (const fn of queue) fn(inst);
+    if (!restoreFirst) {
+      for (const fn of queue) fn(inst);
+      return;
+    }
+    try {
+      for (const fn of queue) fn(inst);
+    } catch (error) {
+      // A failed construction discards its fresh store as one unit.
+      try {
+        inst.util?.stop?.();
+      } catch {
+        // The store is already stopped or poisoned; the original error decides.
+      }
+      throw error;
+    }
   }
 
   /** Raises the ceiling when a shell attached later needs more. */

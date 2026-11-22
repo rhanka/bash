@@ -8,6 +8,7 @@ import { Holder } from "./holder.js";
 import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits, stringLimit } from "./limits.js";
 import { dirname, resolvePath } from "./paths.js";
 import { INTERNAL } from "./instance.js";
+import { PREDICATE_OPTIONS, isDefaultSnapshotConfig } from "./snapshot.js";
 
 const OPTION_NAMES = new Set([
   "files", "env", "cwd", "fs", "isolation", "executionLimits", "executionLimitProfile", "maxCallDepth", "maxCommandCount", "maxLoopIterations",
@@ -300,6 +301,23 @@ export function createFacade(loader) {
           envEntries.length * 20 + commands.length * 8 + Object.keys(overrides).length * 16);
       if (limit) throw new RangeError(`shell configuration: ${limit} exceeded`);
 
+      // Provenance and predicate for the Wasm-owned default snapshot (spec L2c 4.5-4.6): only
+      // the default binding with the package's own production loader core may restore, and only
+      // for a validated ordinary `contain` default. Any `fs`, explicit `isolation`, or host
+      // mount takes the ordinary path.
+      const bindingRestore = loader.defaultBinding === true && loader.customized !== true;
+      const restorable = bindingRestore && given === undefined && userFs === null && !separate && !branded && isDefaultSnapshotConfig({
+        profile,
+        overridesEmpty: Object.keys(overrides).length === 0,
+        ceiling: effective,
+        // Only behavior-changing internal overrides disqualify; passive observers do not.
+        // The snapshot capture tool forces ordinary setup explicitly.
+        hasHooks: hooks !== undefined && (hooks.kernel !== undefined ||
+          hooks.moduleProvider !== undefined || hooks.ceilingBytes !== undefined ||
+          hooks.snapshotCapture === true),
+        present: Object.fromEntries(Array.from(new Set([...PREDICATE_OPTIONS, "isolation"])).map((name) => [name, options[name] !== undefined])),
+        loggerPresent: options.logger !== undefined,
+      });
       // A supplied volume keeps its contents: `files` only affects the default
       // cwd/layout choice. A separate shell gets a fresh execution holder and a
       // local root mounted over the volume; a shared shell joins the volume's holder.
@@ -310,14 +328,14 @@ export function createFacade(loader) {
         volumeFs = branded;
         holder = new Holder(loader, hooks, hooks?.ceilingBytes ?? PROFILES[profile].ceiling);
         rootFs = new InMemoryFs(undefined, {
-          hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, holder,
+          hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, holder, deferVfs: false,
         });
       } else if (branded) {
         volumeFs = branded;
         holder = volumeHolder;
         rootFs = branded;
       } else {
-        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength });
+        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, deferVfs: restorable });
         holder = fsState(rootFs).holder;
       }
       if (hooks?.ceilingBytes === undefined && isolation === "shared") volumeHolder?.raiseCeiling(effective);
@@ -383,11 +401,31 @@ export function createFacade(loader) {
         };
         st.holder.stage((volInst) => seedVolumeLayout(st.vfs, volInst, layout));
       }
-      B.holder.stage((inst) => {
-        const { vfs } = fsState(rootFs);
-        if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
-        B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
-      });
+      if (restorable) {
+        // One restore call replaces configure, Vfs.create and Shell.create. A `0n` refusal is
+        // a normal return and falls back to the ordinary setup in the same staged step.
+        // Restorable implies no branded volume, no separate store, and no host mount,
+        // so the fallback needs no volume layout and no mountHost.
+        const restoreFirst = (inst) => {
+          const restored = inst.util.restoreDefault?.();
+          if (restored) {
+            fsState(rootFs).vfs = restored.vfs;
+            B.shell = restored.shell;
+            return;
+          }
+          inst.call(() => inst.engine.configure(BigInt(effective)));
+          fsState(rootFs).vfs = inst.call(() => inst.engine.Vfs.create(BigInt(limits.maxFileSystemBytes)));
+          B.shell = inst.call(() => inst.engine.Shell.create(fsState(rootFs).vfs, shellConfig));
+        };
+        restoreFirst.restoreFirst = true;
+        B.holder.stage(restoreFirst);
+      } else {
+        B.holder.stage((inst) => {
+          const { vfs } = fsState(rootFs);
+          if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
+          B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
+        });
+      }
     }
 
     #register(B, c, stage) {
