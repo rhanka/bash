@@ -1,0 +1,12 @@
+{
+  "id": "l3/deferred-rbrace-triggered",
+  "steps": [
+    {
+      "script": "echo ok\n}"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Stray closing brace at root is a deferred error clearing stdout"
+}

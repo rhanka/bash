@@ -1,0 +1,18 @@
+{
+  "id": "l3/err-redir-and-arg-paren",
+  "steps": [
+    {
+      "script": "echo >"
+    },
+    {
+      "script": "echo > ;"
+    },
+    {
+      "script": "echo (a)"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Missing redirection targets and a bare paren among arguments"
+}

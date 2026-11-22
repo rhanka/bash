@@ -1,0 +1,12 @@
+{
+  "id": "l3/subshell-isolation",
+  "steps": [
+    {
+      "script": "x=1\nf() { echo outer; }\n( x=2; f() { echo inner; }; echo $x; f )\necho $x\nf\n( )\n{ }\necho empty:$?"
+    }
+  ],
+  "tags": [
+    "subshell"
+  ],
+  "title": "Subshell isolates variables and functions, plus empty subshell and group"
+}

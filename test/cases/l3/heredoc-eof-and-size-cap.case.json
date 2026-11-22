@@ -1,0 +1,18 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxHeredocSize": 5
+    }
+  },
+  "id": "l3/heredoc-eof-and-size-cap",
+  "steps": [
+    {
+      "script": "echo ok <<EOF\n0123456789\nEOF"
+    }
+  ],
+  "tags": [
+    "heredoc",
+    "limits"
+  ],
+  "title": "Heredoc body over maxHeredocSize fails at line 2 with exit 2"
+}

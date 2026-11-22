@@ -1,0 +1,18 @@
+{
+  "id": "l3/deferred-rparen-root-only",
+  "steps": [
+    {
+      "script": ")"
+    },
+    {
+      "script": "echo ok\n)"
+    },
+    {
+      "script": "if echo ok; then echo done; else\n)\nfi"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Stray paren deferred at root but an immediate error inside if-else"
+}

@@ -1,0 +1,25 @@
+{
+  "id": "l3/err-if-forms",
+  "steps": [
+    {
+      "script": "if echo a; echo b; fi"
+    },
+    {
+      "script": "if echo a; then echo b"
+    },
+    {
+      "script": "if echo a; then fi"
+    },
+    {
+      "script": "if echo a; then echo b; else fi"
+    },
+    {
+      "script": "if ; then echo a; fi"
+    }
+  ],
+  "tags": [
+    "errors",
+    "if"
+  ],
+  "title": "Malformed if statements and their expected-token errors"
+}

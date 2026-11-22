@@ -1,0 +1,18 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxSourceBytes": 12
+    }
+  },
+  "id": "l3/err-input-size-caps",
+  "steps": [
+    {
+      "script": "echo 1234567890"
+    }
+  ],
+  "tags": [
+    "errors",
+    "limits"
+  ],
+  "title": "Script over maxSourceBytes exits 126 with the size message"
+}

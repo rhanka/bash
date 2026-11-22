@@ -1,0 +1,40 @@
+{
+  "id": "l3/err-conditional-forms",
+  "steps": [
+    {
+      "script": "[[]]"
+    },
+    {
+      "script": "[[ ]]"
+    },
+    {
+      "script": "[[ -f ]]"
+    },
+    {
+      "script": "[[ -z a b ]]"
+    },
+    {
+      "script": "[[ a == ]]"
+    },
+    {
+      "script": "[[ a =~ ]]"
+    },
+    {
+      "script": "[[ a =~ b c ]]"
+    },
+    {
+      "script": "[[ ( a ]]"
+    },
+    {
+      "script": "[[ a && ]]"
+    },
+    {
+      "script": "[[ && a ]]"
+    }
+  ],
+  "tags": [
+    "conditional",
+    "errors"
+  ],
+  "title": "Malformed conditional commands and their exact diagnostics"
+}

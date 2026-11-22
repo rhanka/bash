@@ -1,0 +1,25 @@
+{
+  "id": "l3/err-lexer-quotes-heredoc",
+  "steps": [
+    {
+      "script": "echo 'abc"
+    },
+    {
+      "script": "echo \"abc"
+    },
+    {
+      "script": "echo ${x:-'abc}"
+    },
+    {
+      "script": "echo <<\n"
+    },
+    {
+      "script": "echo <<'EOF\nhi"
+    }
+  ],
+  "tags": [
+    "errors",
+    "lexer"
+  ],
+  "title": "Unclosed quotes, missing heredoc delimiter, and quoted heredoc scan errors"
+}

@@ -1,0 +1,28 @@
+{
+  "id": "l3/err-group-subshell-fn",
+  "steps": [
+    {
+      "script": "{ echo a }"
+    },
+    {
+      "script": "( echo a"
+    },
+    {
+      "script": "function { echo a; }"
+    },
+    {
+      "script": "123() { echo a; }"
+    },
+    {
+      "script": "function 123 { echo a; }"
+    },
+    {
+      "script": "f() echo a"
+    }
+  ],
+  "tags": [
+    "errors",
+    "function"
+  ],
+  "title": "Malformed groups, subshells, and function definitions"
+}

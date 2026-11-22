@@ -1,0 +1,24 @@
+{
+  "id": "l3/err-bad-subst-parse-vs-runtime",
+  "steps": [
+    {
+      "script": "echo ${#x-y}"
+    },
+    {
+      "script": "echo ${#x/a/b}"
+    },
+    {
+      "script": "echo ${x!y}"
+    },
+    {
+      "script": "echo a; echo ${%}"
+    },
+    {
+      "script": "echo a; echo ${#x:1}"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Parse-time versus deferred runtime bad substitutions"
+}

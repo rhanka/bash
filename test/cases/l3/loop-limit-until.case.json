@@ -1,0 +1,18 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxLoopIterations": 3
+    }
+  },
+  "id": "l3/loop-limit-until",
+  "steps": [
+    {
+      "script": "until ! echo u; do echo body; done"
+    }
+  ],
+  "tags": [
+    "limits",
+    "until"
+  ],
+  "title": "Until loop exceeding maxLoopIterations exits 126 with the until message"
+}
