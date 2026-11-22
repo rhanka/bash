@@ -63,9 +63,9 @@ ANSI-C `$'...'` decoding.
 - conductor/owner: `clarification` / `acknowledge` / `refuse`
 - `BRANCH.md` itself is written in the first commit (allowed path, no exception).
 - `BR3-EX1` (`test/l2-limits.test.mjs`):
-  - **Reason:** L3 adds the `just-bash@3.6.0` top-level statement iteration cap (`> 10_000` statements -> exit `2`, `Parser stuck: too many iterations (>10000)` per `spec/lots/L3.md` sections 6.1 and 9.3). In `test/l2-limits.test.mjs`, `commandPressure(cap)` previously used a flat `"echo x\n".repeat(cap + 1)` for `hardened` (`10_001` statements) and `micro` (`25_001` statements) because L2 only enforced the `100_000` token cap.
-  - **Impact:** One-line threshold update in `commandPressure` (`cap + 1 <= 10_000 && ...`) so `hardened` and `micro` use the existing binary-tree call generator (`f0..fN`) already used by `contain` and `normal`, keeping all 4 profiles testing `maxCommandCount` end-to-end.
-  - **Rollback:** Revert the single line in `test/l2-limits.test.mjs`.
+  - **Reason:** L3 adds the `just-bash@3.6.0` top-level statement iteration cap (`> 10_000` statements -> exit `2`, `Parser stuck: too many iterations (>10000)` per `spec/lots/L3.md` sections 6.1 and 9.3) and includes the synthetic `EOF` token in the top-level `TOKEN_CAP` count per `spec/lots/L3.md` section 6.1.2. In `test/l2-limits.test.mjs`, `commandPressure(cap)` previously used a flat `"echo x\n".repeat(cap + 1)` for `hardened` (`10_001` statements) and `micro` (`25_001` statements), and line 201 asserted `100002` (excluding `EOF`) for `"echo x\n".repeat(33_334)`.
+  - **Impact:** Two single-line updates in `test/l2-limits.test.mjs`: `commandPressure` (`cap + 1 <= 10_000 && ...`) so `hardened` and `micro` use the existing binary-tree call generator (`f0..fN`) keeping all 4 profiles testing `maxCommandCount` end-to-end, and line 201 expecting `100003` (`33_334 * 3 + 1` including synthetic `EOF`).
+  - **Rollback:** Revert the two lines in `test/l2-limits.test.mjs`.
 - `DIVERGENCES.md` (conditional path, additive rows only): no `BRxx-EXn` needed unless a
   shared-file edit is required; L3 records the `time`-zeros shape divergence and the
   never-throw-out-of-exec glob policy there, both additive single-row edits. Owner decision
@@ -125,12 +125,12 @@ ANSI-C `$'...'` decoding.
    within the Wasm call stack; depth 201 exits `2` with `Maximum parser nesting depth exceeded (200)`.
 2. **Core Wasm size delta:**
    - Baseline `dist/js/kernel/kernel.core.wasm`: `247 498 B raw` / `89 259 B gzip`
-   - After L3 `dist/js/kernel/kernel.core.wasm`: `399 671 B raw` / `133 859 B gzip`
-   - Delta: `+152 173 B raw` / `+44 600 B gzip` (well under Gate L2 budget `1 500 000 B raw` / `700 000 B gzip`).
+   - After L3 `dist/js/kernel/kernel.core.wasm`: `405 224 B raw` / `136 753 B gzip`
+   - Delta: `+157 726 B raw` / `+47 494 B gzip` (well under Gate L2 budget `1 500 000 B raw` / `700 000 B gzip`).
 3. **Parity and fuzz counts:**
    - `test/parity/l3.test.mjs`: **36/36** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
    - `test/parity/l2.test.mjs`: **30/30** passed (0 failed, 0 stale, 0 excluded, 0 not covered).
-   - Native Rust AST & syntax tests (`fiber::syntax::tests`): **82** tests (81 AST/unit + 1 native 2 500-input seeded fuzz test).
+   - Native Rust AST & syntax tests (`fiber::syntax::tests` + `fiber::vm::l3_vm_tests`): **91** tests (88 syntax/AST/security unit + 1 native 2 500-input seeded fuzz + 2 L3 VM unit; **132** total `cargo test --lib`).
    - JS seeded parser fuzz slice (`test/l3-parser-fuzz.test.mjs`, seed `0x5345_4E54_4C33_465A`): **2 500** inputs (1 500 grammar-mutated + 1 000 arbitrary byte/UTF-8/surrogate/deep-nesting), **0 traps**, `~295 ms` total (`< 3 s` budget).
 4. **Handoff table for L4 and L5:**
    | Downstream lot | `kernel::fiber::syntax::Ast` entry points |
@@ -139,5 +139,4 @@ ANSI-C `$'...'` decoding.
    | **L5 (Redirections, arrays, control flow)** | `Ast::redirs` (`Redir { fd, fd_var, op: RedirOp, target: RedirTarget }`), `Assign { name, subscript, value, array, append }`, `Stmt::source_span` / `Stmt::background` / `Stmt::line`, `Command::CStyleFor`, `Command::Case` -> `Ast::case_items` (`CaseItem` with `DoubleSemi`/`SemiAnd`/`SemiSemiAnd`), `Command::Arithmetic`, `Command::Conditional` -> `Ast::cond_nodes` (`CondExpr` with all 25 unary & 14 binary ops, `=~`, `!(...)`) |
 5. **Deviations & `DIVERGENCES.md` candidates:**
    - `time` / `time -p` prints deterministic zero timings (`0m0.000s` / `0.00`) in the exact reference shapes (spec section 7 point 9; candidate for `DIVERGENCES.md`).
-   - Top-level token counter excludes the synthetic `EOF` token so the committed read-only `test/l2-limits.test.mjs` assertion (`"echo x\n".repeat(33_334)` -> `100002`) stays green alongside L3 token caps.
    - `test/parity/l3.test.mjs` wraps `sentropic-adapter.mjs` with a 5-line stdin-only custom `cat` command for the three L3 heredoc/pipeline oracle cases until L7a adds `kernel/src/cmd/cat.rs`; `true`, `false`, `:`, `[`, `test` are dispatched as shell builtins in `vm.rs` without touching the read-only `kernel/src/cmd/` registry.
