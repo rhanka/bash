@@ -58,6 +58,7 @@ pub struct Config<'a> {
     pub default_layout: bool,
     pub commands: Option<&'a [&'a str]>,
     pub process_info: Option<ProcessInfo>,
+    pub trace: bool,
     pub coverage: bool,
     pub custom_commands: &'a [&'a str],
     pub env: &'a [(&'a [u8], &'a [u8], bool)],
@@ -71,6 +72,7 @@ pub struct Shell {
     pub commands: KVec<&'static CommandSpec>,
     pub paths: RefCell<KMap<KBytes, KBytes>>,
     pub process_info: ProcessInfo,
+    pub trace: bool,
     pub coverage: bool,
     pub custom: RefCell<KVec<KString>>,
     pub env: Env,
@@ -118,7 +120,7 @@ impl Shell {
         }
         let shell = Shell {
             root, lim, grants: cfg.grants, commands, paths: RefCell::new(KMap::new_in(&meta)),
-            process_info: cfg.process_info.unwrap_or_default(), coverage: cfg.coverage,
+            process_info: cfg.process_info.unwrap_or_default(), trace: cfg.trace, coverage: cfg.coverage,
             custom: RefCell::new(custom), env, cwd, live, meta,
             virt_ms: Cell::new(0), rng: Cell::new(0x9E37_79B9_7F4A_7C15),
         };

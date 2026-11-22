@@ -5,6 +5,7 @@ use crate::base64::{self, Base64DecodeMode, Base64Error, Base64Limits};
 use crate::format::{
     format_printf, format_strftime, FormatLimitKind, PrintfOpts,
 };
+use crate::cmd::{coverage_id, CmdCtx, CmdFrame, CmdPoll, FindTraceStats, TraceDetail, TraceEvent, TraceValue};
 use crate::fs::{BatchOk, Code, Ok_, Op};
 use crate::hash::{Md5, Sha1, Sha256};
 use crate::limits::{I_ARRAY_ELEMENTS, I_OUTPUT_SIZE, I_STRING_LENGTH};
@@ -16,11 +17,11 @@ use crate::shell::{G_ENTROPY, G_HOST_FS, G_NETWORK, G_REAL_CLOCK, G_REAL_SLEEP};
 use crate::util::parse_u64;
 
 /// The names of the test-only commands, matched by index so that they exist as data in this build only.
-const CMDS: [&[u8]; 25] = [
+const CMDS: [&[u8]; 27] = [
     b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write",
     b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap",
     b"__fsalloc", b"__work", b"__walk", b"__fsbatch",
-    b"__num", b"__printf", b"__strftime", b"__hash", b"__base64",
+    b"__num", b"__printf", b"__strftime", b"__hash", b"__base64", b"__cov", b"__trace",
 ];
 const C_OUT: usize = 0;
 const C_ERR: usize = 1;
@@ -47,6 +48,8 @@ const C_PRINTF: usize = 21;
 const C_STRFTIME: usize = 22;
 const C_HASH: usize = 23;
 const C_BASE64: usize = 24;
+const C_COV: usize = 25;
+const C_TRACE: usize = 26;
 
 const T_HOSTFS: u8 = 1;
 const T_LAZY: u8 = 2;
@@ -59,6 +62,129 @@ const T_WRITE: u8 = 8;
 const T_WALK: u8 = 9;
 const T_FSBATCH: u8 = 10;
 const FS_CHUNK: u32 = 1 << 20;
+
+struct CovFrame {
+    id: u16,
+    emitted: u64,
+    target: u64,
+}
+
+impl CmdFrame for CovFrame {
+    fn resume(&mut self, ctx: &mut CmdCtx<'_>, _outcome: Option<Outcome<'_>>) -> Result<CmdPoll, Fail> {
+        while self.emitted < self.target {
+            if ctx.should_yield() {
+                return Ok(CmdPoll::Yield);
+            }
+            ctx.fiber.hit_coverage_id(self.id)?;
+            self.emitted += 1;
+        }
+        Ok(CmdPoll::Done(0))
+    }
+}
+
+struct TraceFloodFrame {
+    emitted: u64,
+    target: u64,
+}
+
+impl CmdFrame for TraceFloodFrame {
+    fn resume(&mut self, ctx: &mut CmdCtx<'_>, _outcome: Option<Outcome<'_>>) -> Result<CmdPoll, Fail> {
+        while self.emitted < self.target {
+            if ctx.should_yield() {
+                return Ok(CmdPoll::Yield);
+            }
+            let budget = ctx.live_budget();
+            let mut details = KVec::with_capacity_in(1, budget)?;
+            details.try_push(TraceDetail {
+                key: str_in("seq", budget)?,
+                value: TraceValue::Number(self.emitted as f64),
+            })?;
+            let ev = TraceEvent {
+                category: str_in("test", budget)?,
+                name: str_in("item", budget)?,
+                duration_ms: 0.0,
+                details,
+            };
+            ctx.emit_trace(ev)?;
+            self.emitted += 1;
+        }
+        Ok(CmdPoll::Done(0))
+    }
+}
+
+enum TraceOp {
+    Span { label: KBytes },
+    Find { search_path: KBytes, stats: FindTraceStats },
+}
+
+enum TraceClockStage {
+    Start,
+    WaitStart,
+    WaitEnd { start_ns: u64 },
+}
+
+struct TraceClockFrame {
+    op: TraceOp,
+    stage: TraceClockStage,
+}
+
+impl CmdFrame for TraceClockFrame {
+    fn resume(&mut self, ctx: &mut CmdCtx<'_>, outcome: Option<Outcome<'_>>) -> Result<CmdPoll, Fail> {
+        match self.stage {
+            TraceClockStage::Start => {
+                if let Some(req) = ctx.trace_clock_req() {
+                    self.stage = TraceClockStage::WaitStart;
+                    return Ok(CmdPoll::Host(req));
+                }
+                if let TraceOp::Span { label } = &self.op {
+                    ctx.stdout(label)?;
+                    ctx.stdout(b"\n")?;
+                }
+                Ok(CmdPoll::Done(0))
+            }
+            TraceClockStage::WaitStart => {
+                let Some(Outcome::Clock { monotonic_ns, .. }) = outcome else {
+                    return Ok(CmdPoll::Done(1));
+                };
+                if let TraceOp::Span { label } = &self.op {
+                    ctx.stdout(label)?;
+                    ctx.stdout(b"\n")?;
+                }
+                self.stage = TraceClockStage::WaitEnd { start_ns: monotonic_ns };
+                let Some(req) = ctx.trace_clock_req() else {
+                    return Ok(CmdPoll::Done(0));
+                };
+                Ok(CmdPoll::Host(req))
+            }
+            TraceClockStage::WaitEnd { start_ns } => {
+                let Some(Outcome::Clock { monotonic_ns: end_ns, .. }) = outcome else {
+                    return Ok(CmdPoll::Done(1));
+                };
+                match &self.op {
+                    TraceOp::Span { label } => {
+                        let budget = ctx.live_budget();
+                        let duration_ms = (end_ns.saturating_sub(start_ns) as f64) / 1_000_000.0;
+                        let mut details = KVec::with_capacity_in(1, budget)?;
+                        details.try_push(TraceDetail {
+                            key: str_in("label", budget)?,
+                            value: TraceValue::Text(bytes_in(label, budget)?),
+                        })?;
+                        ctx.emit_trace(TraceEvent {
+                            category: str_in("test", budget)?,
+                            name: str_in("span", budget)?,
+                            duration_ms,
+                            details,
+                        })?;
+                    }
+                    TraceOp::Find { search_path, stats } => {
+                        ctx.emit_find_trace(search_path, start_ns, end_ns, stats)?;
+                    }
+                }
+                Ok(CmdPoll::Done(0))
+            }
+        }
+    }
+}
 
 impl Fiber {
     fn write_chunks(&mut self, chunks: &KChunks) -> Result<(), Fail> {
@@ -81,6 +207,27 @@ impl Fiber {
         match self.write_out(Chan::Stderr, b"denied\n") {
             Ok(()) => Flow::Next,
             Err(f) => Flow::Fail(f),
+        }
+    }
+
+    fn start_frame(&mut self, mut frame: KBox<dyn CmdFrame>) -> Flow {
+        let poll = match frame.resume(&mut CmdCtx { fiber: self, xpg_echo: false }, None) {
+            Ok(poll) => poll,
+            Err(fail) => return Flow::Fail(fail),
+        };
+        match poll {
+            CmdPoll::Done(code) => {
+                self.last_exit = code;
+                Flow::Next
+            }
+            CmdPoll::Yield => {
+                self.active = Some(frame);
+                Flow::Yield
+            }
+            CmdPoll::Host(req) => {
+                self.active = Some(frame);
+                Flow::Host(Pending::Kernel, req)
+            }
         }
     }
 
@@ -376,6 +523,100 @@ impl Fiber {
             C_STRFTIME => self.exec_test_strftime(name, args),
             C_HASH => self.exec_test_hash(name, args),
             C_BASE64 => self.exec_test_base64(name, args),
+            C_COV => {
+                let Some(count) = num(0) else { return Some(self.t_bad(name)) };
+                let feature = match args.get(1) {
+                    Some(b) => core::str::from_utf8(b).ok(),
+                    None => Some("bash:cmd:SimpleCommand"),
+                };
+                let Some(id) = feature.and_then(coverage_id) else {
+                    return Some(self.t_bad(name));
+                };
+                match KBox::try_new_in(CovFrame { id, emitted: 0, target: count }, &self.live) {
+                    Ok(frame) => self.start_frame(crate::kbox_unsize!(frame, dyn CmdFrame)),
+                    Err((_, e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            C_TRACE => {
+                let Some(op) = args.first().copied() else { return Some(self.t_bad(name)) };
+                match op {
+                    b"flood" => {
+                        let Some(count) = num(1) else { return Some(self.t_bad(name)) };
+                        match KBox::try_new_in(TraceFloodFrame { emitted: 0, target: count }, &self.live) {
+                            Ok(frame) => self.start_frame(crate::kbox_unsize!(frame, dyn CmdFrame)),
+                            Err((_, e)) => Flow::Fail(Fail::Mem(e)),
+                        }
+                    }
+                    b"span" => {
+                        let Some(label) = args.get(1) else { return Some(self.t_bad(name)) };
+                        let label = match bytes_in(label, &self.live) {
+                            Ok(b) => b,
+                            Err(e) => return Some(Flow::Fail(Fail::Mem(e))),
+                        };
+                        let frame = TraceClockFrame {
+                            op: TraceOp::Span { label },
+                            stage: TraceClockStage::Start,
+                        };
+                        match KBox::try_new_in(frame, &self.live) {
+                            Ok(frame) => self.start_frame(crate::kbox_unsize!(frame, dyn CmdFrame)),
+                            Err((_, e)) => Flow::Fail(Fail::Mem(e)),
+                        }
+                    }
+                    b"find" => {
+                        let (
+                            Some(raw_path),
+                            Some(results_found),
+                            Some(readdir_calls),
+                            Some(stat_calls),
+                            Some(eval_calls),
+                            Some(node_count),
+                            Some(batch_count),
+                            Some(early_prunes),
+                        ) = (
+                            args.get(1),
+                            num(2),
+                            num(3),
+                            num(4),
+                            num(5),
+                            num(6),
+                            num(7),
+                            num(8),
+                        ) else {
+                            return Some(self.t_bad(name));
+                        };
+                        if args.len() != 9 {
+                            return Some(self.t_bad(name));
+                        }
+                        let search_path = match bytes_in(raw_path, &self.live) {
+                            Ok(b) => b,
+                            Err(e) => return Some(Flow::Fail(Fail::Mem(e))),
+                        };
+                        let stats = FindTraceStats {
+                            readdir_calls,
+                            stat_calls,
+                            eval_calls,
+                            node_count,
+                            batch_count,
+                            early_prunes,
+                            readdir_fuel: 10,
+                            stat_fuel: 5,
+                            eval_fuel: 5,
+                            batch_fuel: 20,
+                            total_fuel: 40,
+                            results_found,
+                        };
+                        let frame = TraceClockFrame {
+                            op: TraceOp::Find { search_path, stats },
+                            stage: TraceClockStage::Start,
+                        };
+                        match KBox::try_new_in(frame, &self.live) {
+                            Ok(frame) => self.start_frame(crate::kbox_unsize!(frame, dyn CmdFrame)),
+                            Err((_, e)) => Flow::Fail(Fail::Mem(e)),
+                        }
+                    }
+                    _ => self.t_bad(name),
+                }
+            }
             _ => return None,
         };
         Some(flow)
@@ -1076,7 +1317,7 @@ impl Fiber {
                 self.say(Chan::Stderr, |s| write!(s, "fetch: {c}\n")).map_err(fail)
             }
             (T_SLEEP, Outcome::Completed) => Ok(()),
-            (T_CLOCK, Outcome::Clock(ms)) => self.say(Chan::Stdout, |s| write!(s, "{ms}\n")).map_err(fail),
+            (T_CLOCK, Outcome::Clock { wall_ms, .. }) => self.say(Chan::Stdout, |s| write!(s, "{wall_ms}\n")).map_err(fail),
             (T_ENTROPY, Outcome::Data(d)) => {
                 let n = d.len();
                 self.say(Chan::Stdout, |s| write!(s, "{n}\n")).map_err(fail)

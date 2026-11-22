@@ -350,7 +350,7 @@ mod commands {
         assert!(matches!(req, HostReq::FsBatch { mount_id: 4, ops } if matches!(&ops[..], [BatchOp::Stat(p)] if p.as_slice() == b"/p")));
         let Step::Host { epoch: e2, .. } = f.resume(epoch, Outcome::Fs(&StatReply)).unwrap() else { panic!() };
         assert_eq!(e2, 2);
-        let Step::Done(_) = f.resume(e2, Outcome::Clock(42)).unwrap() else { panic!() };
+        let Step::Done(_) = f.resume(e2, Outcome::Clock { wall_ms: 42, monotonic_ns: 0 }).unwrap() else { panic!() };
         assert_eq!(drain(&mut f, false), "ok\n42\n");
     }
 
