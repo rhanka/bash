@@ -72,6 +72,31 @@ export const getNetworkCommandNames = () => ["curl"];
 export const getPythonCommandNames = () => ["python3", "python"];
 export const getJavaScriptCommandNames = () => ["js-exec", "node"];
 
+const SYS_DIRS = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
+const DEV_NAMES = ["null", "zero", "stdin", "stdout", "stderr"];
+const isValidStub = (name) => name !== "" && !name.includes("/") && name !== "." && name !== "..";
+const stubText = (name) => `#!/bin/bash\n# Built-in command: ${name}\n`;
+
+function procEntries(processInfo) {
+  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
+  return [
+    ["/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n"],
+    ["/proc/self/exe", "/bin/bash"],
+    ["/proc/self/cmdline", "bash\0"],
+    ["/proc/self/comm", "bash\n"],
+    ["/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`],
+    ...["stdin", "stdout", "stderr"].map((name, fd) => [`/proc/self/fd/${fd}`, `/dev/${name}`]),
+  ];
+}
+
+function ignoreUnimplemented(operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (!String(error?.message).startsWith("ENOSYS")) throw error;
+  }
+}
+
 function seedHostLayout(fs, defaultLayout, cwd, processInfo, commands) {
   if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function") return;
   const mkdir = (path) => ignoreUnimplemented(() => fs.mkdirSync(path, { recursive: true }));
@@ -84,25 +109,11 @@ function seedHostLayout(fs, defaultLayout, cwd, processInfo, commands) {
   }
   mkdir("/dev");
   mkdir("/dev/fd");
-  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
+  for (const name of DEV_NAMES) write(`/dev/${name}`, "");
   mkdir("/proc/self/fd");
-  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
-  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
-  write("/proc/self/exe", "/bin/bash");
-  write("/proc/self/cmdline", "bash\0");
-  write("/proc/self/comm", "bash\n");
-  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
-  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  for (const [path, contents] of procEntries(processInfo)) write(path, contents);
   if (cwd !== "/" && (!defaultLayout || cwd !== "/home/user")) mkdir(cwd);
   for (const name of commands) seedHostCommand(fs, name);
-}
-
-function ignoreUnimplemented(operation) {
-  try {
-    operation();
-  } catch (error) {
-    if (!String(error?.message).startsWith("ENOSYS")) throw error;
-  }
 }
 
 /**
@@ -113,12 +124,11 @@ function ignoreUnimplemented(operation) {
  * wait for the returned promise.
  */
 function seedUserFiles(fs, files, base) {
-  if (files === null || typeof files !== "object" || Array.isArray(files)) throw new TypeError("initial files must be an object");
+  if (!isObject(files)) throw new TypeError("initial files must be an object");
   const entries = [];
   for (const [path, value] of Object.entries(files)) {
     if (typeof value === "function") throw new TypeError("files: lazy content is not supported on a host fs");
-    let content = value;
-    if (value !== null && typeof value === "object" && !(value instanceof Uint8Array)) content = value.content;
+    const content = value !== null && typeof value === "object" && !(value instanceof Uint8Array) ? value.content : value;
     if (typeof content !== "string" && !(content instanceof Uint8Array)) throw new TypeError(`files: the content of ${path} must be a string or bytes`);
     entries.push([resolvePath(base, path), content]);
   }
@@ -142,17 +152,9 @@ function seedUserFiles(fs, files, base) {
 }
 
 function seedHostCommand(fs, name) {
-  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__")) return;
-  // Mirrors the kernel `Shell::stub` guard: `.` and `..` are not commands, and
-  // writing `/bin/.` would replace the `/bin` memory entry instead of seeding.
-  if (name === "" || name.includes("/") || name === "." || name === "..") return;
-  const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__") || !isValidStub(name)) return;
+  const content = stubText(name);
   for (const dir of ["/bin", "/usr/bin"]) ignoreUnimplemented(() => fs.writeFileSync(`${dir}/${name}`, content));
-}
-
-/** Names the volume layout turns into stubs (the kernel `Shell::stub` guard). */
-function volumeStubNames(names) {
-  return names.filter((name) => name !== "" && !name.includes("/") && name !== "." && name !== "..");
 }
 
 /**
@@ -177,49 +179,35 @@ function seedVolumeLayout(vfs, inst, { defaultLayout, cwd, processInfo, commandN
   };
   // Atomicity: stat every system directory before creating any, mirroring
   // `Shell::layout` — a file collision fails before earlier directories exist.
-  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) {
+  for (const dir of SYS_DIRS) {
     const s = inst.call(() => vfs.op({ tag: "stat", val: utf8(dir) }));
     if (s.tag === "ok" && s.val.val.kind === "file") throw fsError("exists", "mkdir", dir);
   }
-  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) mkdir(dir);
+  for (const dir of SYS_DIRS) mkdir(dir);
   if (defaultLayout) {
     mkdir("/home/user");
     mkdir("/tmp");
   }
-  mkdir("/dev/fd");
-  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
-  mkdir("/proc/self/fd");
-  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
-  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
-  write("/proc/self/exe", "/bin/bash");
-  write("/proc/self/cmdline", "bash\0");
-  write("/proc/self/comm", "bash\n");
-  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
-  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  for (const name of DEV_NAMES) write(`/dev/${name}`, "");
+  for (const [path, contents] of procEntries(processInfo)) write(path, contents);
   try {
     mkdir(cwd);
   } catch {
     /* the working directory is best-effort, as in `Shell::create` */
   }
-  for (const name of volumeStubNames(commandNames)) {
-    try {
-      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
-      for (const dir of ["/bin", "/usr/bin"]) write(`${dir}/${name}`, content);
-    } catch {
-      /* stub writes are best-effort, as in `Shell::create` */
-    }
-  }
+  seedVolumeStubs(vfs, inst, commandNames);
 }
 
 /** Writes one registering command's stubs to a branded volume (best-effort). */
 function seedVolumeStubs(vfs, inst, names) {
-  for (const name of volumeStubNames(names)) {
+  for (const name of names) {
+    if (!isValidStub(name)) continue;
     try {
-      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+      const data = utf8(stubText(name));
       for (const dir of ["/bin", "/usr/bin"]) {
         inst.call(() => vfs.op({
           tag: "write-file",
-          val: { path: utf8(`${dir}/${name}`), data: utf8(content), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
+          val: { path: utf8(`${dir}/${name}`), data, offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
         }));
       }
     } catch {
