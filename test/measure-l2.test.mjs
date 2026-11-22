@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { measureWarm, packedJsFiles, stagePackage } from "../tools/measure-l2.mjs";
+import { decideGateL2, measureWarm, packedJsFiles, stagePackage } from "../tools/measure-l2.mjs";
 import { scratch } from "./helpers.mjs";
 
 test("each warm process collects discarded warmup objects before sampling its workload", () => {
@@ -93,6 +93,70 @@ test("package sizes take their JavaScript files from the variant tree", () => {
   writeFileSync(join(tree, "dist/test/test-kernel.js"), "export {}");
   assert.deepEqual(packedJsFiles(tree, { ...process.env, npm_config_cache: join(tree, "cache"), TMPDIR: tree }),
     ["dist/js/kernel/variant-only.js", "entry.js"]);
+});
+
+test("the verdict function decides each bound at equality and just over", () => {
+  const passing = {
+    m1: 25.0, m2: 0.20, m3a: 0.07, m5: 10000000, wasmRaw: 1500000, wasmGzip: 700000,
+    b: 45000, n: 40000, t: 60000, z: 30000, suitesPass: true,
+  };
+  assert.equal(decideGateL2(passing).verdict, "go");
+  // Just over each kernel bound is a kernel miss; just over is measured unrounded.
+  for (const [key, over] of [["m1", 25.000001], ["m2", 0.200001], ["m3a", 0.070001], ["m5", 10000001],
+    ["wasmRaw", 1500001], ["wasmGzip", 700001]]) {
+    const miss = decideGateL2({ ...passing, [key]: over });
+    assert.equal(miss.verdict, "no-go", key);
+    assert.equal(miss.reason, "kernel miss");
+  }
+  // Just over each fixed JS bound is a JS-only miss while the kernel passes.
+  for (const [key, over] of [["n", 40001], ["t", 60001], ["z", 30001], ["b", 45001]]) {
+    const miss = decideGateL2({ ...passing, [key]: over });
+    assert.equal(miss.verdict, "go-kernel-only", key);
+    assert.equal(miss.reason, "JS-only miss");
+  }
+  // Each browser-cap interval: at 45,000 both caps pass, at 58,000 only the higher passes,
+  // above 58,000 both fail (a JS-only miss while the choice is pending in every case).
+  const at45k = decideGateL2({ ...passing, b: 45000 });
+  assert.equal(at45k.verdict, "go");
+  assert.equal(at45k.js.b45, true);
+  assert.equal(at45k.js.b58, true);
+  const at58k = decideGateL2({ ...passing, b: 58000 });
+  assert.equal(at58k.verdict, "go-kernel-only");
+  assert.equal(at58k.js.b45, false);
+  assert.equal(at58k.js.b58, true);
+  const over58k = decideGateL2({ ...passing, b: 58001 });
+  assert.equal(over58k.verdict, "go-kernel-only");
+  assert.equal(over58k.js.b45, false);
+  assert.equal(over58k.js.b58, false);
+  // A simultaneous kernel and JS miss is still a kernel miss.
+  assert.equal(decideGateL2({ ...passing, m1: 30, b: 60000 }).verdict, "no-go");
+  // A red correctness suite blocks the verdict whatever the numbers say.
+  assert.equal(decideGateL2({ ...passing, suitesPass: false }).verdict, "no-go");
+});
+
+test("the verdict function returns no-go on the measured L2c numbers", (t) => {
+  // The benchmark runs separately on the green release artifacts; without its output there is
+  // nothing to tie to the report, so this test skips instead of failing.
+  const results = new URL("../tmp/bench-l2/committed/results.json", import.meta.url);
+  if (!existsSync(results)) {
+    t.skip("no committed benchmark run yet");
+    return;
+  }
+  const measured = JSON.parse(readFileSync(results));
+  const { summary, split, sizes } = measured;
+  const f = (v) => typeof v === "number" ? v : v.median;
+  const out = decideGateL2({
+    m1: f(summary.M1), m2: f(summary.M2), m3a: f(summary.M3a), m5: summary.M5,
+    wasmRaw: sizes.wasm.loader.raw, wasmGzip: sizes.wasm.loader.gzip,
+    b: split.B, n: split.N, t: split.T, z: split.Z, suitesPass: true,
+  });
+  assert.equal(out.kernel.m1, false);
+  assert.equal(out.kernel.m2, true);
+  assert.equal(out.kernel.m3a, true);
+  assert.equal(out.kernel.m5, false);
+  assert.equal(out.kernel.wasm, true);
+  assert.equal(out.verdict, "no-go");
+  assert.equal(out.reason, "kernel miss");
 });
 
 test("the wasm-opt request records that Binaryen optimization was not measured", () => {
