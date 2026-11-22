@@ -7,6 +7,7 @@
 #[path = "../bindings/kernel.rs"]
 pub mod kernel;
 mod adapt;
+mod restore;
 pub mod rt;
 
 /// Allocation hook of the canonical ABI: every lowered value is allocated through `kernel::mem`, which

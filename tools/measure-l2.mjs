@@ -7,20 +7,23 @@ import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { repoRoot, toolBin, toolsDir } from "./lib.mjs";
-import { stripComments } from "./gates.mjs";
+import { scanImports } from "./gates.mjs";
 import { transpileComponent } from "./transpile.mjs";
 
 const HOST_SETUP =
   'const host = new Bash({ customCommands: [defineCommand("noop", () => ({ stdout: "", stderr: "", exitCode: 0 }))] });';
 
-export function measureWarm(entry, node) {
+export function measureWarm(entry, node, seed) {
   const workloads = {
     M2: ["", "new Bash()"],
+    M_paired: ["", 'const r = await new Bash().exec("echo hi"); if (r.stdout !== "hi\\n" || r.stderr !== "" || r.exitCode !== 0) throw new Error("paired echo failed")'],
     M3a: ["const bash = new Bash();", 'await bash.exec("echo hi")'],
     M3aSync: ["const bash = new Bash();", 'bash.execSync("echo hi")'],
     M_host: [HOST_SETUP, 'await host.exec("noop")'],
   };
-  return Object.fromEntries(Object.entries(workloads).map(([name, [setup, op]]) => {
+  const names = seed === undefined ? Object.keys(workloads) : shuffled(Object.keys(workloads), { seed });
+  return Object.fromEntries(names.map((name) => {
+    const [setup, op] = workloads[name];
     const source = [
       'const { Bash, defineCommand } = await import(' + entry + ');',
       setup,
@@ -71,7 +74,7 @@ function runSeries(seed, coldCode, entry, node) {
     const samples = Object.fromEntries(order.map((kind) => [kind, JSON.parse(node(coldCode[kind]))]));
     cold.push({ order, samples });
   }
-  const warm = measureWarm(entry, node);
+  const warm = measureWarm(entry, node, seed);
   const full = (field) => distribution(cold.map(({ samples }) => samples["cold-full"][field]));
   const rss = {
     full: full("rss").median,
@@ -86,15 +89,16 @@ function runSeries(seed, coldCode, entry, node) {
   return { seed, cold, warm, rss, metrics };
 }
 
-function browserImports(tree, entry) {
+function browserImports(tree, entry, { dynamic = true } = {}) {
   const reached = new Set();
   const visit = (file) => {
     const path = relative(tree, file);
     if (reached.has(path)) return;
     reached.add(path);
-    const src = stripComments(readFileSync(file, "utf8"));
-    for (const match of src.matchAll(/(?:^|[;\n])\s*(?:export\s+[^;]*?\s+from\s*|import\s+(?:[^;]*?\s+from\s*)?)["'](\.[^"']+\.js)["']/g)) {
-      visit(resolve(dirname(file), match[1]));
+    const { specifiers } = scanImports(readFileSync(file, "utf8"), { dynamic });
+    for (const spec of specifiers) {
+      if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+      visit(resolve(dirname(file), spec));
     }
   };
   visit(entry);
@@ -125,7 +129,10 @@ export function stagePackage(source, tree, env) {
 
 function sizes(tree, env) {
   const files = packedJsFiles(tree, env);
-  const browser = browserImports(tree, join(tree, "host", "browser.js"));
+  const entry = existsSync(join(tree, "dist", "js", "browser.js"))
+    ? join(tree, "dist", "js", "browser.js")
+    : join(tree, "host", "browser.js");
+  const browser = browserImports(tree, entry);
   const groups = Object.fromEntries(["glue", "registry", "coreEntry", "nodeOnly"].map((name) => [name, {}]));
   for (const path of files) {
     const name = /^dist\/js\/kernel\/kernel(?:\.shims)?\.js$/.test(path) ? "glue" :
@@ -137,10 +144,15 @@ function sizes(tree, env) {
   }), { raw: 0, gzip: 0 });
   const groupSizes = Object.fromEntries(Object.entries(groups).map(([name, files]) =>
     [name, { files, ...sum(Object.values(files)) }]));
+  // The linked core ships only in the repository tree; installed trees carry the same
+  // bytes as their loader core.
+  const corePath = existsSync(join(tree, "dist", "kernel.core.wasm"))
+    ? "dist/kernel.core.wasm"
+    : "dist/js/kernel/kernel.core.wasm";
   return {
     wasm: {
       loader: size(tree, "dist/js/kernel/kernel.core.wasm"),
-      core: size(tree, "dist/kernel.core.wasm"),
+      core: size(tree, corePath),
       component: size(tree, "dist/kernel.component.wasm"),
     },
     js: {
@@ -150,12 +162,172 @@ function sizes(tree, env) {
   };
 }
 
+/**
+ * The L2c package split (spec Annex H, 22/11 owner decision):
+ * - B_cold: raw bytes of the browser static import closure;
+ * - Z_cold: gzip level-9 sum of the eagerly loaded cold path (browser static closure + index/node loader);
+ * - B_total: raw bytes of the browser-reachable shipped JS graph including dynamic literal chunks;
+ * - N: raw bytes of all remaining shipped JS;
+ * - T = B_total + N (total raw shipped JS);
+ * - Z_total: per-file gzip level-9 sum of all shipped JS.
+ * Decimal bytes.
+ */
+export function packageSplit(tree, env) {
+  const files = packedJsFiles(tree, env);
+  // The browser-reachable graph is the built entry: prefer the packed layout, which is also
+  // what the installed trees carry.
+  const built = existsSync(join(tree, "dist", "js", "browser.js"));
+  const browserEntry = built ? join(tree, "dist", "js", "browser.js") : join(tree, "host", "browser.js");
+  const indexEntry = built ? join(tree, "dist", "js", "index.js") : join(tree, "host", "index.js");
+  const loadEntry = built ? join(tree, "dist", "js", "node", "load.js") : join(tree, "host", "node", "load.js");
+  const browserCold = browserImports(tree, browserEntry, { dynamic: false });
+  const browserAll = browserImports(tree, browserEntry, { dynamic: true });
+  const coldSet = new Set(browserCold);
+  if (existsSync(loadEntry)) {
+    for (const p of browserImports(tree, loadEntry, { dynamic: false })) coldSet.add(p);
+  }
+  const indexRel = relative(tree, indexEntry);
+  if (files.includes(indexRel)) coldSet.add(indexRel);
+  const perFile = {};
+  let B_cold = 0, Z_cold = 0, B_total = 0, N = 0, Z_total = 0;
+  const browserColdFiles = [];
+  const coldFiles = [];
+  const browserFiles = [];
+  const nodeFiles = [];
+  for (const path of files.sort()) {
+    const s = perFile[path] = size(tree, path);
+    Z_total += s.gzip;
+    if (browserCold.has(path)) {
+      B_cold += s.raw;
+      browserColdFiles.push(path);
+    }
+    if (coldSet.has(path)) {
+      Z_cold += s.gzip;
+      coldFiles.push(path);
+    }
+    if (browserAll.has(path)) {
+      B_total += s.raw;
+      browserFiles.push(path);
+    } else {
+      N += s.raw;
+      nodeFiles.push(path);
+    }
+  }
+  return {
+    B_cold, Z_cold, B_total, Z_total, N, T: B_total + N,
+    perFile, browserColdFiles, coldFiles, browserFiles, nodeFiles,
+  };
+}
+
+/**
+ * The Gate L2 verdict function (spec Annex H, 22/11 owner decision). Compares unrounded
+ * median-of-run medians against the inclusive kernel thresholds and the five JS gates
+ * (cold path: B_cold <= 58,000 B, Z_cold <= 30,000 B; total shipped: B_total <= 75,000 B,
+ * Z_total <= 50,000 B, T <= 110,000 B). Returns `{ verdict, kernel, js, reason }` where
+ * verdict is one of "go", "go-kernel-only" or "no-go". A red correctness suite forces "no-go".
+ */
+export function decideGateL2({
+  m1, m2, m3a, m5, wasmRaw, wasmGzip,
+  bCold, zCold, bTotal, zTotal, t,
+  suitesPass,
+}) {
+  const kernel = {
+    m1: m1 <= 25.0,
+    m2: m2 <= 0.20,
+    m3a: m3a <= 0.07,
+    m5: m5 <= 10000000,
+    wasm: wasmRaw <= 1500000 && wasmGzip <= 700000,
+  };
+  const js = {
+    bCold: bCold <= 58000,
+    zCold: zCold <= 30000,
+    bTotal: bTotal <= 75000,
+    zTotal: zTotal <= 50000,
+    t: t <= 110000,
+  };
+  if (!suitesPass) return { verdict: "no-go", kernel, js, reason: "correctness suite is red" };
+  if (!Object.values(kernel).every(Boolean)) return { verdict: "no-go", kernel, js, reason: "kernel miss" };
+  if (!Object.values(js).every(Boolean)) {
+    return { verdict: "go-kernel-only", kernel, js, reason: "JS-only miss" };
+  }
+  return { verdict: "go", kernel, js, reason: "all thresholds pass" };
+}
+
+function packPackage(source, destDir, env) {
+  const out = execFileSync("npm", ["pack", "--offline", "--json", "--ignore-scripts", "--pack-destination", destDir],
+    { cwd: source, env, encoding: "utf8" });
+  const info = JSON.parse(out)[0];
+  return join(destDir, info.filename);
+}
+
+function installTarball(tarball, consumer, env) {
+  mkdirSync(consumer, { recursive: true });
+  writeFileSync(join(consumer, "package.json"),
+    JSON.stringify({ name: "bench-consumer", version: "0.0.0", private: true, type: "module" }));
+  execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    { cwd: consumer, env, stdio: "pipe" });
+}
+
+/** Packs and installs one deliverable offline; returns the installed package root. */
+function stageInstalled(source, dest, name, env) {
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  const tarball = packPackage(source, dest, env);
+  const consumer = join(dest, "consumer");
+  installTarball(tarball, consumer, env);
+  return join(consumer, "node_modules", name);
+}
+
+function summarizeRuns(runs) {
+  return Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
+    const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
+    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min"), count: median("count") }];
+  }));
+}
+
+function seriesFor(label, entry, node) {
+  const coldCode = {
+    baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
+    "cold-import": [
+      'const start = performance.now();',
+      'await import(' + entry + ');',
+      'console.log(JSON.stringify({ tImport: performance.now() - start }));',
+    ].join("\n"),
+    "cold-full": [
+      'const start = performance.now();',
+      'const { Bash } = await import(' + entry + ');',
+      'const imported = performance.now();',
+      'const bash = new Bash();',
+      'const constructed = performance.now();',
+      'await bash.exec("echo hi");',
+      'const executed = performance.now();',
+      'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
+      '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
+    ].join("\n"),
+  };
+  const assertion = [
+    'const { Bash, defineCommand } = await import(' + entry + ');',
+    'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
+    'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
+    HOST_SETUP,
+    'const result = await host.exec("noop");',
+    'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
+  ].join("\n");
+  node(assertion);
+  const runs = [];
+  for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
+    console.error(label + " repetition " + (runs.length + 1));
+    runs.push(runSeries(seed, coldCode, entry, node));
+  }
+  return { summary: summarizeRuns(runs), runs };
+}
+
 async function main(args) {
   const [flag, value, ...extra] = args;
   const variant = value ?? "committed";
   if (extra.length || (flag !== undefined && (flag !== "--variant" || !value)) ||
-      !["committed", "minified", "unminified", "wasm-opt"].includes(variant)) {
-    throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt]");
+      !["committed", "minified", "unminified", "wasm-opt", "jco"].includes(variant)) {
+    throw new Error("usage: node tools/measure-l2.mjs [--variant committed|minified|unminified|wasm-opt|jco]");
   }
 
   const root = join(repoRoot, "tmp", "bench-l2");
@@ -193,6 +365,39 @@ async function main(args) {
     dirty: run("git", ["--no-optional-locks", "status", "--porcelain"]).length !== 0,
   };
 
+  if (variant === "committed" || variant === "jco") {
+    // The packed default release, installed offline, with the matching Option D control.
+    const packages = variant === "committed"
+      ? [["default", repoRoot, "@sentropic/bash"], ["jco", join(repoRoot, "packages", "bash-jco"), "@sentropic/bash-jco"]]
+      : [["jco", join(repoRoot, "packages", "bash-jco"), "@sentropic/bash-jco"]];
+    const measured = {};
+    for (const [label, source, name] of packages) {
+      const tree = stageInstalled(source, join(dest, "install-" + label), name, env);
+      const entry = JSON.stringify(pathToFileURL(join(tree, "dist", "js", "index.js")).href);
+      measured[label] = { tree, ...seriesFor(variant + "/" + label, entry, node) };
+      measured[label].sizes = sizes(tree, env);
+      measured[label].split = packageSplit(tree, env);
+    }
+    const result = { variant, environment, wasmOpt, measured };
+    // Backwards-compatible top-level aliases for the default package.
+    if (measured.default) {
+      result.summary = measured.default.summary;
+      result.sizes = measured.default.sizes;
+      result.split = measured.default.split;
+      result.runs = measured.default.runs;
+      result.control = { summary: measured.jco.summary, sizes: measured.jco.sizes, split: measured.jco.split };
+    } else {
+      result.summary = measured.jco.summary;
+      result.sizes = measured.jco.sizes;
+      result.split = measured.jco.split;
+      result.runs = measured.jco.runs;
+    }
+    writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
+    console.log(JSON.stringify({ variant, wasmOpt, summary: result.summary, split: result.split,
+      control: result.control?.summary }, null, 2));
+    return;
+  }
+
   let tree = repoRoot;
   if (variant !== "committed") {
     tree = join(dest, "tree");
@@ -204,45 +409,7 @@ async function main(args) {
     cpSync(generated, join(tree, "dist", "js", "kernel"), { recursive: true });
   }
   const entry = JSON.stringify(pathToFileURL(join(tree, "host", "index.js")).href);
-  const assertion = [
-    'const { Bash, defineCommand } = await import(' + entry + ');',
-    'const { exitCode, stdout, stderr } = await new Bash().exec("echo hi");',
-    'if (exitCode !== 0 || stdout !== "hi\\n" || stderr !== "") throw new Error("echo smoke test failed");',
-    HOST_SETUP,
-    'const result = await host.exec("noop");',
-    'if (result.exitCode !== 0 || result.stdout !== "" || result.stderr !== "") throw new Error("noop smoke test failed");',
-  ].join("\n");
-  node(assertion);
-
-  const coldCode = {
-    baseline: 'console.log(JSON.stringify({ rss: process.memoryUsage().rss }));',
-    "cold-import": [
-      'const start = performance.now();',
-      'await import(' + entry + ');',
-      'console.log(JSON.stringify({ tImport: performance.now() - start }));',
-    ].join("\n"),
-    "cold-full": [
-      'const start = performance.now();',
-      'const { Bash } = await import(' + entry + ');',
-      'const imported = performance.now();',
-      'const bash = new Bash();',
-      'const constructed = performance.now();',
-      'await bash.exec("echo hi");',
-      'const executed = performance.now();',
-      'console.log(JSON.stringify({ tImport: imported - start, tNew: constructed - imported,',
-      '  tExec: executed - constructed, tCold: executed - start, rss: process.memoryUsage().rss }));',
-    ].join("\n"),
-  };
-
-  const runs = [];
-  for (const seed of [0x6c320001, 0x6c320002, 0x6c320003]) {
-    console.error(variant + " repetition " + (runs.length + 1));
-    runs.push(runSeries(seed, coldCode, entry, node));
-  }
-  const summary = Object.fromEntries(Object.entries(runs[0].metrics).map(([name, metric]) => {
-    const median = (key) => distribution(runs.map(({ metrics }) => key ? metrics[name][key] : metrics[name])).median;
-    return [name, typeof metric === "number" ? median() : { median: median("median"), p95: median("p95"), min: median("min") }];
-  }));
+  const { summary, runs } = seriesFor(variant, entry, node);
   const result = { variant, environment, wasmOpt, summary, sizes: sizes(tree, env), runs };
   writeFileSync(join(dest, "results.json"), JSON.stringify(result) + "\n");
   console.log(JSON.stringify({ variant, wasmOpt, summary, sizes: result.sizes }, null, 2));

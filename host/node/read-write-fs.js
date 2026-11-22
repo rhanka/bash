@@ -1,19 +1,41 @@
-import * as fs from "node:fs";
-import * as host from "node:path";
-import { randomBytes } from "node:crypto";
-import { promisify } from "node:util";
 import { latin1FromBytes } from "../core/bytes.js";
 import { resolvePath } from "../core/paths.js";
 import { checkedPath, errno, fsFailure, outside, rewriteError, special } from "./fs-errors.js";
 import {
-  HostPaths, absoluteVirtual, contains, decodeContent, encodeContent, formatStat, fstat, inDirectory, listHost, lstat,
-  readRegular, resolveVirtual, sameInode, withFile,
+  HostPaths, absoluteVirtual, contains, decodeContent, encodeContent, formatStat, fstat, inDirectory, lazyBuiltin, listHost, lstat,
+  nodeFs, nodePath, readRegular, resolveVirtual, sameInode, withFile,
 } from "./host-paths.js";
 
-const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_DIRECTORY = 0, O_NOFOLLOW = 0, O_NONBLOCK = 0 } = fs.constants;
-const createFlags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK;
-const writeData = promisify(fs.writeFile);
-const rename = promisify(fs.rename);
+// Lazy Node built-ins (Annex H LAZY): kept off the cold path. The adapters stay
+// synchronously exported, but `node:fs` / `node:path` / `node:crypto` /
+// `node:util` load only when an adapter method runs.
+const nodeCrypto = () => lazyBuiltin("node:crypto");
+const nodeUtil = () => lazyBuiltin("node:util");
+
+let cachedConsts = null;
+function fsConsts() {
+  return (cachedConsts ??= (() => {
+    const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_DIRECTORY = 0, O_NOFOLLOW = 0, O_NONBLOCK = 0 } = nodeFs().constants;
+    return { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK };
+  })());
+}
+
+function createFlags() {
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_NONBLOCK } = fsConsts();
+  return O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK;
+}
+
+let cachedWriteData = null;
+function writeDataAsync(fd, data) {
+  cachedWriteData ??= nodeUtil().promisify(nodeFs().writeFile);
+  return cachedWriteData(fd, data);
+}
+
+let cachedRename = null;
+function renameAsync(a, b) {
+  cachedRename ??= nodeUtil().promisify(nodeFs().rename);
+  return cachedRename(a, b);
+}
 const jobs = [];
 
 function startMutations() {
@@ -48,21 +70,21 @@ function copyBytes(sourceFd, targetFd, size) {
   let left = Number(size);
   const chunk = new Uint8Array(Math.min(left, 65536));
   while (left) {
-    const n = fs.readSync(sourceFd, chunk, 0, Math.min(left, chunk.length));
+    const n = nodeFs().readSync(sourceFd, chunk, 0, Math.min(left, chunk.length));
     if (!n) break;
     let offset = 0;
-    while (offset < n) offset += fs.writeSync(targetFd, chunk, offset, n - offset);
+    while (offset < n) offset += nodeFs().writeSync(targetFd, chunk, offset, n - offset);
     left -= n;
   }
 }
 
 function temporarySibling(entry) {
-  return host.join(host.dirname(entry.name), `.sentropic-write-${randomBytes(16).toString("hex")}`);
+  return nodePath().join(nodePath().dirname(entry.name), `.sentropic-write-${nodeCrypto().randomBytes(16).toString("hex")}`);
 }
 
 async function replaceFile(entry, path, mode, apply) {
   const name = temporarySibling(entry);
-  const fd = fs.openSync(name, createFlags, mode);
+  const fd = nodeFs().openSync(name, createFlags(), mode);
   let renamed = false;
   let opened;
   try {
@@ -71,30 +93,30 @@ async function replaceFile(entry, path, mode, apply) {
     await apply(fd);
     const sibling = lstat(name);
     if (!sibling?.isFile() || sibling.nlink !== 1n || !sameInode(sibling, opened)) throw outside(path);
-    fs.renameSync(name, entry.name);
+    nodeFs().renameSync(name, entry.name);
     renamed = true;
   } finally {
     try {
-      if (!renamed && opened && sameInode(lstat(name), opened)) fs.unlinkSync(name);
+      if (!renamed && opened && sameInode(lstat(name), opened)) nodeFs().unlinkSync(name);
     } finally {
-      fs.closeSync(fd);
+      nodeFs().closeSync(fd);
     }
   }
 }
 
 function removeTree(entry, list) {
   if (!entry.info.isDirectory()) {
-    fs.unlinkSync(entry.name);
+    nodeFs().unlinkSync(entry.name);
     return;
   }
   inDirectory(entry, (dir) => {
     for (const { name: child } of list(dir)) {
-      const name = host.join(dir, child);
+      const name = nodePath().join(dir, child);
       const info = lstat(name);
       if (info) removeTree({ name, info, ctx: entry.ctx }, list);
     }
   });
-  fs.rmdirSync(entry.name);
+  nodeFs().rmdirSync(entry.name);
 }
 
 /** Joins a virtual child without collapsing `..` in the parent (finding 3). */
@@ -184,13 +206,13 @@ export class ReadWriteFs {
     }
     if (entry.info.isDirectory()) throw fsFailure("EISDIR", `${op} '${path}'`);
     const metadata = op === "chmod" || op === "utimes";
-    const flags = metadata ? O_RDONLY : op === "append" ? O_WRONLY | O_APPEND : O_WRONLY;
+    const flags = metadata ? fsConsts().O_RDONLY : op === "append" ? fsConsts().O_WRONLY | fsConsts().O_APPEND : fsConsts().O_WRONLY;
     // Check the descriptor before truncating or editing the inode.
     const initial = entry.info;
     if (initial.nlink === 1n) {
       const done = await withFile(entry, flags, op, path, async (fd, opened) => {
         if (opened.nlink !== 1n) return false;
-        if (op === "write") fs.ftruncateSync(fd, 0);
+        if (op === "write") nodeFs().ftruncateSync(fd, 0);
         await apply(fd);
         return true;
       });
@@ -199,42 +221,38 @@ export class ReadWriteFs {
     if (op === "write") {
       if (!initial.isFile()) throw special(op, path);
       return replaceFile(entry, path, Number(initial.mode), (fd) => {
-        fs.fchmodSync(fd, Number(initial.mode));
+        nodeFs().fchmodSync(fd, Number(initial.mode));
         return apply(fd);
       });
     }
-    return withFile(entry, O_RDONLY, op, path, (sourceFd, source) => {
+    return withFile(entry, fsConsts().O_RDONLY, op, path, (sourceFd, source) => {
       if (this.#maxCopyOnWrite && source.size > this.#maxCopyOnWrite) {
         throw fsFailure("EFBIG", `file too large for copy-on-write ${op} '${path}' (${source.size} bytes, max ${this.#maxCopyOnWrite})`);
       }
       return replaceFile(entry, path, Number(source.mode), (fd) => {
         copyBytes(sourceFd, fd, source.size);
-        fs.fchmodSync(fd, Number(source.mode));
-        if (op !== "append") fs.futimesSync(fd, source.atime, source.mtime);
+        nodeFs().fchmodSync(fd, Number(source.mode));
+        if (op !== "append") nodeFs().futimesSync(fd, source.atime, source.mtime);
         return apply(fd);
       });
     });
   }
 
-  async writeFile(path, content, options) {
-    checkedPath("write", path);
+  #writeOp(op, path, content, options) {
+    checkedPath(op, path);
     const data = Uint8Array.from(encodeContent(content, options));
-    return this.#mutate("write", path, () => this.#use(path, "write", { parents: true }, (entry) =>
-      this.#editFile(path, "write", entry, (fd) => writeData(fd, data))));
+    return this.#mutate(op, path, () => this.#use(path, op, { parents: true }, (entry) =>
+      this.#editFile(path, op, entry, (fd) => writeDataAsync(fd, data))));
   }
 
-  async appendFile(path, content, options) {
-    checkedPath("append", path);
-    const data = Uint8Array.from(encodeContent(content, options));
-    return this.#mutate("append", path, () => this.#use(path, "append", { parents: true }, (entry) =>
-      this.#editFile(path, "append", entry, (fd) => writeData(fd, data))));
-  }
+  async writeFile(path, content, options) { return this.#writeOp("write", path, content, options); }
+  async appendFile(path, content, options) { return this.#writeOp("append", path, content, options); }
 
   async mkdir(path, options) {
     checkedPath("mkdir", path);
     return this.#mutate("mkdir", path, () => this.#use(path, "mkdir", { leaf: true, parents: !!options?.recursive }, (entry) => {
       if (entry.missingParent) throw errno("ENOENT", "mkdir", path);
-      if (!entry.info) fs.mkdirSync(entry.name, { mode: 0o755 });
+      if (!entry.info) nodeFs().mkdirSync(entry.name, { mode: 0o755 });
       else if (!options?.recursive || !entry.info.isDirectory()) throw errno("EEXIST", "mkdir", path);
     }));
   }
@@ -246,17 +264,17 @@ export class ReadWriteFs {
       const opened = this.#use(path, op, { leaf: true }, (entry) => {
         if (entry.missingParent) throw errno("ENOENT", op, path);
         if (entry.info) throw errno("EEXIST", op, path);
-        if (!directory) return { canonical: entry.canonical, fd: fs.openSync(entry.name, createFlags, mode) };
-        fs.mkdirSync(entry.name, { mode: mode | 0o700 });
+        if (!directory) return { canonical: entry.canonical, fd: nodeFs().openSync(entry.name, createFlags(), mode) };
+        nodeFs().mkdirSync(entry.name, { mode: mode | 0o700 });
         let fd;
         try {
           const made = lstat(entry.name);
           if (!made?.isDirectory()) throw outside(path, ` during ${op}`);
-          fd = fs.openSync(entry.name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK);
+          fd = nodeFs().openSync(entry.name, fsConsts().O_RDONLY | fsConsts().O_DIRECTORY | fsConsts().O_NOFOLLOW | fsConsts().O_NONBLOCK);
           if (!sameInode(made, fstat(fd))) throw outside(path, ` during ${op}`);
           return { canonical: entry.canonical, fd };
         } catch (error) {
-          if (fd !== undefined) fs.closeSync(fd);
+          if (fd !== undefined) nodeFs().closeSync(fd);
           if (["ENOENT", "ENOTDIR", "ELOOP"].includes(error.code)) throw outside(path, ` during ${op}`);
           throw error;
         }
@@ -274,9 +292,9 @@ export class ReadWriteFs {
         if (!verified || !(directory ? info.isDirectory() : info.isFile() && info.nlink === 1n)) {
           throw outside(path, ` during ${op}`);
         }
-        fs.fchmodSync(opened.fd, mode);
+        nodeFs().fchmodSync(opened.fd, mode);
       } finally {
-        fs.closeSync(opened.fd);
+        nodeFs().closeSync(opened.fd);
       }
     });
   }
@@ -320,12 +338,12 @@ export class ReadWriteFs {
       if (options?.recursive) removeTree(entry, (dir) => this._listHost(dir));
       else if (entry.info.isDirectory()) {
         try {
-          fs.rmdirSync(entry.name);
+          nodeFs().rmdirSync(entry.name);
         } catch (error) {
           if (error.code === "ENOTEMPTY" || error.code === "EEXIST") throw fsFailure("ERR_FS_EISDIR", `rm '${path}'`);
           throw error;
         }
-      } else fs.unlinkSync(entry.name);
+      } else nodeFs().unlinkSync(entry.name);
     }));
   }
 
@@ -335,8 +353,8 @@ export class ReadWriteFs {
       // A contained link copies through to its target when links are allowed;
       // otherwise copying a link is rejected as before.
       if (!this.#paths.allowSymlinks) throw fsFailure("EIO", `cp '${src}'`);
-      const raw = fs.readlinkSync(source.name);
-      const at = host.relative(this.#paths.root, host.dirname(source.canonical)).split(host.sep).filter(Boolean);
+      const raw = nodeFs().readlinkSync(source.name);
+      const at = nodePath().relative(this.#paths.root, nodePath().dirname(source.canonical)).split(nodePath().sep).filter(Boolean);
       const parts = this.#paths.targetParts(raw, at, src);
       return this.#paths.use(`/${parts.join("/")}`, "cp", { followLinks: true, strictDotDot: true, display: src }, (resolved) =>
         this.#copy(src, dest, resolved, target, recursive));
@@ -346,23 +364,23 @@ export class ReadWriteFs {
       if (!recursive) throw fsFailure("EIO", `cp '${src}'`);
       if (contains(source.canonical, target.canonical)) throw fsFailure("EINVAL", `cannot copy '${src}' into itself, '${dest}'`);
       if (!target.info) {
-        fs.mkdirSync(target.name, { mode: Number(source.info.mode) });
+        nodeFs().mkdirSync(target.name, { mode: Number(source.info.mode) });
         target.info = lstat(target.name);
       }
       if (!target.info.isDirectory()) throw errno("ENOTDIR", "cp", dest);
       return inDirectory(source, (from) => inDirectory(target, async (to) => {
         for (const { name: child } of this._listHost(from)) {
-          const name = host.join(from, child);
-          const next = host.join(to, child);
+          const name = nodePath().join(from, child);
+          const next = nodePath().join(to, child);
           await this.#copy(joinVirtual(src, child), joinVirtual(dest, child),
-            { name, info: lstat(name), canonical: host.join(source.canonical, child), ctx: source.ctx },
-            { name: next, info: lstat(next), canonical: host.join(target.canonical, child), ctx: target.ctx }, recursive);
+            { name, info: lstat(name), canonical: nodePath().join(source.canonical, child), ctx: source.ctx },
+            { name: next, info: lstat(next), canonical: nodePath().join(target.canonical, child), ctx: target.ctx }, recursive);
         }
       }));
     }
     if (!source.info.isFile() || target.info && !target.info.isFile()) throw fsFailure("EIO", `cp '${src}'`);
     if (sameInode(target.info, source.info) && source.canonical === target.canonical) return;
-    return withFile(source, O_RDONLY, "read", src, (fd, info) => {
+    return withFile(source, fsConsts().O_RDONLY, "read", src, (fd, info) => {
       if (this.#maxCopy && info.size > this.#maxCopy) {
         throw fsFailure("EFBIG", `file too large to copy '${src}' (${info.size} bytes, max ${this.#maxCopy})`);
       }
@@ -379,17 +397,17 @@ export class ReadWriteFs {
 
   #checkMovedLinks(entry, path) {
     if (entry.info.isSymbolicLink()) {
-      const raw = fs.readlinkSync(entry.name);
+      const raw = nodeFs().readlinkSync(entry.name);
       // A stored absolute target is a host path, unlike the virtual argument to symlink().
-      const parent = host.relative(this.#paths.root, host.dirname(entry.canonical)).split(host.sep).filter(Boolean);
+      const parent = nodePath().relative(this.#paths.root, nodePath().dirname(entry.canonical)).split(nodePath().sep).filter(Boolean);
       const parts = this.#paths.targetParts(raw, parent, path);
       this.#paths.use(`/${parts.join("/")}`, "mv", { followLinks: true, strictDotDot: true }, () => {});
     } else if (entry.info.isDirectory()) {
       inDirectory(entry, (dir) => {
         for (const { name: child } of this._listHost(dir)) {
-          const name = host.join(dir, child);
+          const name = nodePath().join(dir, child);
           const info = lstat(name);
-          if (info) this.#checkMovedLinks({ name, info, canonical: host.join(entry.canonical, child), ctx: entry.ctx }, path);
+          if (info) this.#checkMovedLinks({ name, info, canonical: nodePath().join(entry.canonical, child), ctx: entry.ctx }, path);
         }
       });
     }
@@ -414,47 +432,41 @@ export class ReadWriteFs {
           }
         }
         if (!source.info.isDirectory()) {
-          return rename(source.name, target.name);
+          return renameAsync(source.name, target.name);
         }
         let backup;
         if (target.info?.isDirectory()) {
           if (inDirectory(target, (dir) => this._listHost(dir).length)) throw errno("ENOTEMPTY", "mv", dest);
           backup = temporarySibling(target);
-          fs.renameSync(target.name, backup);
+          nodeFs().renameSync(target.name, backup);
         }
         try {
-          fs.renameSync(source.name, target.name);
+          nodeFs().renameSync(source.name, target.name);
           try {
             this.#checkMovedLinks({ ...target, info: source.info }, dest);
           } catch {
-            fs.renameSync(target.name, source.name);
+            nodeFs().renameSync(target.name, source.name);
             throw escape(true);
           }
         } catch (error) {
-          if (backup) fs.renameSync(backup, target.name);
+          if (backup) nodeFs().renameSync(backup, target.name);
           throw error;
         }
-        if (backup) fs.rmdirSync(backup);
+        if (backup) nodeFs().rmdirSync(backup);
       })));
   }
 
-  async chmod(path, mode) {
-    checkedPath("chmod", path);
-    return this.#mutate("chmod", path, () => this.#use(path, "chmod", {}, (entry) => {
-      requireEntry(entry, "chmod", path);
-      if (entry.info.isDirectory()) inDirectory(entry, (_dir, fd) => fs.fchmodSync(fd, mode));
-      else return this.#editFile(path, "chmod", entry, (fd) => fs.fchmodSync(fd, mode));
+  #setMeta(op, path, apply) {
+    checkedPath(op, path);
+    return this.#mutate(op, path, () => this.#use(path, op, {}, (entry) => {
+      requireEntry(entry, op, path);
+      if (entry.info.isDirectory()) inDirectory(entry, (_dir, fd) => apply(fd));
+      else return this.#editFile(path, op, entry, apply);
     }));
   }
 
-  async utimes(path, atime, mtime) {
-    checkedPath("utimes", path);
-    return this.#mutate("utimes", path, () => this.#use(path, "utimes", {}, (entry) => {
-      requireEntry(entry, "utimes", path);
-      if (entry.info.isDirectory()) inDirectory(entry, (_dir, fd) => fs.futimesSync(fd, atime, mtime));
-      else return this.#editFile(path, "utimes", entry, (fd) => fs.futimesSync(fd, atime, mtime));
-    }));
-  }
+  async chmod(path, mode) { return this.#setMeta("chmod", path, (fd) => nodeFs().fchmodSync(fd, mode)); }
+  async utimes(path, atime, mtime) { return this.#setMeta("utimes", path, (fd) => nodeFs().futimesSync(fd, atime, mtime)); }
 
   async symlink(target, path) {
     checkedPath("symlink", target, path);
@@ -462,7 +474,7 @@ export class ReadWriteFs {
     return this.#mutate("symlink", path, () => this.#use(path, "symlink", { leaf: true }, (entry) => {
       if (entry.missingParent) throw errno("ENOENT", "symlink", path);
       if (entry.info) throw errno("EEXIST", "symlink", path);
-      fs.symlinkSync(this.#paths.linkTarget(target, entry.canonical, path), entry.name);
+      nodeFs().symlinkSync(this.#paths.linkTarget(target, entry.canonical, path), entry.name);
     }));
   }
 
@@ -474,7 +486,7 @@ export class ReadWriteFs {
         if (!source.info.isFile()) throw errno("EPERM", "link", src);
         if (target.info) throw errno("EEXIST", "link", dest);
         if (target.missingParent) throw errno("ENOENT", "link", dest);
-        fs.linkSync(source.name, target.name);
+        nodeFs().linkSync(source.name, target.name);
       })));
   }
 

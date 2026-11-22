@@ -54,8 +54,12 @@ export function rewriteError(error, op, path, writable = false) {
   return fsFailure(code, `${op} '${path}'`);
 }
 
-export function rootError(name, reason) {
-  const error = new Error(`${name} root is ${reason}`);
+export function plainError(message) {
+  const error = new Error(message);
   error.stack = error.toString();
   return error;
+}
+
+export function rootError(name, reason) {
+  return plainError(`${name} root is ${reason}`);
 }

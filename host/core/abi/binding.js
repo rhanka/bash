@@ -1,17 +1,24 @@
 // One synchronous engine store with canonical resource intrinsics and post-return handling.
 import { KernelPoisonedError } from "../errors.js";
-import { Codec, trap, unsigned32 } from "./codec.js";
+import { Codec, LOWER_BUDGET, MAX_ONESHOT_BYTES, trap, unsigned32 } from "./codec.js";
 import { camelCase, functions, namespace, resourceKinds } from "./layout.js";
+import { SNAPSHOT_CEILING } from "../snapshot.js";
 
 export function instantiateEngine(getCoreModule, instantiateCore, options, coreName) {
   const wasm = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;
   const instantiate = instantiateCore ?? ((module, imports) => new wasm.Instance(module, imports));
-  return linkEngine((imports) => instantiate(getCoreModule(coreName), imports).exports, { onTrap: options?.onTrap });
+  return linkEngine((imports) => instantiate(getCoreModule(coreName), imports).exports, {
+    onTrap: options?.onTrap,
+    inspect: options?.inspect,
+  });
 }
 
 /** Links core exports. The linker and registry are injectable for deterministic ABI fixtures. */
-export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {}, bindings = functions) {
+export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, inspect } = {}, bindings = functions) {
   const table = new Map();
+  // Call log for the offline snapshot capture and its tests (spec L2c exit gates 1-3): which
+  // entry ran, in order. Allocated only when `inspect` is set; production passes none.
+  const calls = inspect ? [] : null;
   const wrappers = new WeakMap();
   const resources = new Map();
   const engine = {};
@@ -44,7 +51,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
 
   function checkEntry() {
     if (stopped) throw new KernelPoisonedError();
-    if (busy) throw new TypeError("the canonical ABI store is already in a call");
+    if (busy) throw new TypeError("busy");
   }
 
   function guestNew(kind, rep) {
@@ -117,12 +124,12 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
     const dtor = namespace + "#[dtor]" + kind;
     const Resource = class {
       constructor() {
-        throw new TypeError(name + " has no public constructor");
+        throw new TypeError(name + " no ctor");
       }
 
       [Symbol.dispose]() {
         const entry = wrappers.get(this);
-        if (!entry || entry.kind !== kind) throw new TypeError("invalid " + kind + " disposal receiver");
+        if (!entry || entry.kind !== kind) throw new TypeError("bad " + kind + " dispose");
         if (stopped || table.get(entry.id) !== entry) return;
         checkEntry();
         destroyOwner(entry);
@@ -135,6 +142,9 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
     intrinsics["[resource-drop]" + kind] = (handle) => guestDrop(kind, handle);
   }
 
+  // One Codec per store, reused across calls (the store allows a single live call):
+  // avoids per-call allocation and keeps the DataView/bit scratch hot.
+  let codec = null;
   for (const fn of bindings) {
     const receiver = /^\[(method|static)\]([^.]+)\.(.+)$/.exec(fn.name);
     const resource = receiver && resources.get(receiver[2]);
@@ -142,6 +152,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
     const target = resource ? (method ? resource.prototype : resource.Resource) : engine;
     target[camelCase(receiver ? receiver[3] : fn.name)] = function (...args) {
       checkEntry();
+      if (calls) calls.push(fn.name);
       busy = true;
 
       // Entries track the dynamic borrows. The wrappers stay strongly reachable through post-return.
@@ -149,7 +160,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
       const borrow = (kind, wrapper, path) => {
         const entry = wrappers.get(wrapper);
         if (!entry || entry.kind !== kind || !entry.hostOwned || table.get(entry.id) !== entry) {
-          throw new TypeError(path + " must be a live " + kind + " of this store");
+          throw new TypeError(path + ":"+kind);
         }
         borrowed.push(wrapper);
         entry.borrows++;
@@ -158,14 +169,23 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
 
       try {
         const oneshotBytes = fn.name === "exec-oneshot" ? fn.params.size : undefined;
-        const codec = new Codec({ core, borrow, own: liftOwner, liftBudget: ceiling, oneshotBytes });
+        if (codec === null) {
+          codec = new Codec({ core, borrow, own: liftOwner, liftBudget: ceiling, oneshotBytes });
+        } else {
+          codec.core = core;
+          codec.borrow = borrow;
+          codec.own = liftOwner;
+          codec.oneshotBytes = oneshotBytes;
+          codec.lowerBudget = oneshotBytes === undefined ? LOWER_BUDGET : MAX_ONESHOT_BYTES - oneshotBytes;
+          codec.liftBudget = ceiling;
+        }
         const receiverArg = method ? { value: this } : undefined;
         let staged;
         try {
           staged = codec.stageParams(fn.params, args, fn.name, receiverArg);
         } catch (error) {
           // An exception from a caller getter is a host failure, even if it resembles a Wasm trap.
-          if (error instanceof WebAssembly.RuntimeError) throw new TypeError("ABI input getter failed", { cause: error });
+          if (error instanceof WebAssembly.RuntimeError) throw new TypeError("input failed", { cause: error });
           throw error;
         }
         if (oneshotBytes !== undefined) codec.liftBudget = codec.lowerBudget;
@@ -204,6 +224,44 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
   }
 
   core = link({ ["[export]" + namespace]: intrinsics });
+  const restoreExport = typeof core["__restore_default"] === "function" ? core["__restore_default"] : null;
+
+  /** Restores the build-matched default shell inside this fresh store, or returns `0n` on refusal. */
+  function restoreDefault() {
+    checkEntry();
+    if (calls) calls.push("__restore_default");
+    busy = true;
+    inGuest = true;
+    try {
+      const packed = restoreExport();
+      if (packed === 0n) return 0n;
+      if (typeof packed !== "bigint") throw trap("restore returned a non-i64 value");
+      const vfsId = Number(packed & 0xffffffffn);
+      const shellId = Number((packed >> 32n) & 0xffffffffn);
+      if (!vfsId || !shellId || vfsId === shellId) throw trap("restore returned invalid handles");
+      const vfs = liftOwner("vfs", vfsId);
+      const shell = liftOwner("shell", shellId);
+      // The restored store carries the default cap: later codecs cap aggregate copies there.
+      ceiling = SNAPSHOT_CEILING;
+      return { vfs, shell };
+    } catch (error) {
+      throw fail(error);
+    } finally {
+      inGuest = false;
+      busy = false;
+    }
+  }
+
+  // Passive observation for the offline snapshot capture tool (and ABI fixtures). Production
+  // passes no `inspect`, so this changes nothing observable there.
+  if (inspect) {
+    inspect({
+      exports: core,
+      handles: () => [...table.values()].map(({ id, kind, rep, hostOwned, borrows }) =>
+        ({ id, kind, rep, hostOwned, borrows })),
+      calls,
+    });
+  }
   const types = {};
   return {
     types,
@@ -217,6 +275,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
         stop();
       },
       async whenIdle() {},
+      ...(restoreExport ? { restoreDefault } : null),
     },
   };
 }

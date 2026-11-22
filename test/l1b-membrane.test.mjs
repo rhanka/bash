@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Bash, InMemoryFs, T, bash, countKernelCalls, internal } from "./kt.mjs";
-import { bytesOutput, defineCommand, stdoutAsBytes } from "@sentropic/bash";
+import { bytesOutput, defineCommand, stdoutAsBytes } from "../host/index.js";
 import { repoRoot } from "./helpers.mjs";
 import { assertUnderTime } from "./timing.mjs";
 

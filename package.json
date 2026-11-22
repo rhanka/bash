@@ -11,19 +11,24 @@
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
-      "default": "./host/index.js"
+      "default": "./dist/js/index.js"
     },
     "./browser": {
       "types": "./types/browser.d.ts",
-      "default": "./host/browser.js"
+      "default": "./dist/js/browser.js"
     }
   },
   "files": [
-    "host/",
+    "dist/js/shared.js",
+    "dist/js/index.js",
+    "dist/js/browser.js",
+    "dist/js/core/ext.js",
+    "dist/js/node/adapters.js",
+    "dist/js/node/load.js",
+    "dist/js/kernel/kernel.core.wasm",
+    "dist/kernel.component.wasm",
     "types/",
     "wit/",
-    "dist/js/",
-    "dist/*.component.wasm",
     "DIVERGENCES.md"
   ],
   "dependencies": {},

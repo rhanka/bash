@@ -73,6 +73,8 @@ pub use boxed::KBox;
 pub use budget::Budget;
 pub use chunks::KChunks;
 pub use ceiling::{configure, raise_ceiling, usage, ConfigError, Usage};
+#[cfg(target_arch = "wasm32")]
+pub(crate) use ceiling::is_pristine;
 pub use clone::TryClone;
 pub use error::{LimitId, MemError, MemResult};
 pub use headroom::{headroom, set_headroom};
@@ -80,6 +82,8 @@ pub use insertmap::KInsertMap;
 pub use map::KMap;
 pub use rc::KRc;
 pub use reserve::reserve_scope;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use reserve::is_open;
 pub use string::KString;
 pub use transfer::{cabi_realloc, transfer_free};
 pub use vec::{KBytes, KVec};
@@ -110,6 +114,15 @@ pub mod testing {
     pub fn reset(ceiling_bytes: u64) {
         super::ceiling::reset(ceiling_bytes);
     }
+}
+
+/// Grows linear memory by exactly `pages` for a snapshot restore, through the allocator that
+/// owns growth. The restored image carries the heap metadata itself, so no free block is
+/// inserted. Fails (growing nothing) when the final size would exceed the explicit 268,435,456 B
+/// default cap or the engine refuses the growth. Restore-only: ordinary allocations never call it.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn restore_grow(pages: usize) -> bool {
+    ALLOCATOR.0.restore_grow(pages)
 }
 
 /// Bytes of memory managed by the allocator (on the native target: equal to `usage().used`).

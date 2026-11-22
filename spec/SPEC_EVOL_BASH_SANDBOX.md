@@ -1067,13 +1067,10 @@ p95 spread. MoonBash is compared through `docs/FEATURE_MATRIX.md` only.
 | M4 `grep -c`, `sed`, `awk`, `sort` on 10k lines | 11.0 / 73.7 / 61.0 / 9.2 ms | <= 2 / 8 / 8 / 4 ms |
 | M5 RSS delta after first exec | 35.5 MB | <= 10 MB |
 | M6 kernel core module | 2.02 MB of JS (557 KB gzip) | <= 1.5 MB raw, <= 700 KB gzip (all tiers) |
-| M6 JS host, minified default tarball | — | <= 60,000 B total raw, <= 40,000 B Node-only raw, <= 30,000 B total gzip. Report browser raw against **both 45,000 B and 58,000 B** pending owner selection |
+| M6 JS host, minified default tarball | — | Cold path: `B_cold` (browser static closure) <= 58,000 B raw, `Z_cold` (cold-path gzip: browser static closure + Node entry and loader) <= 30,000 B. Total shipped: `B_total` (browser including lazy chunks) <= 75,000 B raw, `Z_total` (all shipped JS gzip) <= 50,000 B, `T` (total raw JS) <= 110,000 B |
 | M7 limit latency; M8 host-backed FS; M9 agent session; M10 heavy pipeline | not measured | not slower than just-bash until measured |
 
-The owner adopted the split and minification on 21/11. Count every packed JS file once. The browser
-graph includes the binding, registry, shared facade and all reachable chunks. Remaining files are
-Node-only. Sum gzip level-9 sizes per file. Report actual raw and gzip groups for the separate jco
-tarball alongside the default package. Apply the Annex H JS budget to the default tarball alone.
+The owner adopted the split and minification on 21/11 and settled the JS budgets on 22/11 by splitting the cold path from total shipped. Count every packed JS file once. `B_cold` is the raw byte sum of the static import closure reachable from the browser entry (`browser.js` + `shared.js`). `Z_cold` is the per-file level-9 gzip sum of the eagerly loaded cold path (the browser static closure plus `index.js` and `node/load.js`). `B_total` is the raw byte sum of the browser-reachable graph including dynamic literal `import()` lazy chunks (`core/ext.js`). Remaining shipped files form `N` (`T = B_total + N`). `Z_total` is the per-file level-9 gzip sum of all shipped JS. Report actual raw and gzip groups for the separate jco tarball alongside the default package. Apply the Annex H JS budget to the default tarball alone.
 
 At L2c use three recorded seeds, 30 shuffled cold rounds per seed, and at least 1,000 samples over at
 least 2 s per warm workload after 20 discarded iterations. Report medians of the three run medians,
@@ -1085,11 +1082,11 @@ hardening. Use the real, packed release candidate to decide.
 Gate L2 requires green conformance, 30/30 L2 parity cases and 4/4 profile suites. A correctness failure
 blocks lot exit. Kernel limits are M1 <= 25.0 ms, M2 <= 0.20 ms, M3a <= 0.070 ms, M5 <= 10,000,000 B,
 and M6 loader core <= 1,500,000 B raw **and** <= 700,000 B gzip. Any kernel miss is **No-go** and pauses
-W4 and later builds. On a kernel pass, meeting every fixed JS bound and the selected browser cap (both
-caps if pending) gives **Go**. A JS-only miss or a pass at 58,000 B alone while selection is pending gives
-**Go on kernel, owner review of the JS budget**. Both Go verdicts unblock W4. Run the unoptimized arm
-unless an owner-approved Binaryen pin enables the L2c matched comparison. The optimizer and both browser
-caps have separate result rows.
+W4 and later builds. On a kernel pass, meeting all five JS gates (`B_cold <= 58,000 B`,
+`Z_cold <= 30,000 B`, `B_total <= 75,000 B`, `Z_total <= 50,000 B`, `T <= 110,000 B`) gives **Go**. Any
+JS bound miss on a kernel pass gives **Go on kernel, owner review of the JS budget**. Both Go verdicts
+unblock W4. Run the unoptimized arm unless an owner-approved Binaryen pin enables the L2c matched
+comparison. The optimizer status has a separate result row.
 
 ## Annex I — Divergence list
 
@@ -1106,9 +1103,10 @@ caps have separate result rows.
 
 ## 3. Questions for the owner
 
-Two questions from 21/11 remain open. L2c reports the data for either outcome.
-- **Browser raw JS.** Measure the minified default pack against both 45,000 and 58,000 B with the fixed
-  Node, total raw and gzip bounds. The owner sets the browser cap.
+One question from 21/11 remains open; the JS budget question was answered on 22/11.
+- **Browser and shipped JS budgets. ANSWERED (Owner, 22/11).** Split cold path from total shipped:
+  `B_cold <= 58,000 B`, `Z_cold <= 30,000 B`, `B_total <= 75,000 B`, `Z_total <= 50,000 B`, `T <= 110,000 B`
+  (Annex H).
 - **Binaryen pin.** Without approval, retain `wasmOpt: false` and record the unoptimized result. With an
   approved exact pin, measure `-Oz` before componentization and apply the L2c 10% retention gate.
 
@@ -1162,6 +1160,7 @@ with the companion packages when those expose a host-JS surface, where the prote
 | Gate L2 binding/packaging (21/11) | accepted | Owner | D15/D16/D18, Annex C and V6: first-party default, guarded jco differential oracle and optional separate npm package, same zero-import component/WIT |
 | Gate L2 iteration 2 (21/11) | accepted design, measured exit pending | Astra + Carbon | L2b (3 Strong) and L2c (3 Strong): plain descriptors, internal passive restore, pure default predicate, G2/G5-clean shared facade and packed rerun. Annex A reflects the L2 WIT's type export and byte-output fields |
 | Gate L2 budgets (21/11) | minified split accepted, browser cap and optimizer pin open | Owner | D17/D24, Annex H: report 45,000/58,000 B arms and the approved/unapproved Binaryen paths |
+| Gate L2 JS budgets (22/11) | settled: cold path (`B_cold <= 58,000 B`, `Z_cold <= 30,000 B`) split from total shipped (`B_total <= 75,000 B`, `Z_total <= 50,000 B`, `T <= 110,000 B`) | Owner | Annex H, Section 3 |
 | Shared filesystem (21/11) | accepted | Owner | D5/D27, Annex D.1 and V9: both modes, synchronous in-memory mount transport in L7c (2.5 Strong) after L7b and before L7a |
 
 ### PR #13 corrections to the v1.6 lot specs

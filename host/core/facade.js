@@ -8,6 +8,7 @@ import { Holder } from "./holder.js";
 import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits, stringLimit } from "./limits.js";
 import { dirname, resolvePath } from "./paths.js";
 import { INTERNAL } from "./instance.js";
+import { PREDICATE_OPTIONS, isDefaultSnapshotConfig } from "./snapshot.js";
 
 const OPTION_NAMES = new Set([
   "files", "env", "cwd", "fs", "isolation", "executionLimits", "executionLimitProfile", "maxCallDepth", "maxCommandCount", "maxLoopIterations",
@@ -71,6 +72,31 @@ export const getNetworkCommandNames = () => ["curl"];
 export const getPythonCommandNames = () => ["python3", "python"];
 export const getJavaScriptCommandNames = () => ["js-exec", "node"];
 
+const SYS_DIRS = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
+const DEV_NAMES = ["null", "zero", "stdin", "stdout", "stderr"];
+const isValidStub = (name) => name !== "" && !name.includes("/") && name !== "." && name !== "..";
+const stubText = (name) => `#!/bin/bash\n# Built-in command: ${name}\n`;
+
+function procEntries(processInfo) {
+  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
+  return [
+    ["/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n"],
+    ["/proc/self/exe", "/bin/bash"],
+    ["/proc/self/cmdline", "bash\0"],
+    ["/proc/self/comm", "bash\n"],
+    ["/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`],
+    ...["stdin", "stdout", "stderr"].map((name, fd) => [`/proc/self/fd/${fd}`, `/dev/${name}`]),
+  ];
+}
+
+function ignoreUnimplemented(operation) {
+  try {
+    operation();
+  } catch (error) {
+    if (!String(error?.message).startsWith("ENOSYS")) throw error;
+  }
+}
+
 function seedHostLayout(fs, defaultLayout, cwd, processInfo, commands) {
   if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function") return;
   const mkdir = (path) => ignoreUnimplemented(() => fs.mkdirSync(path, { recursive: true }));
@@ -83,25 +109,11 @@ function seedHostLayout(fs, defaultLayout, cwd, processInfo, commands) {
   }
   mkdir("/dev");
   mkdir("/dev/fd");
-  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
+  for (const name of DEV_NAMES) write(`/dev/${name}`, "");
   mkdir("/proc/self/fd");
-  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
-  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
-  write("/proc/self/exe", "/bin/bash");
-  write("/proc/self/cmdline", "bash\0");
-  write("/proc/self/comm", "bash\n");
-  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
-  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  for (const [path, contents] of procEntries(processInfo)) write(path, contents);
   if (cwd !== "/" && (!defaultLayout || cwd !== "/home/user")) mkdir(cwd);
   for (const name of commands) seedHostCommand(fs, name);
-}
-
-function ignoreUnimplemented(operation) {
-  try {
-    operation();
-  } catch (error) {
-    if (!String(error?.message).startsWith("ENOSYS")) throw error;
-  }
 }
 
 /**
@@ -112,12 +124,11 @@ function ignoreUnimplemented(operation) {
  * wait for the returned promise.
  */
 function seedUserFiles(fs, files, base) {
-  if (files === null || typeof files !== "object" || Array.isArray(files)) throw new TypeError("initial files must be an object");
+  if (!isObject(files)) throw new TypeError("initial files must be an object");
   const entries = [];
   for (const [path, value] of Object.entries(files)) {
     if (typeof value === "function") throw new TypeError("files: lazy content is not supported on a host fs");
-    let content = value;
-    if (value !== null && typeof value === "object" && !(value instanceof Uint8Array)) content = value.content;
+    const content = value !== null && typeof value === "object" && !(value instanceof Uint8Array) ? value.content : value;
     if (typeof content !== "string" && !(content instanceof Uint8Array)) throw new TypeError(`files: the content of ${path} must be a string or bytes`);
     entries.push([resolvePath(base, path), content]);
   }
@@ -141,17 +152,9 @@ function seedUserFiles(fs, files, base) {
 }
 
 function seedHostCommand(fs, name) {
-  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__")) return;
-  // Mirrors the kernel `Shell::stub` guard: `.` and `..` are not commands, and
-  // writing `/bin/.` would replace the `/bin` memory entry instead of seeding.
-  if (name === "" || name.includes("/") || name === "." || name === "..") return;
-  const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+  if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__") || !isValidStub(name)) return;
+  const content = stubText(name);
   for (const dir of ["/bin", "/usr/bin"]) ignoreUnimplemented(() => fs.writeFileSync(`${dir}/${name}`, content));
-}
-
-/** Names the volume layout turns into stubs (the kernel `Shell::stub` guard). */
-function volumeStubNames(names) {
-  return names.filter((name) => name !== "" && !name.includes("/") && name !== "." && name !== "..");
 }
 
 /**
@@ -176,49 +179,35 @@ function seedVolumeLayout(vfs, inst, { defaultLayout, cwd, processInfo, commandN
   };
   // Atomicity: stat every system directory before creating any, mirroring
   // `Shell::layout` — a file collision fails before earlier directories exist.
-  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) {
+  for (const dir of SYS_DIRS) {
     const s = inst.call(() => vfs.op({ tag: "stat", val: utf8(dir) }));
     if (s.tag === "ok" && s.val.val.kind === "file") throw fsError("exists", "mkdir", dir);
   }
-  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) mkdir(dir);
+  for (const dir of SYS_DIRS) mkdir(dir);
   if (defaultLayout) {
     mkdir("/home/user");
     mkdir("/tmp");
   }
-  mkdir("/dev/fd");
-  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
-  mkdir("/proc/self/fd");
-  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
-  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
-  write("/proc/self/exe", "/bin/bash");
-  write("/proc/self/cmdline", "bash\0");
-  write("/proc/self/comm", "bash\n");
-  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
-  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  for (const name of DEV_NAMES) write(`/dev/${name}`, "");
+  for (const [path, contents] of procEntries(processInfo)) write(path, contents);
   try {
     mkdir(cwd);
   } catch {
     /* the working directory is best-effort, as in `Shell::create` */
   }
-  for (const name of volumeStubNames(commandNames)) {
-    try {
-      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
-      for (const dir of ["/bin", "/usr/bin"]) write(`${dir}/${name}`, content);
-    } catch {
-      /* stub writes are best-effort, as in `Shell::create` */
-    }
-  }
+  seedVolumeStubs(vfs, inst, commandNames);
 }
 
 /** Writes one registering command's stubs to a branded volume (best-effort). */
 function seedVolumeStubs(vfs, inst, names) {
-  for (const name of volumeStubNames(names)) {
+  for (const name of names) {
+    if (!isValidStub(name)) continue;
     try {
-      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+      const data = utf8(stubText(name));
       for (const dir of ["/bin", "/usr/bin"]) {
         inst.call(() => vfs.op({
           tag: "write-file",
-          val: { path: utf8(`${dir}/${name}`), data: utf8(content), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
+          val: { path: utf8(`${dir}/${name}`), data, offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
         }));
       }
     } catch {
@@ -240,66 +229,91 @@ export function createFacade(loader) {
       if (!isObject(options)) throw fail("options must be an object");
       for (const k of Object.keys(options)) if (!OPTION_NAMES.has(k)) throw fail(`unknown option ${k}`);
       const hooks = options[INTERNAL];
-      const profile = options.executionLimitProfile ?? DEFAULT_PROFILE;
+      // Single-read snapshot of every classified option: a hostile getter observes one read
+      // per property. Every later use reads `v`, never `options`, so the predicate classifies
+      // exactly the validated configuration (spec L2c 4.5).
+      const v = Object.create(null);
+      for (const k of OPTION_NAMES) v[k] = options[k];
+      const profile = v.executionLimitProfile ?? DEFAULT_PROFILE;
       if (!PROFILE_NAMES.includes(profile)) throw fail(`executionLimitProfile: unknown profile ${String(profile)}`);
-      if (options.cwd !== undefined && typeof options.cwd !== "string") throw fail("cwd must be a string");
-      const userEnv = options.env === undefined ? [] : stringRecord(options.env, "env");
-      if (options.files !== undefined && !isObject(options.files)) throw fail("files must be an object");
-      if (options.executionLimits !== undefined && !isObject(options.executionLimits)) throw fail("executionLimits must be an object");
-      const overrides = Object.assign(Object.create(null), options.executionLimits ?? {});
+      if (v.cwd !== undefined && typeof v.cwd !== "string") throw fail("cwd must be a string");
+      const userEnv = v.env === undefined ? [] : stringRecord(v.env, "env");
+      if (v.files !== undefined && !isObject(v.files)) throw fail("files must be an object");
+      if (v.executionLimits !== undefined && !isObject(v.executionLimits)) throw fail("executionLimits must be an object");
+      const overrides = Object.assign(Object.create(null), v.executionLimits ?? {});
       for (const alias of ["maxCallDepth", "maxCommandCount", "maxLoopIterations"]) {
-        if (options[alias] !== undefined) {
-          if (typeof options[alias] !== "number") throw fail(`${alias} must be a number`);
-          overrides[alias] = options[alias];
+        if (v[alias] !== undefined) {
+          if (typeof v[alias] !== "number") throw fail(`${alias} must be a number`);
+          overrides[alias] = v[alias];
         }
       }
       for (const [name, check] of [["fetch", "function"], ["sleep", "function"], ["trace", "function"]]) {
-        if (options[name] !== undefined && typeof options[name] !== check) throw fail(`${name} must be a function`);
+        if (v[name] !== undefined && typeof v[name] !== check) throw fail(`${name} must be a function`);
       }
-      if (options.network !== undefined && !isObject(options.network)) throw fail("network must be an object");
-      if (options.commands !== undefined && (!Array.isArray(options.commands) || options.commands.some((c) => typeof c !== "string"))) throw fail("commands must be an array of strings");
-      if (options.logger !== undefined && (!isObject(options.logger) || typeof options.logger.info !== "function" || typeof options.logger.debug !== "function")) throw fail("logger needs info and debug functions");
-      if (options.coverage !== undefined && (!isObject(options.coverage) || typeof options.coverage.hit !== "function")) throw fail("coverage needs a hit function");
-      if (options.processInfo !== undefined && !isObject(options.processInfo)) throw fail("processInfo must be an object");
-      if (options.customCommands !== undefined && !Array.isArray(options.customCommands)) throw fail("customCommands must be an array");
-      const customs = options.customCommands ?? [];
+      if (v.network !== undefined && !isObject(v.network)) throw fail("network must be an object");
+      if (v.commands !== undefined && (!Array.isArray(v.commands) || v.commands.some((c) => typeof c !== "string"))) throw fail("commands must be an array of strings");
+      if (v.logger !== undefined && (!isObject(v.logger) || typeof v.logger.info !== "function" || typeof v.logger.debug !== "function")) throw fail("logger needs info and debug functions");
+      if (v.coverage !== undefined && (!isObject(v.coverage) || typeof v.coverage.hit !== "function")) throw fail("coverage needs a hit function");
+      if (v.processInfo !== undefined && !isObject(v.processInfo)) throw fail("processInfo must be an object");
+      if (v.customCommands !== undefined && !Array.isArray(v.customCommands)) throw fail("customCommands must be an array");
+      const customs = v.customCommands ?? [];
       customs.forEach(checkCommand);
 
       // The filesystem and its instance. A branded volume is an `InMemoryFs` with
       // facade-private state; a prototype or a lookalike gives no synchronous
-      // kernel capability and stays on the host-adapter path.
-      const given = options.fs;
+      // kernel capability and stays on the host-adapter path. Every read below uses
+      // the single-read snapshot `v`, never `options`, so a hostile getter observes
+      // one read per property and the predicate classifies the validated config.
+      const given = v.fs;
       const branded = given instanceof InMemoryFs && fsState(given) ? given : null;
       const userFs = branded ? null : (given ?? null);
       if (given !== undefined && !isObject(given)) throw fail("fs must be an object");
       // Omitted/undefined means "separate"; any other value (including null) throws.
-      const isolation = options.isolation === undefined ? "separate" : options.isolation;
+      const isolation = v.isolation === undefined ? "separate" : v.isolation;
       if (isolation !== "separate" && isolation !== "shared") throw fail('isolation must be "separate" or "shared"');
       if (isolation === "shared" && given !== undefined && !branded) throw fail('isolation "shared" needs a kernel-backed InMemoryFs');
       const separate = branded && isolation === "separate";
       const volumeHolder = branded ? fsState(branded).holder : null;
       const effective = hooks?.ceilingBytes ?? Math.max(isolation === "shared" && volumeHolder ? volumeHolder.ceiling : 0, PROFILES[profile].ceiling);
       const limits = resolveLimits(profile, overrides, effective);
-      const hasFiles = options.files !== undefined;
-      const defaultLayout = !options.cwd && !options.files;
+      const hasFiles = v.files !== undefined;
+      const defaultLayout = !v.cwd && !v.files;
       const home = defaultLayout ? "/home/user" : "/";
-      const cwd = options.cwd || home;
+      const cwd = v.cwd || home;
       const initialCwd = resolvePath("/", cwd);
       const envEntries = initialEnvEntries(initialCwd, home, userEnv);
-      const commands = [...(options.commands ?? []), ...customs.map((c) => c.name)];
+      const commands = [...(v.commands ?? []), ...customs.map((c) => c.name)];
       const exported = new Set(["HOME", "PATH", "PWD", "OLDPWD", ...userEnv.map(([key]) => key)]);
       if (hasFiles && !branded) {
-        const paths = new Set(Object.keys(options.files).map((path) => resolvePath(initialCwd, path)));
+        const paths = new Set(Object.keys(v.files).map((path) => resolvePath(initialCwd, path)));
         const systemDirs = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
         const conflict = systemDirs.find((path) => paths.has(path));
         if (conflict) throw new Error("EEXIST: file already exists, mkdir '" + conflict + "'");
       }
       const headroom = PROFILES[profile].headroom;
-      const limit = stringLimit([...userEnv.flat(), ...commands, options.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
+      const limit = stringLimit([...userEnv.flat(), ...commands, v.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
         stringLimit([...envEntries.flat(), ...commands, initialCwd, ...Object.keys(overrides)], Infinity, headroom,
           envEntries.length * 20 + commands.length * 8 + Object.keys(overrides).length * 16);
       if (limit) throw new RangeError(`shell configuration: ${limit} exceeded`);
 
+      // Provenance and predicate for the Wasm-owned default snapshot (spec L2c 4.5-4.6): only
+      // the default binding with the package's own production loader core may restore, and only
+      // for a validated ordinary `contain` default. Any `fs`, explicit `isolation`, or host
+      // mount takes the ordinary path. Eligibility is decided before any heavy work; the
+      // restorable path defers the shellConfig encoding to the fallback.
+      const bindingRestore = loader.defaultBinding === true && loader.customized !== true;
+      const restorable = bindingRestore && given === undefined && userFs === null && !separate && !branded && isDefaultSnapshotConfig({
+        profile,
+        overridesEmpty: Object.keys(overrides).length === 0,
+        ceiling: effective,
+        // Only behavior-changing internal overrides disqualify; passive observers do not.
+        // The snapshot capture tool forces ordinary setup explicitly.
+        hasHooks: hooks !== undefined && (hooks.kernel !== undefined ||
+          hooks.moduleProvider !== undefined || hooks.ceilingBytes !== undefined ||
+          hooks.snapshotCapture === true),
+        present: Object.fromEntries(PREDICATE_OPTIONS.map((name) => [name, v[name] !== undefined])),
+        loggerPresent: v.logger !== undefined,
+      });
       // A supplied volume keeps its contents: `files` only affects the default
       // cwd/layout choice. A separate shell gets a fresh execution holder and a
       // local root mounted over the volume; a shared shell joins the volume's holder.
@@ -310,14 +324,14 @@ export function createFacade(loader) {
         volumeFs = branded;
         holder = new Holder(loader, hooks, hooks?.ceilingBytes ?? PROFILES[profile].ceiling);
         rootFs = new InMemoryFs(undefined, {
-          hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, holder,
+          hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, holder, deferVfs: false,
         });
       } else if (branded) {
         volumeFs = branded;
         holder = volumeHolder;
         rootFs = branded;
       } else {
-        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength });
+        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, deferVfs: restorable });
         holder = fsState(rootFs).holder;
       }
       if (hooks?.ceilingBytes === undefined && isolation === "shared") volumeHolder?.raiseCeiling(effective);
@@ -332,13 +346,13 @@ export function createFacade(loader) {
         headroom,
         profile,
         commands: new Map(),
-        commandNames: options.commands === undefined ? COMMAND_NAMES : COMMAND_NAMES.filter((name) => options.commands.includes(name)),
-        sleep: options.sleep,
-        fetch: options.fetch,
-        network: options.network,
-        trace: options.trace,
-        coverage: options.coverage,
-        logger: options.logger,
+        commandNames: v.commands === undefined ? COMMAND_NAMES : COMMAND_NAMES.filter((name) => v.commands.includes(name)),
+        sleep: v.sleep,
+        fetch: v.fetch,
+        network: v.network,
+        trace: v.trace,
+        coverage: v.coverage,
+        logger: v.logger,
         hooks,
         shell: null,
         initialEnv: nullObject(envEntries),
@@ -357,37 +371,62 @@ export function createFacade(loader) {
       };
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
-      if (hasFiles && !branded && userFs === null) addFiles(rootFs, options.files, B.initialCwd);
-      seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
-      // A host mount at `/` shadows the kernel volume: `options.files` belong
+      if (hasFiles && !branded && userFs === null) addFiles(rootFs, v.files, B.initialCwd);
+      seedHostLayout(userFs, defaultLayout, B.initialCwd, v.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
+      // A host mount at `/` shadows the kernel volume: `v.files` belong
       // in the host `fs`, never in the shadowed `rootFs`.
-      B.seeded = hasFiles && userFs !== null ? seedUserFiles(userFs, options.files, B.initialCwd) : null;
+      B.seeded = hasFiles && userFs !== null ? seedUserFiles(userFs, v.files, B.initialCwd) : null;
       for (const c of customs) this.#register(B, c, false);
-      const shellConfig = {
+      // The encoded shell configuration, built lazily from the single-read values: only the
+      // `0n` fallback of a restorable shell and the ordinary path pay this cost; the restore
+      // path discards it.
+      const buildShellConfig = () => ({
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
-        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
-        commands: options.commands?.slice(),
+        grants: { customCommands: true, realSleep: typeof v.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
+        commands: v.commands?.slice(),
         customCommands: [...B.commands.keys()],
-        env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: exported.has(n) })),
+        env: envEntries.map(([n, e]) => ({ name: utf8(n), value: utf8(e), exported: exported.has(n) })),
         cwd: utf8(B.initialCwd),
-        processInfo: options.processInfo ? { pid: options.processInfo.pid ?? 1, ppid: options.processInfo.ppid ?? 0, uid: options.processInfo.uid ?? 1000, gid: options.processInfo.gid ?? 1000 } : undefined,
+        processInfo: v.processInfo ? { pid: v.processInfo.pid ?? 1, ppid: v.processInfo.ppid ?? 0, uid: v.processInfo.uid ?? 1000, gid: v.processInfo.gid ?? 1000 } : undefined,
         defaultLayout,
-        trace: typeof options.trace === "function",
-        coverage: !!options.coverage,
-      };
+        trace: typeof v.trace === "function",
+        coverage: !!v.coverage,
+      });
       if (branded) {
         const st = fsState(branded);
         const layout = {
-          defaultLayout, cwd: B.initialCwd, processInfo: options.processInfo,
+          defaultLayout, cwd: B.initialCwd, processInfo: v.processInfo,
           commandNames: [...B.commandNames, ...customs.map((c) => c.name)],
         };
         st.holder.stage((volInst) => seedVolumeLayout(st.vfs, volInst, layout));
       }
-      B.holder.stage((inst) => {
-        const { vfs } = fsState(rootFs);
-        if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
-        B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
-      });
+      if (restorable) {
+        // One restore call replaces configure, Vfs.create and Shell.create. A `0n` refusal is
+        // a normal return and falls back to the ordinary setup in the same staged step.
+        // Restorable implies no branded volume, no separate store, and no host mount,
+        // so the fallback needs no volume layout and no mountHost.
+        const restoreFirst = (inst) => {
+          const restored = inst.util.restoreDefault?.();
+          if (restored) {
+            fsState(rootFs).vfs = restored.vfs;
+            B.shell = restored.shell;
+            return;
+          }
+          const shellConfig = buildShellConfig();
+          inst.call(() => inst.engine.configure(BigInt(effective)));
+          fsState(rootFs).vfs = inst.call(() => inst.engine.Vfs.create(BigInt(limits.maxFileSystemBytes)));
+          B.shell = inst.call(() => inst.engine.Shell.create(fsState(rootFs).vfs, shellConfig));
+        };
+        restoreFirst.restoreFirst = true;
+        B.holder.stage(restoreFirst);
+      } else {
+        const shellConfig = buildShellConfig();
+        B.holder.stage((inst) => {
+          const { vfs } = fsState(rootFs);
+          if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
+          B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
+        });
+      }
     }
 
     #register(B, c, stage) {

@@ -1,6 +1,6 @@
 import { concat, latin1FromBytes, utf8 } from "../core/bytes.js";
 import { dirname, resolvePath } from "../core/paths.js";
-import { checkedPath, errno, fsFailure, outside, rewriteError, special } from "./fs-errors.js";
+import { checkedPath, errno, fsFailure, outside, plainError, rewriteError, special } from "./fs-errors.js";
 import {
   HostPaths, absoluteVirtual, decodeContent, encodeContent, formatStat, inDirectory, listHost, readRegular, resolveVirtual,
 } from "./host-paths.js";
@@ -34,18 +34,10 @@ export class OverlayFs {
   constructor(options) {
     const given = options.mountPoint ?? "/home/user/project";
     const mount = given.startsWith("/") ? given.replace(/\/+$/, "") || "/" : given.replace(/\/+$/, "");
-    if (!mount.startsWith("/")) {
-      const error = new Error(`Mount point must be an absolute path: ${given}`);
-      error.stack = error.toString();
-      throw error;
-    }
+    if (!mount.startsWith("/")) throw plainError(`Mount point must be an absolute path: ${given}`);
     this.#mount = resolveVirtual("/", mount);
     this.#maxMemory = options.maxMemoryBytes ?? 1073741824;
-    if (!Number.isSafeInteger(this.#maxMemory) || this.#maxMemory < 0) {
-      const error = new Error("OverlayFs: invalid maxMemoryBytes");
-      error.stack = error.toString();
-      throw error;
-    }
+    if (!Number.isSafeInteger(this.#maxMemory) || this.#maxMemory < 0) throw plainError("OverlayFs: invalid maxMemoryBytes");
     this.#host = new HostPaths(options.root, "OverlayFs", !!options.allowSymlinks);
     this.#readOnly = !!options.readOnly;
     this.#maxRead = options.maxFileReadSize ?? 10485760;

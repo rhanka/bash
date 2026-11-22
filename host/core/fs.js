@@ -124,16 +124,23 @@ export function createInMemoryFs(loader) {
       const ceiling = hooks?.ceilingBytes ?? PROFILES[profile].ceiling;
       // A caller-provided holder co-locates this volume with an execution store
       // (L7c separate mode); otherwise the volume owns a fresh VFS-only store.
-      const holder = internal?.holder ?? new Holder(loader, hooks, ceiling);
+      // `deferVfs` (L2c restorable default) propagates to the holder so the first
+      // attach skips the eager `configure`; the restore-first staged function owns
+      // store creation instead.
+      const holder = internal?.holder ?? new Holder(loader, hooks, ceiling, { expectRestore: internal?.deferVfs === true });
       const st = {
         holder, vfs: null, lazy: new Set(), owner: internal?.owner ?? null,
         maxStringLength: internal?.maxStringLength ?? limits.maxStringLength,
         headroom: PROFILES[profile].headroom,
       };
       STATE.set(this, st);
-      holder.stage((inst) => {
-        st.vfs = inst.call(() => inst.engine.Vfs.create(BigInt(maxBytes)));
-      });
+      // A restorable shell defers volume creation to the restore-first staged function, which
+      // populates `st.vfs` from the restored handles (or from ordinary setup on refusal).
+      if (!internal?.deferVfs) {
+        holder.stage((inst) => {
+          st.vfs = inst.call(() => inst.engine.Vfs.create(BigInt(maxBytes)));
+        });
+      }
       if (initialFiles !== undefined) addFiles(this, initialFiles);
     }
 

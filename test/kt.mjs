@@ -2,7 +2,7 @@
 // options of the facade, and exposes recording helpers.
 import { readFileSync } from "node:fs";
 import { instantiate } from "../dist/test/js/kernel-test/kernel-test.js";
-import { Bash, InMemoryFs } from "@sentropic/bash";
+import { Bash, InMemoryFs } from "../host/index.js";
 
 export const INTERNAL = Symbol.for("@sentropic/bash.internal");
 export const module = new WebAssembly.Module(readFileSync(new URL("../dist/test/js/kernel-test/kernel-test.core.wasm", import.meta.url)));

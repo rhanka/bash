@@ -97,14 +97,25 @@ async function buildEngineBinding(name, component, jsDir) {
       mkdirSync(join(target, ".."), { recursive: true });
       copyFileSync(file, target);
     }
-    const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
-    writeFileSync(join(jsDir, name + ".js"),
-      "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
-      "export function instantiate(getCoreModule, _imports, instantiateCore, options) {\n" +
-      "  return instantiateEngine(getCoreModule, instantiateCore, options, " + JSON.stringify(coreName) + ");\n}\n");
+    stageEngineBinding(jsDir, name, name === "kernel");
     console.log(`ABI oracle ${name} jco-transpile ${JCO_VERSION} Option D: 14 guarded probes, core SHA-256 ${hash}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Stages the first-party engine adapter (and, for the kernel, the command list). */
+function stageEngineBinding(jsDir, name, withCommands) {
+  mkdirSync(jsDir, { recursive: true });
+  const coreName = name + ".core.wasm";
+  const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
+  writeFileSync(join(jsDir, name + ".js"),
+    "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
+    "export function instantiate(getCoreModule, _imports, instantiateCore, options) {\n" +
+    "  return instantiateEngine(getCoreModule, instantiateCore, options, " + JSON.stringify(coreName) + ");\n}\n");
+  if (withCommands) {
+    const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
+    writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");
   }
 }
 
@@ -139,21 +150,125 @@ async function main() {
   // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
   if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
   mkdirSync(join(out, "test"), { recursive: true });
+  const cores = {};
+  for (const c of names) {
+    cores[c] = buildCore(c, all[c]);
+  }
+  // The snapshot image is captured from the exact linked layout and registered as an internal
+  // export before final component embed/new (spec L2c section 4.7).
+  if (names.includes("kernel")) stageEngineBinding(join(out, "js", "kernel"), "kernel", true);
+  const { snapshotCore } = await import("./snapshot.mjs");
+  for (const c of names) {
+    if (all[c].snapshot) await snapshotCore(cores[c], c);
+  }
   for (const c of names) {
     const def = all[c];
-    const core = buildCore(c, def);
-    const comp = buildComponent(c, def, core);
+    const comp = buildComponent(c, def, cores[c]);
     const jsDir = join(outDirOf(def), "js", c);
     if (c === "kernel" || c === "kernel-test") await buildEngineBinding(c, comp, jsDir);
     else await transpileComponent(comp, jsDir);
-    if (c === "kernel") {
-      const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
-      writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");
-    }
-    report(core);
+    report(cores[c]);
     report(comp);
     for (const p of walk(jsDir)) report(p);
   }
+  if (names.includes("kernel")) {
+    const { bundlePackage } = await import("./bundle.mjs");
+    await bundleDefault(bundlePackage);
+    await stageJcoPackage(bundlePackage);
+  }
+}
+
+// Shared entry sources and their core-URL rewrites for the shipped layout.
+function entryInputs() {
+  return {
+    indexEntry: join(repoRoot, "host", "index.js"),
+    browserEntry: join(repoRoot, "host", "browser.js"),
+    loadEntry: join(repoRoot, "host", "node", "load.js"),
+  };
+}
+
+const CORE_URLS = {
+  browser: [["../dist/js/kernel/kernel.core.wasm", "./kernel/kernel.core.wasm"]],
+  load: [
+    ["../../dist/js/kernel/kernel.core.wasm", "../kernel/kernel.core.wasm"],
+    ["new URL(\"../..\", import.meta.url)", "new URL(\"../../..\", import.meta.url)"],
+  ],
+};
+
+/** Packs the default binding: one minified browser-safe chunk plus binding-specific entries. */
+async function bundleDefault(bundlePackage) {
+  const jsDir = join(out, "js");
+  const result = await bundlePackage({
+    ...entryInputs(),
+    outShared: join(jsDir, "shared.js"),
+    outIndex: join(jsDir, "index.js"),
+    outBrowser: join(jsDir, "browser.js"),
+    outLoad: join(jsDir, "node", "load.js"),
+    urls: { browser: CORE_URLS.browser, load: CORE_URLS.load },
+  });
+  for (const p of walk(jsDir, (f) => !f.endsWith(".wasm"))) report(p);
+  console.log(`bundle default: ${result.modules} modules in ${relative(repoRoot, result.shared)}`);
+}
+
+/** Stages the independently installable `@sentropic/bash-jco` package (Option D). */
+async function stageJcoPackage(bundlePackage) {
+  const pkg = join(repoRoot, "packages", "bash-jco");
+  const dist = join(pkg, "dist");
+  const jcoJs = join(dist, "js");
+  rmSync(dist, { recursive: true, force: true });
+  mkdirSync(join(jcoJs, "jco"), { recursive: true });
+  const oracle = join(out, "test", "js", "oracle", "kernel");
+  // The guarded Option D glue and its resource shims, byte for byte from the verified oracle.
+  mkdirSync(join(jcoJs, "kernel"), { recursive: true });
+  copyFileSync(join(oracle, "kernel.js"), join(jcoJs, "jco", "kernel.js"));
+  copyFileSync(join(oracle, "kernel.shims.js"), join(jcoJs, "jco", "kernel.shims.js"));
+  // The same component and loader core bytes as the default package.
+  copyFileSync(join(out, "js", "kernel", "kernel.core.wasm"), join(jcoJs, "kernel", "kernel.core.wasm"));
+  copyFileSync(join(out, "kernel.component.wasm"), join(dist, "kernel.component.wasm"));
+  // Declarations staged directly from the root types tree at pack time; no separately
+  // maintained .d.ts files.
+  mkdirSync(join(pkg, "types"), { recursive: true });
+  for (const f of ["index.d.ts", "browser.d.ts", "core.d.ts"]) {
+    copyFileSync(join(repoRoot, "types", f), join(pkg, "types", f));
+  }
+  mkdirSync(join(pkg, "wit"), { recursive: true });
+  copyFileSync(join(repoRoot, "wit", "sentropic-bash.wit"), join(pkg, "wit", "sentropic-bash.wit"));
+  for (const f of ["LICENSE", "DIVERGENCES.md"]) {
+    copyFileSync(join(repoRoot, f), join(pkg, f));
+  }
+  // The adapter path as written in host/core/instance.js, independent of --out.
+  const adapterFrom = join(repoRoot, "dist", "js", "kernel", "kernel.js");
+  const adapterTo = join(jcoJs, "jco", "jco-adapter.js");
+  writeFileSync(adapterTo,
+    "// Generated by tools/build.mjs: binds instance.js to the pinned guarded jco glue.\n" +
+    "import { instantiate as jcoInstantiate } from \"./kernel.js\";\n" +
+    "import { shims } from \"./kernel.shims.js\";\n" +
+    "export function instantiate(getCoreModule, imports, instantiateCore, options) {\n" +
+    "  return jcoInstantiate((path) => {\n" +
+    "    if (path in shims) return new WebAssembly.Module(shims[path]);\n" +
+    "    return getCoreModule(path);\n" +
+    "  }, imports, instantiateCore, options);\n}\n");
+  const result = await bundlePackage({
+    ...entryInputs(),
+    outShared: join(jcoJs, "shared.js"),
+    outIndex: join(jcoJs, "index.js"),
+    outBrowser: join(jcoJs, "browser.js"),
+    outLoad: join(jcoJs, "node", "load.js"),
+    alias: { from: adapterFrom, to: adapterTo },
+    externals: new Map([[adapterTo, "./jco/jco-adapter.js"]]),
+    urls: { browser: CORE_URLS.browser, load: CORE_URLS.load },
+  });
+  // The Option D loader never restores: drop the default-binding claim so the predicate
+  // cannot select the snapshot path even if the adapter ever exposed a restore entry.
+  for (const file of [join(jcoJs, "browser.js"), join(jcoJs, "node", "load.js")]) {
+    const { readFileSync: read, writeFileSync: write } = await import("node:fs");
+    const code = read(file, "utf8");
+    if (!code.includes("defaultBinding:!0")) throw new Error("jco loader lacks the defaultBinding claim to drop in " + file);
+    write(file, code.replaceAll("defaultBinding:!0", "defaultBinding:!1"));
+  }
+  for (const p of walk(dist)) report(p);
+  for (const p of walk(join(pkg, "types"))) report(p);
+  console.log(`bundle jco: ${result.modules} modules in ${relative(repoRoot, result.shared)}`);
 }
 
 function verifyBindings() {

@@ -85,11 +85,13 @@ export function stripComments(src) {
 }
 
 /** Returns { specifiers, nonLiteralDynamic }. Only a single or double quoted literal is a literal import(). */
-export function scanImports(raw) {
+export function scanImports(raw, { dynamic = true } = {}) {
   const src = stripComments(raw);
   const specifiers = [];
   for (const m of src.matchAll(STATIC_IMPORT)) specifiers.push(m[2]);
-  for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
+  if (dynamic) {
+    for (const m of src.matchAll(DYNAMIC_LITERAL)) specifiers.push(m[2]);
+  }
   const nonLiteralDynamic = [...src.matchAll(DYNAMIC_ANY)].length > [...src.matchAll(DYNAMIC_LITERAL)].length;
   return { specifiers, nonLiteralDynamic, src };
 }
@@ -128,10 +130,17 @@ export function g2NoBareImport(ctx) {
   const jsDirs = [jsDir, testJsDir];
   const typesDir = join(ctx.root, "types");
   const nodeDir = join(hostDir, "node") + sep;
+  // The packed tree mirrors host/node/ as <out>/js/node/ (the node loader and the L7b
+  // host adapters); node: builtins are legitimate in the mirror too.
+  const outNodeDir = join(jsDir, "node") + sep;
   const link = oddEntries(ctx, [hostDir, ...jsDirs, typesDir]);
   if (link) return link;
   // Scripts: every file of host/, dist/js/ and dist/test/js/. A relative specifier must reach a regular script file in them.
+  // The node loader keeps its deferred builtin lookup after packing (as dist/js/node/load.js),
+  // so the rule recognizes it by file name in any packaged tree.
+  const shippedLoader = sep + join("node", "load.js");
   function checkScript(f, inNodeDir) {
+    inNodeDir = inNodeDir || f.endsWith(shippedLoader);
     const rel = relative(ctx.root, f);
     const { specifiers, nonLiteralDynamic, src } = scanImports(readFileSync(f, "utf8"));
     if (nonLiteralDynamic) return `${rel}: import() with a non-literal argument`;
@@ -150,7 +159,7 @@ export function g2NoBareImport(ctx) {
     return null;
   }
   for (const f of [...jsDirs.flatMap((d) => walk(d, SCRIPT)), ...walk(hostDir, SCRIPT)]) {
-    const r = checkScript(f, f.startsWith(nodeDir));
+    const r = checkScript(f, f.startsWith(nodeDir) || f.startsWith(outNodeDir));
     if (r) return r;
   }
   // Declarations: the same specifier rules; a relative one must reach a declaration file inside types/.

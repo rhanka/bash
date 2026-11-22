@@ -1,6 +1,8 @@
 # Gate L2
 
-**No-go (kernel miss).** The shipping build exceeds the M1, M2, M3a, and M5 kernel budgets. Shipped JavaScript also exceeds the 60,000 B target. L2b owns the first-party glue. The build-lot pause under PLAN section 5 remains in effect.
+**Superseded (L2b baseline and L2c No-go, kept for history).** Earlier shipping builds exceeded kernel or JS budgets. L2b owns the first-party glue. The build-lot pause under PLAN section 5 remains in effect until the current verdict allows W4.
+
+The current verdict is the L2c fix5 rerun at the end of this report. Exactly one verdict is current.
 
 ## Revision and protocol
 
@@ -100,3 +102,538 @@ Recommend owner review of a Cargo-feature `slim` profile. The projected raw size
 - The 30 committed L2 oracle cases passed. Child-process regressions enforce bounded wall time for shared-prefix variable lookup and restoration, relative commands under a large cwd, long PATH and IFS processing, and pipeline abort and deadline handling. The stdin tests cover an oversized input following a live-byte failure and an oversized input with a blank script. The recursion diagnostic survived full and zero output budgets.
 - `harness check scope` passed C2.
 - Raw samples are in `tmp/bench-l2/committed/results.json` and `tmp/bench-l2/unminified/results.json`. The reference timings use the L2 specification. This lane replayed the committed oracle snapshots.
+
+## L2c rerun on the packed default release (superseded)
+
+**No-go (kernel miss, superseded).** The packed default release missed the M1 cold-start and M5 RSS kernel budgets. Superseded by the fix rerun below.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol against the installed packed default release (`@sentropic/bash` as packed, minified, installed offline), with the installed `@sentropic/bash-jco` package as the matching Option D control. `make check` is green (G1–G8, K1, native Rust tests, bindings regeneration) including the 30/30 L2 parity replay on the first-party binding and on each packed package, and `harness check scope` passes. Raw data: `tmp/bench-l2/committed/results.json`.
+
+### Revision and protocol (L2c)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `2db1506` plus the `tmp/`-creation fix (now `a8890d6`), `dirty = true` (uncommitted scratch outputs only; artifacts byte-identical to the committed tree) |
+| Loader Wasm SHA-256 | `35e3753f8070ccec72baa3a981eb7898adf426bb8ebc85312db147861138d96d` |
+| Component SHA-256 | `308ec3d7b2d6414fe30dd60c9e8cb94f9ee28b8a8a96bd611b3d0e55e5b34e0d` |
+| WIT | identical bytes in both packages (`wit/sentropic-bash.wit`) |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload. Cold excludes process launch and includes all lazy I/O and compilation. M5 is median full RSS minus median empty RSS per seed.
+
+### Snapshot invariants (L2c section 4 and 8)
+
+The default shell restores from a build-matched passive image via the private core export `__restore_default() -> i64` (invisible to the WIT). Capture ran through the first-party adapter with production lowering and allocation order (`configure(268435456)`, `Vfs.create(134217728)`, `contain` default shell), twice, byte-identical.
+
+- Stack pointer back at its initial value 1,048,576; the single mutable global is the stack pointer. No `table.set/grow/fill/copy/init` in the core. Quiescence held at capture: zero live borrows/fibers/pending host calls/deferred frees, `headroom().used() == 0`, reserve closed, `LOWERING == [None; 3]`.
+- Initial page count 17, final page count 19 (both within the 268,435,456 B cap). Changed ranges: 2,172, sorted, bounded, disjoint, including nonzero-to-zero words; image 4,564 B in one passive segment. No shipped JS pointer constants, `refs` array, memory image or pointer-bearing manifest.
+- Observed handles: Vfs id 1 and Shell id 2 (distinct, right kinds, claimed exactly once). Resource count 2; zero spare stores across two restores. Allocator usage at capture: used 8,202 B, high-water 8,847 B, ceiling 268,435,456 B.
+- Snapshot size delta: plain linked core 242,534 B raw to augmented 276,760 B raw (+34,226 B); shipped loader core 270,954 B raw / 97,765 B gzip.
+
+### Timing and memory (L2c)
+
+Median / p95 / minimum per metric; reference values from the L2 specification. The verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 26.304 / 32.077 / 23.846 | 37.689 / 44.412 / 35.477 | Miss |
+| M1 import (cold-full) | — | — | 12.709 / 16.156 / 11.671 | 15.896 / 19.679 / 14.488 | — |
+| M1 construction | — | — | 5.545 / 7.469 / 5.063 | 11.818 / 14.786 / 11.130 | — |
+| M1 first exec | — | — | 7.587 / 9.894 / 6.955 | 9.717 / 11.528 / 9.045 | — |
+| M1 import-only child | — | — | 13.098 / 15.284 / 11.400 | 15.720 / 17.640 / 14.595 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.19677 / 0.72126 / 0.14276 | 0.73575 / 1.72580 / 0.63312 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04964 / 0.08832 / 0.04695 | 0.07813 / 0.14947 / 0.07278 | Pass |
+| M3a warm sync exec | — | — | 0.04905 / 0.08597 / 0.04661 | 0.07710 / 0.15123 / 0.07221 | — |
+| M_host warm custom call | — | — | 0.11704 / 0.22689 / 0.10690 | 0.17511 / 0.39949 / 0.14567 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 10,696,704 | 5,468,160 | Miss |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 270,954 / 97,765 | 270,954 / 97,765 | Pass |
+
+Per-seed M1 medians: 26.304 / 26.508 / 26.178. Per-seed M2 medians: 0.25360 / 0.18101 / 0.19677. Per-seed M3a medians: 0.04928 / 0.04964 / 0.04975. Per-seed M5: 10,504,192 / 10,696,704 / 10,821,632.
+
+The restore fixed M2 (0.70 to 0.197 against the 0.20 budget) and M3a (0.078 to 0.050), and cut M1 from 50.36 to 26.30 and M5 from 12,875,776 to 10,696,704 B against the guarded L2 release. M1 still misses by 1.30 ms (compile-dominated import at 12.7 ms) and M5 by 696,704 B.
+
+### Package split and JS budgets (L2c section 5)
+
+Per-file raw/gzip bytes of the shipped JS (decimal). The default package alone carries the Annex H gate. Both candidate browser caps are reported (the owner choice is pending); the higher cap is not silently substituted.
+
+| Shipped JS file | Raw | Gzip (level 9) |
+|---|---:|---:|
+| `dist/js/shared.js` | 63,469 | 21,264 |
+| `dist/js/browser.js` | 1,692 | 796 |
+| `dist/js/index.js` | 1,031 | 443 |
+| `dist/js/node/load.js` | 739 | 429 |
+
+- B (browser-reachable: `browser.js` + `shared.js`) = 65,161 B. Against B <= 45,000: miss, headroom -20,161. Against B <= 58,000: miss, headroom -7,161.
+- N (remaining shipped JS) = 1,770 B against N <= 40,000: pass, headroom +38,230.
+- T (B + N) = 66,931 B against T <= 60,000: miss, headroom -6,931.
+- Z (per-file gzip sum) = 22,932 B against Z <= 30,000: pass, headroom +7,068.
+
+The Option D control carries no JS gate; for the record its split is B = 313,566 (guarded jco glue 272,057 B), N = 1,770, T = 315,336, Z = 60,443.
+
+The facades are deterministic minified ESM from one source graph (lockfile `oxc-minify`), factored into one browser-safe shared module per package with a binding-specific entry. `host/node/` keeps the synchronous deferred `process.getBuiltinModule` lookup after bundling; the browser entry and shared chunk have no transitive path to it. Declarations for both tarballs are staged directly from the root `types/**` tree; the companion keeps no separately maintained `.d.ts` files. Both packages install alone offline with empty dependencies and no install script, and each excludes the alternative binding. Pack manifests, G2/G5 on shipped paths, identical component/WIT/loader-core hashes and the local OCI payload input (the component bytes above; remote OCI verification stays at the release gate) are asserted by the pack tests. Real-browser timing stays with L19.
+
+### wasm-opt
+
+**Not measured.** Binaryen 132.0.0 is present only in the transpiler tool tree and is not pinned for offline core optimization, so `wasmOpt` stays `false` per the unapproved arm. `--variant wasm-opt` records this status. Optimization flags, size deltas and timing deltas are pending the owner pin; the build ships the verified no-opt release.
+
+### v1 size projection (L2c section 6, snapshot counted once)
+
+| Kernel contribution | Raw bytes | Gzip bytes |
+|---|---:|---:|
+| L2c loader core, measured | 270,954 | 97,765 |
+| L3–L6 language and VFS | 400,000 | 160,000 |
+| Tier-1 commands | 280,000 | 112,000 |
+| awk, sed and jq | 400,000 | 160,000 |
+| yq formats | 230,000 | 92,000 |
+| Archives and compression | 180,000 | 72,000 |
+| Projected v1 loader core | 1,760,954 | 693,765 |
+
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B; the projected gzip size fits 700,000 B.
+
+### Verification (L2c)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 332 passes and 9 existing TODOs (0 failures). The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package, and the L2b differential suite passes.
+- Gate logic and exit gates 1–4 are covered by `test/snapshot.test.mjs` (15 tests: predicate, equivalence, isolation, refusals, growth, disposal, trap, staged browser restore, precompile provenance, jco ordinary path, logger delivery, image shape) and `test/pack.test.mjs` (10 tests: manifests, offline install, ESM/CJS/browser, declarations, hashes, G2/G5, both replay totals, all profiles).
+- `harness check scope` passed C2; `harness check branch` passed C1.
+- Raw samples are in `tmp/bench-l2/committed/results.json` (default install and Option D control).
+
+## L2c fix rerun on the packed default release (current)
+
+**Go on kernel, owner review of the JS budget (JS-only miss).** All kernel thresholds pass; browser JS exceeds 45,000 B (and 58,000 B) and total JS exceeds 60,000 B. W4 can proceed. This is the exactly one current verdict.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control, after the PR #16 fix (TOCTOU single-read, ceiling, holder cleanup, coalesced snapshot, flattened bundle, lazy shellConfig, pooled codec, no-freeze descriptors) plus the fix-2 bundler cleanup (dead-code removal, keyword-regex hardening, flattener fixtures). `make check` is green (G1–G8, K1, Rust tests, bindings regen, 30/30 parity on both bindings and both packages). Raw data: `tmp/bench-l2/committed/results.json`.
+
+### Revision and protocol (fix)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `7576dc6` (bundler dead-code removal, keyword-regex hardening, flattener fixtures), `dirty = false` |
+| Loader Wasm SHA-256 | `d78254338163a0a496e3de2885d7e5af419e2e428d48710124eea7989234a3ec` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload.
+
+### Snapshot invariants (fix)
+
+- Stack pointer back at 1,048,576; single mutable global is the stack pointer. No table mutation. Quiescence held at capture.
+- Initial page count 17, final page count 19 (within 268,435,456 B). Changed ranges: 22, sorted, bounded, disjoint, including nonzero-to-zero words; image 15,477 B in one passive segment. No shipped JS pointer constants.
+- Observed handles: Vfs id 1 and Shell id 2 (distinct, right kinds, claimed once). Resource count 2; zero spare stores. Allocator usage: used 8,202 B, high-water 8,847 B, ceiling 268,435,456 B.
+- Snapshot size delta: shipped loader core 252,632 B raw / 88,621 B gzip (was 270,954 / 97,765; −18,322 B raw from 2,172 to 22 `memory.init` ops).
+
+### Timing and memory (fix)
+
+Median / p95 / minimum per metric; the verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 21.420 / 23.691 / 20.042 | 36.003 / 39.382 / 34.632 | Pass |
+| M1 import (cold-full) | — | — | 10.434 / 12.862 / 9.757 | 15.099 / 17.239 / 14.360 | — |
+| M1 construction | — | — | 3.505 / 4.389 / 3.272 | 11.598 / 13.040 / 11.126 | — |
+| M1 first exec | — | — | 7.309 / 9.780 / 7.002 | 9.331 / 10.651 / 9.043 | — |
+| M1 import-only child | — | — | 10.522 / 13.384 / 9.895 | 15.103 / 17.024 / 14.162 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12117 / 0.58085 / 0.09869 | 0.70611 / 1.65063 / 0.61981 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04628 / 0.07336 / 0.04372 | 0.07643 / 0.15763 / 0.07228 | Pass |
+| M3a warm sync exec | — | — | 0.04447 / 0.06943 / 0.04228 | 0.07704 / 0.14975 / 0.07229 | — |
+| M_host warm custom call | — | — | 0.10968 / 0.19502 / 0.10174 | 0.17174 / 0.37244 / 0.14530 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 4,200,448 | 5,654,528 | Pass |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 252,632 / 88,621 | 252,632 / 88,621 | Pass |
+
+Per-seed M1 medians: 21.280 / 21.420 / 22.203. Per-seed M2 medians: 0.12413 / 0.11452 / 0.12117. Per-seed M3a medians: 0.04628 / 0.04630 / 0.04558. Per-seed M5: 4,153,344 / 4,200,448 / 4,347,904.
+
+### Package split and JS budgets (fix)
+
+| Shipped JS file | Raw | Gzip (level 9) |
+|---|---:|---|
+| `dist/js/shared.js` | 61,210 | 20,440 |
+| `dist/js/browser.js` | 1,692 | 796 |
+| `dist/js/index.js` | 1,031 | 443 |
+| `dist/js/node/load.js` | 739 | 429 |
+
+- B (browser-reachable: `browser.js` + `shared.js`) = 62,902 B. Against B <= 45,000: miss, headroom −17,902. Against B <= 58,000: miss, headroom −4,902.
+- N (remaining shipped JS) = 1,770 B against N <= 40,000: pass, headroom +38,230.
+- T (B + N) = 64,672 B against T <= 60,000: miss, headroom −4,672.
+- Z (per-file gzip sum) = 22,108 B against Z <= 30,000: pass, headroom +7,892.
+
+The Option D control carries no JS gate; for the record its split is B = 311,691, N = 1,770, T = 313,461, Z = 59,773.
+
+### wasm-opt
+
+**Not measured.** Binaryen 132.0.0 is present only in the transpiler tool tree and is not pinned for offline core optimization, so `wasmOpt` stays `false` per the unapproved arm.
+
+### v1 size projection (fix, snapshot counted once)
+
+| Kernel contribution | Raw bytes | Gzip bytes |
+|---|---|---:|
+| L2c fix loader core, measured | 252,632 | 88,621 |
+| L3–L6 language and VFS | 400,000 | 160,000 |
+| Tier-1 commands | 280,000 | 112,000 |
+| awk, sed and jq | 400,000 | 160,000 |
+| yq formats | 230,000 | 92,000 |
+| Archives and compression | 180,000 | 72,000 |
+| Projected v1 loader core | 1,742,632 | 684,621 |
+
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B; the projected gzip size fits 700,000 B.
+
+### Verification (fix)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 345 passes and 9 existing TODOs (0 failures). The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package.
+- Exit gates 1–4 now covered by `test/snapshot.test.mjs` (20 tests: prior 15 plus single-read predicate, hostile-grant ordinary setup, ceiling liftBudget, holder failure cleanup, coalesced image) and `test/pack.test.mjs` (10 tests). The flattener is covered by `test/bundle-flatten.test.mjs` (6 collision-fixture tests: top-level rename, nested shadow, member/shorthand, keyword regex, string/comment/template immunity, slash class).
+- Raw samples are in `tmp/bench-l2/committed/results.json` (default install and Option D control).
+
+## L2c fix3 rerun on the packed default release (superseded)
+
+**Go on all thresholds.** All kernel thresholds pass and all JS budgets pass against the provisional browser cap B <= 58,000 B decided by the owner on 21/11. W4 can start. This was the current verdict until the restack rerun below.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control, after the fix3 precompile (flat numeric/op ABI tables generated at build time from the WIT by `tools/abi-descriptors.mjs --emit`; the runtime WIT AST and layout compiler are dropped from shipped JS; G5-clean with no base64). `make check` is green (G1–G8, K1, Rust tests, bindings regen, 30/30 parity on both bindings and both packages). Raw data: `tmp/bench-l2/committed/results.json`.
+
+### Revision and protocol (fix3)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `4fd6882d1233`, `dirty = true` (worktree fix3 changes; artifacts byte-identical to the committed tree) |
+| Loader Wasm SHA-256 | `d78254338163a0a496e3de2885d7e5af419e2e428d48710124eea7989234a3ec` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload.
+
+### Snapshot invariants (fix3)
+
+- Stack pointer back at 1,048,576; single mutable global is the stack pointer. No table mutation. Quiescence held at capture.
+- Initial page count 17, final page count 19 (within 268,435,456 B). Changed ranges: 22, sorted, bounded, disjoint, including nonzero-to-zero words; image 15,477 B in one passive segment. No shipped JS pointer constants.
+- Observed handles: Vfs id 1 and Shell id 2 (distinct, right kinds, claimed once). Resource count 2; zero spare stores. Allocator usage: used 8,202 B, high-water 8,847 B, ceiling 268,435,456 B.
+- Shipped loader core 252,632 B raw / 88,621 B gzip (unchanged; the saving is JS-only).
+
+### Timing and memory (fix3)
+
+Median / p95 / minimum per metric; the verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 20.937 / 24.155 / 19.878 | 36.367 / 42.538 / 34.620 | Pass |
+| M1 import (cold-full) | — | — | 9.801 / 12.536 / 9.265 | 14.893 / 17.199 / 14.048 | — |
+| M1 construction | — | — | 3.562 / 4.491 / 3.308 | 11.602 / 13.018 / 11.128 | — |
+| M1 first exec | — | — | 7.395 / 9.693 / 7.027 | 9.616 / 11.044 / 9.223 | — |
+| M1 import-only child | — | — | 9.692 / 12.654 / 9.120 | 15.003 / 17.668 / 14.272 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12071 / 0.57795 / 0.09860 | 0.72266 / 1.65705 / 0.62602 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04576 / 0.07440 / 0.04365 | 0.07653 / 0.15056 / 0.07212 | Pass |
+| M3a warm sync exec | — | — | 0.04519 / 0.07377 / 0.04301 | 0.07627 / 0.15137 / 0.07146 | — |
+| M_host warm custom call | — | — | 0.10836 / 0.20397 / 0.10069 | 0.17523 / 0.38733 / 0.14441 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 4,102,144 | 5,431,296 | Pass |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 252,632 / 88,621 | 252,632 / 88,621 | Pass |
+
+Per-seed M1 medians: 20.937 / 21.133 / 20.737. Per-seed M2 medians: 0.11579 / 0.12071 / 0.12224. Per-seed M3a medians: 0.04576 / 0.04554 / 0.04666. Per-seed M5: 4,102,144 / 3,981,312 / 4,153,344.
+
+### Package split and JS budgets (fix3)
+
+| Shipped JS file | Raw | Gzip (level 9) |
+|---|---:|---:|
+| `dist/js/shared.js` | 56,214 | 20,348 |
+| `dist/js/browser.js` | 1,692 | 796 |
+| `dist/js/index.js` | 1,031 | 443 |
+| `dist/js/node/load.js` | 739 | 429 |
+
+- B (browser-reachable: `browser.js` + `shared.js`) = 57,906 B. Against the provisional B <= 58,000 (owner 21/11): pass, headroom +94.
+- N (remaining shipped JS) = 1,770 B against N <= 40,000: pass, headroom +38,230.
+- T (B + N) = 59,676 B against T <= 60,000: pass, headroom +324.
+- Z (per-file gzip sum) = 22,016 B against Z <= 30,000: pass, headroom +7,984.
+
+The Option D control carries no JS gate; for the record its split is B = 311,691, N = 1,770, T = 313,461, Z = 59,773.
+
+### wasm-opt
+
+**Not measured.** Binaryen 132.0.0 is present only in the transpiler tool tree and is not pinned for offline core optimization, so `wasmOpt` stays `false` per the unapproved arm.
+
+### v1 size projection (fix3, snapshot counted once)
+
+| Kernel contribution | Raw bytes | Gzip bytes |
+|---|---|---:|
+| L2c fix3 loader core, measured | 252,632 | 88,621 |
+| L3–L6 language and VFS | 400,000 | 160,000 |
+| Tier-1 commands | 280,000 | 112,000 |
+| awk, sed and jq | 400,000 | 160,000 |
+| yq formats | 230,000 | 92,000 |
+| Archives and compression | 180,000 | 72,000 |
+| Projected v1 loader core | 1,742,632 | 684,621 |
+
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B; the projected gzip size fits 700,000 B.
+
+### Verification (fix3)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 345 passes and 9 existing TODOs (0 failures). The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package, and the L2b differential suite passes 3/3 (plus the large-read case).
+- Gate logic enforces the provisional B <= 58,000 B cap decided by the owner on 21/11 (`tools/measure-l2.mjs` and `test/measure-l2.test.mjs`); the drift suite pins both `descriptors.js` and `tables.js` to the WIT (`test/abi/drift.test.mjs`).
+- Raw samples were in `tmp/bench-l2/committed/results.json` (default install and Option D control), overwritten by the restack rerun below.
+
+## L2c restack rerun on the rebased tree (superseded)
+
+**No-go (kernel miss on M1/M5 plus JS-only miss on B/T/Z, superseded).** Rebasing onto `origin/main` pulls the L7b/L7c host code into the shipped graph: the shared chunk grows with the fs-batch driver paths and the larger facade, and the packed default now ships the four mirrored node adapters. Cold import (+27 ms) and first-exec RSS (+8.9 MB) miss M1/M5; browser JS, total JS and gzip miss B/T/Z. M2/M3a/M6-wasm and every kernel size threshold still pass, and the restore path still wins (default construction 4.3 ms vs 11.8 ms on the Option D control). Superseded by the fix4 rerun below.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control, on the rebased tree with the restack fixes. `make check` is green (G1–G8, K1, Rust tests, 420 Node passes with 0 failures, 30/30 parity on both bindings and both installed packages). Raw data: `tmp/bench-l2/committed/results.json` (overwrites the fix3 raw data).
+
+### Revision and protocol (restack)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060s |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `67ab9930695e758822830efef7632cf26945ed49`, `dirty = true` (uncommitted restack resolutions and rebase fixes) |
+| Loader Wasm SHA-256 | `ebe2033e7b51e6dcb00e01519c25b158a9275c180cd669bdb987e243be2567cc` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload.
+
+### Snapshot invariants (restack)
+
+- Stack pointer back at 1,048,576; single mutable global is the stack pointer. No table mutation. Quiescence held at capture.
+- Initial page count 17, final page count 19 (within 268,435,456 B). Changed ranges: 22, sorted, bounded, disjoint, including nonzero-to-zero words; image 15,510 B in one passive segment. No shipped JS pointer constants.
+- Observed handles: Vfs id 1 and Shell id 2 (distinct, right kinds, claimed once). Resource count 2; zero spare stores. Allocator usage: used 8,226 B, high-water 8,871 B, ceiling 268,435,456 B.
+- Shipped loader core 263,883 B raw / 92,193 B gzip (up from fix3: the L7c kernel stores and checks add ~11 KB raw).
+
+### Timing and memory (restack)
+
+Median / p95 / minimum per metric; the verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---:|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 49.061 / 54.142 / 45.530 | 64.542 / 70.499 / 59.514 | Miss |
+| M1 import (cold-full) | — | — | 36.738 / 40.557 / 34.122 | 42.280 / 47.784 / 39.021 | — |
+| M1 construction | — | — | 4.297 / 5.319 / 3.903 | 11.833 / 14.975 / 11.230 | — |
+| M1 first exec | — | — | 7.580 / 9.398 / 7.235 | 9.565 / 11.513 / 8.995 | — |
+| M1 import-only child | — | — | 36.544 / 43.058 / 34.340 | 41.857 / 46.389 / 39.466 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12921 / 0.60489 / 0.10527 | 0.73077 / 2.01802 / 0.63877 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04564 / 0.07789 / 0.04342 | 0.07755 / 0.15342 / 0.07291 | Pass |
+| M3a warm sync exec | — | — | 0.04525 / 0.07589 / 0.04317 | 0.07898 / 0.15414 / 0.07155 | — |
+| M_host warm custom call | — | — | 0.11025 / 0.21369 / 0.10141 | 0.17248 / 0.42831 / 0.14516 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 13,017,088 | 14,534,656 | Miss |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 263,883 / 92,193 | 263,883 / 92,193 | Pass |
+
+Per-seed M1 medians: 47.009 / 49.061 / 50.762. Per-seed M2 medians: 0.13097 / 0.12921 / 0.12722. Per-seed M3a medians: 0.04599 / 0.04514 / 0.04564. Per-seed M5: 13264896 / 12623872 / 13017088.
+
+### Package split and JS budgets (restack)
+
+| Shipped JS file | Raw | Gzip (level 9) |
+|---|---:|---:|
+| `dist/js/shared.js` | 67,313 | 23,886 |
+| `dist/js/browser.js` | 1,692 | 796 |
+| `dist/js/index.js` | 1,124 | 478 |
+| `dist/js/node/load.js` | 739 | 429 |
+| `dist/js/node/fs-errors.js` | 1,257 | 667 |
+| `dist/js/node/host-paths.js` | 5,914 | 2,495 |
+| `dist/js/node/overlay-fs.js` | 10,360 | 3,907 |
+| `dist/js/node/read-write-fs.js` | 10,146 | 3,686 |
+
+- B (browser-reachable: `browser.js` + `shared.js`) = 69,005. Against B <= 45,000: miss, headroom −24,005. Against the provisional B <= 58,000 (owner 21/11): miss, headroom −11,005. The L7b/L7c host modules in the browser closure add 11,099 B to `shared.js` over fix3.
+- N (remaining shipped JS) = 29,540 against N <= 40,000: pass, headroom +10,460. The four mirrored node adapters add 27,677 B over fix3.
+- T (B + N) = 98,545 against T <= 60,000: miss, headroom −38,545.
+- Z (per-file gzip sum) = 36,344 against Z <= 30,000: miss, headroom −6,344.
+
+The Option D control carries no JS gate; for the record its split is B = 322,852, N = 29,540, T = 352,392, Z = 73,947.
+
+### wasm-opt
+
+**Not measured.** Binaryen 132.0.0 is present only in the transpiler tool tree and is not pinned for offline core optimization, so `wasmOpt` stays `false` per the unapproved arm.
+
+### v1 size projection (restack, snapshot counted once)
+
+| Kernel contribution | Raw bytes | Gzip bytes |
+|---|---|---:|
+| L2c restack loader core, measured | 263,883 | 92,193 |
+| L3–L6 language and VFS | 400,000 | 160,000 |
+| Tier-1 commands | 280,000 | 112,000 |
+| awk, sed and jq | 400,000 | 160,000 |
+| yq formats | 230,000 | 92,000 |
+| Archives and compression | 180,000 | 72,000 |
+| Projected v1 loader core | 1,753,883 | 688,193 |
+
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B; the projected gzip size fits 700,000 B.
+
+### Verification (restack)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 420 passes and 0 failures. The L2 parity replay passes 30/30 on the first-party binding, the guarded jco binding, and each installed package. All four limit profiles pass on each installed package, and the L7b/L7c suites pass in full.
+- Gate logic enforces the provisional B <= 58,000 B cap decided by the owner on 21/11 (`tools/measure-l2.mjs` and `test/measure-l2.test.mjs`); the drift suite pins both `descriptors.js` and `tables.js` to the WIT (`test/abi/drift.test.mjs`).
+- Raw samples were in `tmp/bench-l2/committed/results.json` (default install and Option D control), overwritten by the fix4 rerun below.
+
+## L2c fix4 rerun on the cold-path fix (superseded)
+
+**Go on kernel, owner review of the JS budget (JS-only miss on T/Z; B and N pass, superseded).** Making Node built-ins (`node:fs`, `node:path`, `node:crypto`, `node:util`) lazy via `process.getBuiltinModule`, moving extension/membrane/fs-batch machinery into the lazy `dist/js/core/ext.js` chunk (`import("./ext.js")`), flattening the Node adapters into `dist/js/node/adapters.js`, and deduplicating layout seeding in `facade.js` restores all kernel thresholds (`M1` 23.236 ms <= 25.0, `M5` 4,231,168 B <= 10,000,000) and brings both `B` (57,627 B <= 58,000 B) and `N` (39,835 B <= 40,000 B) under their caps. Total raw JS `T` = `B + N` = 97,462 B exceeds the pre-L7b 60,000 B cap (inconsistent with `B <= 58 KB` + `N <= 40 KB`), and `Z` = 35,382 B exceeds 30,000 B due to L7b/L7c adapters and `ext.js`. Superseded by the fix5 rerun below.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol on the installed packed default release with the installed `@sentropic/bash-jco` control. Raw data: `tmp/bench-l2/committed/results.json`.
+
+### Revision and protocol (fix4)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `149ca32f5d3fba880237420f81979327f3ab894a`, `dirty = true` (worktree fix4 changes) |
+| Loader Wasm SHA-256 | `ebe2033e7b51e6dcb00e01519c25b158a9275c180cd669bdb987e243be2567cc` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled rounds per seed, 20 discarded warmups, then at least 1,000 samples and 2,000 ms per warm workload.
+
+### Timing and memory (fix4)
+
+Median / p95 / minimum per metric; the verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 23.236 / 29.303 / 22.071 | 39.307 / 44.725 / 36.864 | Pass |
+| M1 import (cold-full) | — | — | 11.448 / 14.740 / 10.867 | 16.830 / 20.248 / 15.823 | — |
+| M1 construction | — | — | 4.118 / 5.600 / 3.861 | 11.964 / 15.216 / 11.495 | — |
+| M1 first exec | — | — | 7.614 / 9.138 / 7.162 | 9.681 / 12.207 / 9.275 | — |
+| M1 import-only child | — | — | 11.629 / 13.430 / 10.697 | 17.007 / 20.854 / 15.922 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12902 / 0.60737 / 0.10474 | 0.75272 / 1.90277 / 0.63649 | Pass |
+| M3a warm async exec | 0.35 | 0.07 | 0.04598 / 0.08159 / 0.04372 | 0.07969 / 0.16787 / 0.07396 | Pass |
+| M3a warm sync exec | — | — | 0.04544 / 0.07759 / 0.04315 | 0.07905 / 0.15831 / 0.07283 | — |
+| M_host warm custom call | — | — | 0.12156 / 0.24540 / 0.10820 | 0.20378 / 0.44887 / 0.15342 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 4,231,168 | 5,781,504 | Pass |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 263,883 / 92,193 | 263,883 / 92,193 | Pass |
+
+Per-seed M1 medians: 22.514 / 24.815 / 23.236. Per-seed M2 medians: 0.12792 / 0.13016 / 0.12902. Per-seed M3a medians: 0.04598 / 0.04564 / 0.04601. Per-seed M5: 4231168 / 4159488 / 4634624.
+
+### Package split and JS budgets (fix4)
+
+| Shipped JS file | Raw | Gzip (level 9) |
+|---|---:|---:|
+| `dist/js/shared.js` | 55,935 | 20,253 |
+| `dist/js/browser.js` | 1,692 | 796 |
+| `dist/js/index.js` | 1,117 | 471 |
+| `dist/js/node/load.js` | 739 | 429 |
+| `dist/js/node/adapters.js` | 26,754 | 8,807 |
+| `dist/js/core/ext.js` | 11,225 | 4,626 |
+
+- B (browser-reachable: `browser.js` + `shared.js`) = 57,627 B. Against B <= 45,000: miss, headroom −12,627. Against the provisional B <= 58,000 (owner 21/11): pass, headroom +373.
+- N (remaining shipped JS: `index.js` + `node/load.js` + `node/adapters.js` + `core/ext.js`) = 39,835 B against N <= 40,000: pass, headroom +165.
+- T (B + N) = 97,462 B against T <= 60,000: miss, headroom −37,462 (inconsistent with B <= 58,000 + N <= 40,000; taken to owner without cutting functionality).
+- Z (per-file gzip sum) = 35,382 B against Z <= 30,000: miss, headroom −5,382.
+
+The Option D control carries no JS gate; for the record its split is B = 311,472, N = 39,835, T = 351,307, Z = 73,160.
+
+### Verification (fix4)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, 30/30 parity on both bindings and both installed packages, all four limit profiles, L7b/L7c suites, and cold-path non-loading assertions.
+- `harness check scope` passed C2.
+- Raw samples are in `tmp/bench-l2/committed/results.json` (default install and Option D control).
+
+## L2c fix5 rerun with lazy-chunk classification and 22/11 JS budgets (current)
+
+**Go on all thresholds.** All kernel thresholds pass (`M1` 22.908 ms <= 25.0, `M2` 0.12338 ms <= 0.20, `M3a` 0.04550 ms <= 0.070, `M5` 4,354,048 B <= 10,000,000, `M6-wasm` 263,883 B raw / 92,193 B gzip) and all five JS budgets settled by the owner on 22/11 pass (`B_cold` 57,627 <= 58,000 B, `Z_cold` 21,949 <= 30,000 B, `B_total` 68,852 <= 75,000 B, `Z_total` 35,382 <= 50,000 B, `T` 97,462 <= 110,000 B). `measure-l2.mjs` now classifies dynamic literal `import()` chunks (`dist/js/core/ext.js`) in the browser graph (`B_total`) and adds the warm paired `new Bash()` + first verified async echo diagnostic (`M_paired`). W4 (L3 and L8a) can start. This is the exactly one current verdict.
+
+`node tools/measure-l2.mjs --variant committed` ran the full Gate L2 protocol against the installed packed default release and the installed `@sentropic/bash-jco` control built from the final worktree state. Raw data: `tmp/bench-l2/committed/results.json`.
+
+### Revision and protocol (fix5)
+
+| Field | Measured value |
+|---|---|
+| OS kernel | Linux 7.0.0-43-generic |
+| CPU | AMD RYZEN AI MAX+ 395 w/ Radeon 8060S |
+| Node | v22.22.1 |
+| Rust | rustc 1.96.0 (ac68faa20 2026-05-25) |
+| wasm-tools | wasm-tools 1.263.0 (7a2fa422c 2026-10-30) |
+| Binaryen | 132.0.0 in the transpiler tool tree, unpinned for core optimization |
+| Git | `7185f8adc57bc5f0a0311db699b815007a89ad3b` plus the worktree fix5 changes, `dirty = true` (lane mechanics forbid `git add`/`git commit`; artifacts built from the final worktree state) |
+| Loader Wasm SHA-256 | `ebe2033e7b51e6dcb00e01519c25b158a9275c180cd669bdb987e243be2567cc` |
+| Component SHA-256 | `ccb8e8e613fffd3ee510c2bc91f409c6b8475fd86a1a478e17f8adb834c8dc68` |
+| Child environment | `LC_ALL=C`, `TZ=UTC`, worktree-local `TMPDIR` and npm cache, offline npm |
+
+Same seeds (`0x6c320001`, `0x6c320002`, `0x6c320003`), 30 shuffled cold rounds per seed. Warm workloads (`M2`, `M_paired`, `M3a`, `M3aSync`, `M_host`) run in shuffled order per seed inside independent child processes with 20 discarded warmups, one `globalThis.gc()` + `setImmediate` yield for queued finalizers, then at least 1,000 samples over at least 2,000 ms under normal GC (no constructor retention).
+
+### Snapshot invariants (fix5)
+
+- Stack pointer back at 1,048,576; the single mutable global is the stack pointer. No `table.set/grow/fill/copy/init` or `elem.drop` in the core. Quiescence held at capture (`__snapshot_probe() == 7n`, zero live borrows/fibers/pending host calls/deferred frees).
+- Initial page count 17, final page count 19 (both within 268,435,456 B). Changed ranges: 22, sorted, bounded, disjoint, including nonzero-to-zero words; image 15,510 B in one passive segment. No shipped JS pointer constants.
+- Observed handles: Vfs (`rep = 1181232`) and Shell (`rep = 1184928`), distinct, right kinds, host-owned, resource count 2, zero spare stores. Allocator usage at capture: used 8,226 B, high-water 8,871 B, ceiling 268,435,456 B.
+- Shipped loader core 263,883 B raw / 92,193 B gzip (augmented linked core `dist/kernel.core.wasm` 269,689 B raw; component `dist/kernel.component.wasm` 294,144 B raw / 100,209 B gzip).
+
+### Timing and memory (fix5)
+
+Median / p95 / minimum per metric in milliseconds (bytes for M5 and M6-wasm); the verdict compares unrounded median-of-run medians against the inclusive kernel thresholds.
+
+| Metric | just-bash 3.6.0 | Target | Default (restore) | Option D control | Result |
+|---|---:|---:|---:|---:|---|
+| M1 cold total | 118.8 | 25.0 (15.0 stretch) | 22.908 / 25.884 / 21.580 | 39.786 / 43.546 / 36.967 | Pass |
+| M1 import (cold-full) | — | — | 11.138 / 13.067 / 10.583 | 17.035 / 19.118 / 15.932 | — |
+| M1 construction | — | — | 4.154 / 5.028 / 3.857 | 12.203 / 14.775 / 11.290 | — |
+| M1 first exec | — | — | 7.373 / 8.119 / 7.108 | 9.904 / 11.472 / 9.174 | — |
+| M1 import-only child | — | — | 11.139 / 13.164 / 10.469 | 17.328 / 20.189 / 15.906 | — |
+| M2 warm construction | 0.37 | 0.20 | 0.12338 / 0.53257 / 0.10258 | 0.74690 / 1.80869 / 0.63025 | Pass |
+| M_paired warm new+exec (diagnostic) | — | — | 0.26236 / 0.83187 / 0.19252 | 1.06630 / 2.40059 / 0.92673 | — |
+| M3a warm async exec | 0.35 | 0.07 | 0.04550 / 0.07270 / 0.04337 | 0.07907 / 0.17583 / 0.07333 | Pass |
+| M3a warm sync exec | — | — | 0.04535 / 0.07042 / 0.04328 | 0.07750 / 0.15277 / 0.07257 | — |
+| M_host warm custom call | — | — | 0.11907 / 0.22573 / 0.10790 | 0.21197 / 0.45560 / 0.15371 | — |
+| M5 RSS delta, B | 35,500,000 | 10,000,000 | 4,354,048 | 5,877,760 | Pass |
+| M6-wasm loader core | — | 1,500,000 raw and 700,000 gzip | 263,883 / 92,193 | 263,883 / 92,193 | Pass |
+
+Per-seed M1 medians (n = 30): 22.908 / 22.683 / 23.224. Per-seed M2 medians (n = 10,594 / 9,918 / 10,837): 0.12338 / 0.12869 / 0.12092. Per-seed M_paired medians (n = 5,621 / 6,074 / 5,615): 0.26236 / 0.24676 / 0.26446 (includes deferred cleanup/GC of each fresh shell). Per-seed M3a medians (n = 38,995 / 41,028 / 38,762): 0.04550 / 0.04487 / 0.04601. Per-seed M5: 4,323,328 / 4,659,200 / 4,354,048.
+
+### Package split and JS budgets (fix5, 22/11 owner decision)
+
+| Shipped JS file | Raw | Gzip (level 9) | Group |
+|---|---:|---:|---|
+| `dist/js/shared.js` | 55,935 | 20,253 | Cold path + browser static |
+| `dist/js/browser.js` | 1,692 | 796 | Cold path + browser static |
+| `dist/js/index.js` | 1,117 | 471 | Cold path (Node-only) |
+| `dist/js/node/load.js` | 739 | 429 | Cold path (Node-only) |
+| `dist/js/core/ext.js` | 11,225 | 4,626 | Browser lazy (`import("./core/ext.js")`) |
+| `dist/js/node/adapters.js` | 26,754 | 8,807 | Node-only adapters |
+
+| JS gate (22/11 owner decision) | Scope | Measured | Budget | Headroom | Result |
+|---|---|---:|---:|---:|---|
+| `B_cold` | Browser static closure (`browser.js` + `shared.js`) | 57,627 | <= 58,000 | +373 | Pass |
+| `Z_cold` | Cold-path gzip (`browser.js` + `shared.js` + `index.js` + `node/load.js`) | 21,949 | <= 30,000 | +8,051 | Pass |
+| `B_total` | Browser including lazy chunks (`B_cold` + `core/ext.js`) | 68,852 | <= 75,000 | +6,148 | Pass |
+| `Z_total` | All shipped JS gzip (`Z_cold` + `core/ext.js` + `node/adapters.js`) | 35,382 | <= 50,000 | +14,618 | Pass |
+| `T` | Total raw shipped JS (`B_total` + `N`) | 97,462 | <= 110,000 | +12,538 | Pass |
+
+Remaining Node-only shipped JS `N` (`index.js` + `node/load.js` + `node/adapters.js`) = 28,610 B (`B_total + N = 68,852 + 28,610 = 97,462 = T`).
+
+The Option D control carries no JS gate; for the record its split is `B_cold` = 311,472, `Z_cold` = 59,727, `B_total` = 322,697, `N` = 28,610, `T` = 351,307, `Z_total` = 73,160.
+
+### wasm-opt
+
+**Not measured.** Binaryen 132.0.0 is present only in the transpiler tool tree and is not pinned for offline core optimization, so `wasmOpt` stays `false` per the unapproved arm. `--variant wasm-opt` records this status. Optimization flags, size deltas and timing deltas remain pending an owner pin.
+
+### v1 size projection (fix5, snapshot counted once)
+
+| Kernel contribution | Raw bytes | Gzip bytes |
+|---|---:|---:|
+| L2c fix5 loader core, measured | 263,883 | 92,193 |
+| L3–L6 language and VFS | 400,000 | 160,000 |
+| Tier-1 commands | 280,000 | 112,000 |
+| awk, sed and jq | 400,000 | 160,000 |
+| yq formats | 230,000 | 92,000 |
+| Archives and compression | 180,000 | 72,000 |
+| Projected v1 loader core | 1,753,883 | 688,193 |
+
+Recommend owner review of a Cargo-feature `slim` profile. The projected raw size exceeds 1,500,000 B; the projected gzip size fits 700,000 B.
+
+### Verification (fix5)
+
+- `make check` green: G1–G8, K1, native Rust tests, bindings regeneration, both packed entry smoke tests, and the Node suite with 435 tests (426 passes, 0 failures, 9 existing TODOs), including 30/30 parity on both bindings and both installed packages, all four limit profiles, L7b/L7c suites, cold-path non-loading assertions, `test/bundle-flatten.test.mjs` (13 tests including recursive lazy chunks, adapter/nested rewrites and destructuring/arrow/generator `collectDecls`), and `test/measure-l2.test.mjs` (7 tests including `M_paired`, `packageSplit` lazy-chunk classification, and all five 22/11 JS gates).
+- `harness check scope` passed C2 (`BR23-EX2` declared in `BRANCH.md` for `spec/SPEC_EVOL_BASH_SANDBOX.md`).
+- Raw samples are in `tmp/bench-l2/committed/results.json` (default install and Option D control).

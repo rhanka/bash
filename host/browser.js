@@ -21,7 +21,13 @@ async function compileFrom(source) {
 const loader = {
   syncModule: () => compiled,
   asyncModule: () => loader.precompile().then(() => compiled),
+  // Provenance for the default snapshot (spec L2c 4.6): only the package's own production
+  // loader core may restore. A caller-supplied module takes the ordinary path even if it
+  // carries the helper, and taints this loader for later shells.
+  defaultBinding: true,
+  customized: false,
   precompile(source) {
+    if (source !== undefined) loader.customized = true;
     if (compiled) return Promise.resolve();
     compiling ??= compileFrom(source).then(
       (m) => { compiled = m; },

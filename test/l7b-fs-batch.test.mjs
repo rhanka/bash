@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { OverlayFs, ReadWriteFs } from "@sentropic/bash";
+import { OverlayFs, ReadWriteFs } from "../host/index.js";
 import { serveFsBatch } from "../host/core/fs-batch.js";
 import { Scope } from "../host/core/membrane.js";
 import { profileLimits } from "../host/core/limits.js";

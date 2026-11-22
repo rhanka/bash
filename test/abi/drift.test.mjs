@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkCanonicalLifts, checkLoaderCore, checkWit } from "../../tools/abi-check.mjs";
-import { descriptorSource, normalizeWit, readWit } from "../../tools/abi-descriptors.mjs";
+import { descriptorSource, normalizeWit, readWit, tableSource } from "../../tools/abi-descriptors.mjs";
 import { coreName, postName } from "./support.mjs";
 import { repoRoot, run, toolBin } from "../../tools/lib.mjs";
 
@@ -15,7 +15,9 @@ test("WIT normalization refuses a reordered record field or variant arm", () => 
   const current = readWit(join(repoRoot, "wit"));
   const component = readWit(componentPath);
   checkWit(current, component);
-  assert.equal(descriptorSource(normalizeWit(current)), readFileSync(join(repoRoot, "host/core/abi/descriptors.js"), "utf8"));
+  const graph = normalizeWit(current);
+  assert.equal(descriptorSource(graph), readFileSync(join(repoRoot, "host/core/abi/descriptors.js"), "utf8"));
+  assert.equal(tableSource(graph), readFileSync(join(repoRoot, "host/core/abi/tables.js"), "utf8"));
   for (const [name, kind, key] of [["env-var", "record", "fields"], ["fs-op", "variant", "cases"]]) {
     const fixture = structuredClone(current);
     const id = fixture.interfaces[0].types[name];
