@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-int-char-consts",
+  "steps": [
+    {
+      "script": "printf '%d|%d|%d|%d' ''\\''a' '\"A' ''\\''é' '\\'\\''z'"
+    }
+  ],
+  "title": "printf integer character constants"
+}

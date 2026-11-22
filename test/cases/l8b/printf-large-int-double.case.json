@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-large-int-double",
+  "steps": [
+    {
+      "script": "printf '%d|%d|%d' '9007199254740991' '9223372036854775807' '99999999999999999999999999999'"
+    }
+  ],
+  "title": "printf large integers as IEEE-754 doubles"
+}

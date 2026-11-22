@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-unsigned-oct-hex",
+  "steps": [
+    {
+      "script": "printf '%u|%o|%x|%X|%#o|%#o|%#x|%#X|%#x' '-1' '-8' '-16' '-16' '0' '8' '16' '16' '0'"
+    }
+  ],
+  "title": "printf unsigned, octal, and hexadecimal specifiers"
+}

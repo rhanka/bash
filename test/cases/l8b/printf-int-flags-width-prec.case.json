@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-int-flags-width-prec",
+  "steps": [
+    {
+      "script": "printf '%+d|% d|%+ d|%05d|%-5d|%08.4d|%.0d|%6.d' '42' '42' '42' '42' '42' '42' '0' '0'"
+    }
+  ],
+  "title": "printf integer flags, width, and precision"
+}

@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-usage-errors",
+  "steps": [
+    {
+      "script": "printf"
+    },
+    {
+      "script": "printf --"
+    }
+  ],
+  "title": "printf usage errors without format operand"
+}
