@@ -103,11 +103,31 @@ function isRegexStart(segs, buf) {
 
 const IMPORT = /^[ \t]*import\s+(.+?)\s+from\s*["']([^"']+)["'];?[ \t]*$/;
 const SIDE_IMPORT = /^[ \t]*import\s*["']([^"']+)["'];?[ \t]*$/;
+const REEXPORT = /^[ \t]*export\s*\{([^}]*)\}\s*from\s*["']([^"']+)["'];?[ \t]*$/;
 
-// Parses the import statements of a module (single-line forms used by this source graph).
+// Joins statement lines so a multi-line `import` clause (or `{ ... } from` re-export)
+// matches as one statement. Every other line passes through unchanged.
+function joinStatements(src) {
+  const stmts = [];
+  let buf = "";
+  for (const line of src.split("\n")) {
+    buf += (buf ? " " : "") + line;
+    const open = /^[ \t]*import\b/.test(buf) || /^[ \t]*export\s*\{/.test(buf);
+    if (open && !/;[ \t]*$/.test(buf)) continue;
+    stmts.push(buf);
+    buf = "";
+  }
+  if (buf) stmts.push(buf);
+  return stmts;
+}
+
+// Parses the import statements of a module (the graph uses single-line forms, plus the
+// multi-line clauses of the node adapters).
+// `export { ... } from` re-exports are recorded with `reExport: true`: they create no local
+// binding, but the target still belongs to the entry closure (the node adapters).
 function parseImports(src, file) {
   const imports = [];
-  for (const line of src.split("\n")) {
+  for (const line of joinStatements(src)) {
     let m = line.match(IMPORT);
     if (m) {
       const [, clause, spec] = m;
@@ -134,12 +154,26 @@ function parseImports(src, file) {
     }
     m = line.match(SIDE_IMPORT);
     if (m) throw new Error(file + ": side-effect imports are not supported");
+    m = line.match(REEXPORT);
+    if (m) {
+      const [, clause, spec] = m;
+      const names = [];
+      for (const part of clause.split(",")) {
+        const item = part.trim();
+        if (!item) continue;
+        const alias = item.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+        if (alias) names.push({ imported: alias[1], local: alias[2] });
+        else if (/^[A-Za-z_$][\w$]*$/.test(item)) names.push({ imported: item, local: item });
+        else throw new Error(file + ": unsupported re-export item " + item);
+      }
+      imports.push({ spec, namespace: null, names, reExport: true });
+    }
   }
   return imports;
 }
 
 function stripImportLines(src) {
-  return src.split("\n").filter((line) => !IMPORT.test(line)).join("\n");
+  return joinStatements(src).filter((line) => !IMPORT.test(line)).join("\n");
 }
 
 function stripExportKeyword(src) {
@@ -173,6 +207,11 @@ function loadGraph(entry, { alias = {}, externals = new Set(), root, modules = n
     const rec = { file, src, imports: parseImports(src, relative(root, file)) };
     modules.set(id, rec);
     for (const imp of rec.imports) {
+      // Platform imports (`node:...`) stay external: recorded, never visited.
+      if (!imp.spec.startsWith("./") && !imp.spec.startsWith("../")) {
+        imp.target = imp.spec;
+        continue;
+      }
       let target = resolveSpec(file, imp.spec);
       if (target === alias.from) target = alias.to;
       imp.target = target;
@@ -192,7 +231,15 @@ function topoOrder(modules, entry) {
     if (seen.has(id)) return;
     seen.add(id);
     const rec = modules.get(id);
-    for (const imp of [...rec.imports].sort((a, b) => (a.target < b.target ? -1 : 1))) visit(imp.target);
+    for (const imp of [...rec.imports].sort((a, b) => (a.target < b.target ? -1 : 1))) {
+      if (!modules.has(imp.target)) {
+        // Platform imports (`node:...`) are not repository modules; anything else
+        // missing here is a graph bug, never a platform import.
+        if (imp.target.startsWith("/") || imp.target.startsWith(".")) throw new Error("unknown module: " + imp.target);
+        continue;
+      }
+      visit(imp.target);
+    }
     order.push(id);
   };
   visit(entry);
@@ -207,7 +254,7 @@ function declaredExports(rec) {
     for (const line of seg.text.split("\n")) {
       const m = line.match(/^[ \t]*export[ \t]+(?:async[ \t]+)?(?:function\*?|class|const|let|var)[ \t]+([A-Za-z_$][\w$]*)/);
       if (m) names.push(m[1]);
-      else if (/^[ \t]*export[ \t]*\{/.test(line)) throw new Error(rec.file + ": export lists are entry-only");
+      else if (/^[ \t]*export[ \t]*\{/.test(line) && !REEXPORT.test(line)) throw new Error(rec.file + ": export lists are entry-only");
     }
   }
   return names;
@@ -281,15 +328,43 @@ function topDeclNames(src) {
 
 // Replaces identifier `oldName` with `newName` in code only, preserving member properties
 // (`obj.old`), property definitions (`{ old: ... }`) and shorthand (`{ old }` -> `{ old: new }`).
+// `$` counts as an identifier character throughout: `\b` would otherwise split `name$1`.
 function replaceIdent(body, oldName, newName) {
   if (oldName === newName) return body;
   const word = new RegExp("\\b" + oldName.replace(/[$]/g, "\\$&") + "\\b", "g");
+  const shorthand = new RegExp("([{,]\\s*)\\b" + oldName.replace(/[$]/g, "\\$&") + "\\b(\\s*[,}])", "g");
+  // Innermost unclosed bracket before a match, advancing a stack carried across segments
+  // (non-code segments hold no real brackets). Only `{` admits the shorthand reading:
+  // inside `(...)` or `[...]` a `, old,` is a call argument or element, never shorthand.
+  const stack = [];
+  const innerOpener = (prefix) => {
+    const st = [...stack];
+    for (const c of prefix) {
+      if (c === "{" || c === "(" || c === "[") st.push(c);
+      else if (c === "}" || c === ")" || c === "]") {
+        const want = c === "}" ? "{" : c === ")" ? "(" : "[";
+        if (st[st.length - 1] === want) st.pop();
+      }
+    }
+    return st[st.length - 1];
+  };
+  const scanBraces = (text) => {
+    for (const c of text) {
+      if (c === "{" || c === "(" || c === "[") stack.push(c);
+      else if (c === "}" || c === ")" || c === "]") {
+        const want = c === "}" ? "{" : c === ")" ? "(" : "[";
+        if (stack[stack.length - 1] === want) stack.pop();
+      }
+    }
+  };
   return splitCode(body).map((seg) => {
     if (!seg.code) return seg.text;
     let text = seg.text;
-    // Expand shorthands first: `{ old }`, `{ old,`, `, old,`, `, old }` -> `{ old: new ... }`.
-    text = text.replace(new RegExp("([{,]\\s*)\\b" + oldName.replace(/[$]/g, "\\$&") + "\\b(\\s*[,}])", "g"),
-      (_, a, b) => a + oldName + ": " + newName + b);
+    // Expand shorthands first, but only inside `{...}`: `{ old }`, `{ old,`, `, old,`, `, old }`
+    // -> `{ old: new ... }`. Any other bracket context keeps the bare reference for the
+    // general replacement below.
+    text = text.replace(shorthand, (m, a, b, offset, whole) =>
+      innerOpener(whole.slice(0, offset + a.length)) === "{" ? a + oldName + ": " + newName + b : m);
     // General replacement with property/member guards.
     let out = "";
     let last = 0;
@@ -298,6 +373,8 @@ function replaceIdent(body, oldName, newName) {
     while ((m = word.exec(text)) !== null) {
       const start = m.index;
       const end = start + oldName.length;
+      if (start > 0 && text[start - 1] === "$") continue;
+      if (text[end] === "$") continue;
       const prev = prevNonSpace(text, start);
       if (prev.char === "." && !isSpreadPreceding(text, start)) continue;
       const prev2 = prevNonSpace(text, start);
@@ -307,6 +384,7 @@ function replaceIdent(body, oldName, newName) {
       last = end;
     }
     out += text.slice(last);
+    scanBraces(out);
     return out;
   }).join("");
 }
@@ -338,8 +416,9 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
   const seenHeaders = new Set();
   for (const id of order) {
     const rec = modules.get(id);
-    const allLocals = rec.imports.flatMap((imp) => imp.names.map((x) => x.local));
-    for (const imp of rec.imports) {
+    const bindings = rec.imports.filter((imp) => !imp.reExport);
+    const allLocals = bindings.flatMap((imp) => imp.names.map((x) => x.local));
+    for (const imp of bindings) {
       if (imp.namespace) throw new Error(rec.file + ": namespace imports are entry-only");
       if (externals.has(imp.target)) {
         const stmt = "import { " + imp.names.map(({ imported, local }) =>
@@ -354,7 +433,7 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
         throw new Error(rec.file + ": import escapes the shared set " + imp.target);
       }
     }
-    for (const imp of rec.imports) {
+    for (const imp of bindings) {
       if (imp.namespace || externals.has(imp.target)) continue;
       const provider = modules.get(imp.target);
       for (const { imported } of imp.names) {
@@ -387,7 +466,7 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
     for (const [oldName, newName] of rename) body = replaceIdent(body, oldName, newName);
     // Imports become direct references. When the provider name already occurs as a shadowing
     // nested binding, rename that nested binding first so the replacement cannot be captured.
-    for (const imp of rec.imports) {
+    for (const imp of bindings) {
       if (imp.namespace || externals.has(imp.target)) continue;
       for (const { imported, local } of imp.names) {
         const flat = mapping.get(imp.target + "::" + imported);
@@ -439,7 +518,7 @@ function rewriteEntry(entryFile, outEntry, sharedFile, modules, sharedIds, mappi
   const rec = modules.get(entryFile);
   const needed = new Map(); // public name -> local name in the entry
   const lines = [];
-  for (const line of rec.src.split("\n")) {
+  for (const line of joinStatements(rec.src)) {
     const m = line.match(IMPORT);
     if (!m) {
       lines.push(line);
@@ -533,24 +612,59 @@ export async function bundlePackage({
   const indexClosure = new Set(topoOrder(modules, indexEntry));
   const sharedIds = new Set([...browserClosure].filter((id) =>
     id !== browserEntry && !externals.has(id) && modules.get(id).src !== null));
+  // Index-only modules outside the shared chunk are node-private adapter files (the L7b
+  // host filesystems): they ship as mirrored files next to the node loader, with shared
+  // imports pointed at the shared chunk and platform imports untouched. Anything else is
+  // still an error, as is a node-private file outside `host/node/`.
+  const nodeDir = join(root, "host", "node") + "/";
+  const nodePrivate = [];
   for (const id of indexClosure) {
     if (id === indexEntry || id === loadEntry || externals.has(id)) continue;
-    if (!sharedIds.has(id)) throw new Error("entry-private module outside the node loader: " + relative(root, id));
+    if (sharedIds.has(id)) continue;
+    if (!id.startsWith(nodeDir)) throw new Error("entry-private module outside the node loader: " + relative(root, id));
+    nodePrivate.push(id);
+  }
+  // Re-exported names must exist on their provider, or the shipped entry dangles.
+  for (const id of [indexEntry, ...nodePrivate]) {
+    const rec = modules.get(id);
+    for (const imp of rec.imports) {
+      if (!imp.reExport || imp.namespace || externals.has(imp.target)) continue;
+      const provider = modules.get(imp.target);
+      for (const { imported } of imp.names) {
+        if (!provider || !declaredExports(provider).includes(imported)) {
+          throw new Error(rec.file + ": no export " + imported);
+        }
+      }
+    }
   }
   const ordered = topoOrder(modules, browserEntry).filter((id) => sharedIds.has(id));
   const { code, mapping, header } = flattenShared(modules, ordered, root, externals);
   const rewritten = new Map();
   const needed = new Map();
+  const mergeNeeded = (r) => {
+    for (const [name, ref] of r.needed) {
+      if (needed.has(name) && needed.get(name) !== ref) throw new Error("shared export conflict: " + name);
+      needed.set(name, ref);
+    }
+  };
   for (const [entry, out, entryUrls] of [
     [indexEntry, outIndex, urls.index ?? []], [browserEntry, outBrowser, urls.browser ?? []],
     [loadEntry, outLoad, urls.load ?? []],
   ]) {
     const r = rewriteEntry(entry, out, outShared, modules, sharedIds, mapping, root, entryUrls);
     rewritten.set(entry, r);
-    for (const [name, ref] of r.needed) {
-      if (needed.has(name) && needed.get(name) !== ref) throw new Error("shared export conflict: " + name);
-      needed.set(name, ref);
-    }
+    mergeNeeded(r);
+  }
+  // Mirror the node-private files into `dist/js/node/`: their relative specifiers stay valid
+  // because the mirror preserves the `host/` layout, and their shared needs join the chunk.
+  const jsDir = dirname(outShared);
+  const extraOuts = [];
+  for (const id of topoOrder(modules, indexEntry).filter((x) => nodePrivate.includes(x))) {
+    const out = join(jsDir, relative(join(root, "host"), id));
+    const r = rewriteEntry(id, out, outShared, modules, sharedIds, mapping, root, []);
+    rewritten.set(id, r);
+    mergeNeeded(r);
+    extraOuts.push([id, out]);
   }
   const exported = "export { " + [...needed].map(([name, ref]) =>
     ref === name ? name : ref + " as " + name).join(", ") + " };";
@@ -558,11 +672,11 @@ export async function bundlePackage({
     code + "\n\n" + exported + "\n";
   mkdirSync(dirname(outShared), { recursive: true });
   writeFileSync(outShared, await minifyFile(relative(root, outShared), sharedCode));
-  for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad]]) {
+  for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad], ...extraOuts]) {
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, await minifyFile(relative(root, out), rewritten.get(entry).code));
   }
-  return { shared: outShared, modules: ordered.length };
+  return { shared: outShared, modules: ordered.length + extraOuts.length };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

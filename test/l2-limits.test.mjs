@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { defineCommand } from "@sentropic/bash";
+import { defineCommand } from "../host/index.js";
 import { profileLimits, PROFILES } from "../host/core/limits.js";
 import { Bash, bash, enc, dec, internal, module } from "./kt.mjs";
 import { Instance } from "../host/core/instance.js";

@@ -80,3 +80,30 @@ test("character class with slashes survives the splitter intact", () => {
   const literal = segs.find((s) => !s.code && s.text.includes("A-Za-z"));
   assert.equal(literal?.text, `/^[A-Za-z0-9_@%+=:,./-]+$/`);
 });
+
+test("call arguments are renamed bare, never expanded as shorthand", () => {
+  const { code } = flatten([
+    ["a.js", `export const CHUNK = 10;`],
+    ["b.js", `export const CHUNK = 20;\nexport const len = Math.min(1, 2, CHUNK, 4);`],
+  ]);
+  assert.match(code, /const CHUNK\$1 = 20;/);
+  assert.match(code, /Math\.min\(1, 2, CHUNK\$1, 4\)/);
+  assert.equal(new Function(code + "\nreturn len;")(), 1);
+});
+
+test("object shorthand survives a dollar-suffixed rename", () => {
+  const { code } = flatten([
+    ["a.js", `export const CHUNK = 10;`],
+    ["b.js", `export const CHUNK = 20;\nexport const o = { CHUNK };`],
+  ]);
+  assert.match(code, /\{ CHUNK: CHUNK\$1 \}/);
+  assert.deepEqual(new Function(code + "\nreturn o;")(), { CHUNK: 20 });
+});
+
+test("dollar-prefixed and dollar-suffixed names are distinct identifiers", () => {
+  const { code } = flatten([
+    ["c.js", `export const CHUNK = 5;\nexport const keep = [CHUNK$9, $CHUNK];\nexport const use = CHUNK + 1;`],
+  ]);
+  assert.match(code, /\[CHUNK\$9, \$CHUNK\]/);
+  assert.match(code, /const use = CHUNK \+ 1;/);
+});

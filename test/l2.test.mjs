@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { Bash, defineCommand, getCommandNames } from "@sentropic/bash";
+import { Bash, defineCommand, getCommandNames } from "../host/index.js";
 import { COMMAND_NAMES } from "../dist/js/kernel/commands.js";
 import { scanCommandFiles } from "../tools/build.mjs";
 import { enc, internal, module } from "./kt.mjs";

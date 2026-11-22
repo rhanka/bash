@@ -128,6 +128,9 @@ export function g2NoBareImport(ctx) {
   const jsDirs = [jsDir, testJsDir];
   const typesDir = join(ctx.root, "types");
   const nodeDir = join(hostDir, "node") + sep;
+  // The packed tree mirrors host/node/ as <out>/js/node/ (the node loader and the L7b
+  // host adapters); node: builtins are legitimate in the mirror too.
+  const outNodeDir = join(jsDir, "node") + sep;
   const link = oddEntries(ctx, [hostDir, ...jsDirs, typesDir]);
   if (link) return link;
   // Scripts: every file of host/, dist/js/ and dist/test/js/. A relative specifier must reach a regular script file in them.
@@ -154,7 +157,7 @@ export function g2NoBareImport(ctx) {
     return null;
   }
   for (const f of [...jsDirs.flatMap((d) => walk(d, SCRIPT)), ...walk(hostDir, SCRIPT)]) {
-    const r = checkScript(f, f.startsWith(nodeDir));
+    const r = checkScript(f, f.startsWith(nodeDir) || f.startsWith(outNodeDir));
     if (r) return r;
   }
   // Declarations: the same specifier rules; a relative one must reach a declaration file inside types/.
