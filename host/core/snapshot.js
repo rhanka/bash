@@ -1,7 +1,7 @@
 // Eligibility of a validated shell configuration for the Wasm-owned default snapshot
 // (spec L2c section 4.5): `contain`, the standard ceiling, zero overrides including aliases,
-// default layout/cwd, no supplied FS/files/env/commands/customCommands/processInfo, no
-// sleep/fetch/network/grant changes, no trace/coverage and ordinary default runtime options.
+// default layout/cwd, no supplied FS/isolation/files/env/commands/customCommands/processInfo,
+// no sleep/fetch/network/grant changes, no trace/coverage and ordinary default runtime options.
 // A validated host-only logger may be present. Unknown/invalid options keep their synchronous
 // constructor errors upstream; this predicate only classifies valid configurations, performs no
 // I/O, registers no callbacks, allocates nothing in the guest and never probes arity.
@@ -37,6 +37,7 @@ export const PREDICATE_OPTIONS = Object.freeze([
   "env",
   "cwd",
   "fs",
+  "isolation",
   "commands",
   "customCommands",
   "processInfo",

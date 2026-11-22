@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { T, bash, internal, module as testModule, INTERNAL } from "./kt.mjs";
 import { instantiate as testInstantiate } from "../dist/test/js/kernel-test/kernel-test.js";
-import { Bash, InMemoryFs, KernelPoisonedError, defineCommand, AsyncCapabilityError } from "@sentropic/bash";
+import { Bash, InMemoryFs, KernelPoisonedError, defineCommand, AsyncCapabilityError } from "../host/index.js";
 import { fsState } from "../host/core/fs.js";
 import { serveKernelVolume } from "../host/core/driver.js";
 import { decodeUtf8, utf8 } from "../host/core/bytes.js";

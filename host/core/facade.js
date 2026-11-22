@@ -323,7 +323,7 @@ export function createFacade(loader) {
         hasHooks: hooks !== undefined && (hooks.kernel !== undefined ||
           hooks.moduleProvider !== undefined || hooks.ceilingBytes !== undefined ||
           hooks.snapshotCapture === true),
-        present: Object.fromEntries(Array.from(new Set([...PREDICATE_OPTIONS, "isolation"])).map((name) => [name, v[name] !== undefined])),
+        present: Object.fromEntries(PREDICATE_OPTIONS.map((name) => [name, v[name] !== undefined])),
         loggerPresent: v.logger !== undefined,
       });
       // A supplied volume keeps its contents: `files` only affects the default
