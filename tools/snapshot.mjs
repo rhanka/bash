@@ -327,6 +327,7 @@ async function captureOnce(root, coreBytes) {
     [INTERNAL]: {
       inspect: (state) => { seen = state; },
       onEngine: (e) => { engine = e; },
+      snapshotCapture: true,
     },
   });
   if (!seen || !engine) throw new Error("capture setup did not link");

@@ -15,6 +15,9 @@ export function instantiateEngine(getCoreModule, instantiateCore, options, coreN
 /** Links core exports. The linker and registry are injectable for deterministic ABI fixtures. */
 export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, inspect } = {}, bindings = functions) {
   const table = new Map();
+  // Call log for the offline snapshot capture and its tests (spec L2c exit gates 1-3): which
+  // entry ran, in order. Allocated only when `inspect` is set; production passes none.
+  const calls = inspect ? [] : null;
   const wrappers = new WeakMap();
   const resources = new Map();
   const engine = {};
@@ -145,6 +148,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
     const target = resource ? (method ? resource.prototype : resource.Resource) : engine;
     target[camelCase(receiver ? receiver[3] : fn.name)] = function (...args) {
       checkEntry();
+      if (calls) calls.push(fn.name);
       busy = true;
 
       // Entries track the dynamic borrows. The wrappers stay strongly reachable through post-return.
@@ -212,6 +216,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
   /** Restores the build-matched default shell inside this fresh store, or returns `0n` on refusal. */
   function restoreDefault() {
     checkEntry();
+    if (calls) calls.push("__restore_default");
     busy = true;
     inGuest = true;
     try {
@@ -239,6 +244,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, insp
       exports: core,
       handles: () => [...table.values()].map(({ id, kind, rep, hostOwned, borrows }) =>
         ({ id, kind, rep, hostOwned, borrows })),
+      calls,
     });
   }
   const types = {};
