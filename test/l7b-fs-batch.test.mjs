@@ -192,3 +192,30 @@ test("kernel-test batch returns six typed results and files cross the ABI in chu
   }
   assert.deepEqual(seen, ["fs-batch", "fs-batch", "fs-batch", "fs-batch", "fs-batch"]);
 }));
+
+test("read-dir aborts when the scope is revoked after a batch yield", () => fixture(async (root) => {
+  const fs = new ReadWriteFs({ root });
+  await fs.mkdir("/d");
+  for (let i = 0; i < 300; i++) await fs.writeFile(`/d/f${i}`, "x");
+  // Control: the full listing completes while the scope stays live.
+  assert.equal((await serve(fs, [op("read-dir", "/d")])).val[0].val.val.length, 300);
+  // A scope revoked while directory(..., false) yields aborts the listing
+  // instead of returning entries past the revocation point.
+  const B = { mounts: new Map([[1, fs]]), limits: { ...profileLimits("contain") }, headroom: 8 << 20 };
+  const scope = new Scope();
+  function* extension(_x, start) {
+    try {
+      return { outcome: yield start(scope) };
+    } finally {
+      scope.revoke();
+    }
+  }
+  const gen = serveFsBatch({ B }, { mountId: 1, ops: [op("read-dir", "/d")] }, extension);
+  const run = (async () => {
+    const first = gen.next();
+    setTimeout(() => scope.revoke(), 0);
+    const step = first.done ? first.value : gen.next(await first.value).value.outcome;
+    return step;
+  })();
+  await assert.rejects(run, { name: "ExecutionAbortedError" });
+}));
