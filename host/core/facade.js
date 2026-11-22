@@ -174,6 +174,12 @@ function seedVolumeLayout(vfs, inst, { defaultLayout, cwd, processInfo, commandN
     }));
     if (r.tag === "err") throw fsError(r.val.code, "open", path);
   };
+  // Atomicity: stat every system directory before creating any, mirroring
+  // `Shell::layout` — a file collision fails before earlier directories exist.
+  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) {
+    const s = inst.call(() => vfs.op({ tag: "stat", val: utf8(dir) }));
+    if (s.tag === "ok" && s.val.val.kind === "file") throw fsError("exists", "mkdir", dir);
+  }
   for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) mkdir(dir);
   if (defaultLayout) {
     mkdir("/home/user");
@@ -359,7 +365,7 @@ export function createFacade(loader) {
       for (const c of customs) this.#register(B, c, false);
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
-        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null || branded !== null },
+        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
         commands: options.commands?.slice(),
         customCommands: [...B.commands.keys()],
         env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: exported.has(n) })),
@@ -434,12 +440,14 @@ export function createFacade(loader) {
 
     async readFile(path) {
       const B = STATE.get(this);
+      B.holder.instance?.check();
       if (B.seeded) await B.seeded;
       return this.fs.readFile(resolvePath(B.initialCwd, path));
     }
 
     async writeFile(path, content) {
       const B = STATE.get(this);
+      B.holder.instance?.check();
       if (B.seeded) await B.seeded;
       return this.fs.writeFile(resolvePath(B.initialCwd, path), content);
     }

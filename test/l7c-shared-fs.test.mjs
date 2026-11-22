@@ -261,6 +261,14 @@ for (const isolation of ["separate", "shared"]) {
     assert.equal((await c.exec("late")).exitCode, 127);
     assert.equal((await a.exec("late")).stdout, "late\n");
   });
+
+  test(`gate 2 (${isolation}): a system-path file collision fails before any directory is created`, async () => {
+    const { fs } = volume();
+    await fs.writeFile("/proc", "collision");
+    assert.throws(() => bash({ fs, isolation }), /EEXIST/);
+    assert.equal(await fs.exists("/bin"), false, "no system directory is created before the collision");
+    assert.equal(await contents(fs, "/proc"), "collision", "the colliding file survives");
+  });
 }
 
 // -------------------------------------------------------------------------------- gate 3
@@ -362,6 +370,20 @@ test("gate 3: unknown mount ids are denied before touching any owner, missing gr
   const missing = await denied.exec("__cat /sentinel");
   assert.equal(missing.exitCode, 1);
   assert.equal(missing.stderr, "cat: /sentinel: Permission denied\n");
+});
+
+test("gate 3: shared mode grants no host FS, separate mode keeps it", () => {
+  const seen = [];
+  const extra = {
+    onEngine(engine) {
+      const create = engine.Shell.create;
+      engine.Shell.create = (vfs, config) => { seen.push(config.grants.hostFs); return create(vfs, config); };
+    },
+  };
+  const { fs } = volume({}, extra);
+  void bash({ fs }, extra);
+  void bash({ fs, isolation: "shared" }, extra);
+  assert.deepEqual(seen, [true, false], "separate keeps G_HOST_FS, shared has no host mount");
 });
 
 // -------------------------------------------------------------------------------- gate 4
@@ -503,6 +525,34 @@ test("gate 4: oversized listings stop the batch, keep mutations and deliver no p
   }
 });
 
+test("gate 4: read-dir-plus and walk overflow via fixture results", () => {
+  // The volume leaves both tags unsupported, so the response bound is covered
+  // with fixture entries-plus results (56 per entry plus the path, as lowered).
+  // 15 ten-byte paths encode to 16 + 15 * (56 + 10) = 1006.
+  const { fs } = volume();
+  void bash({ fs });
+  const st = fsState(fs);
+  const entries = Array.from({ length: 15 }, (_, i) => ({
+    path: utf8(`/big/f-${String(i).padStart(3, "0")}`),
+    info: { kind: "file", size: 1n, mode: 0o644, mtimeMs: 0n, dev: 0n, ino: 0n },
+  }));
+  const orig = st.vfs.op;
+  st.vfs.op = (op) => (op.tag === "read-dir-plus" || op.tag === "walk")
+    ? { tag: "ok", val: { tag: "entries-plus", val: entries } }
+    : orig.call(st.vfs, op);
+  for (const op of [
+    { tag: "read-dir-plus", val: utf8("/big") },
+    { tag: "walk", val: { root: utf8("/big"), maxDepth: 9, maxEntries: 9999 } },
+  ]) {
+    let out = boundServe(2012, [op], fs);
+    assert.equal(out.tag, "fs", `${op.tag} completes at equality (bound 1006)`);
+    assert.equal(out.val[0].val.val.length, 15, "no partial listing is delivered");
+    out = boundServe(2010, [op], fs);
+    assert.equal(out.tag, "limit-exceeded", `${op.tag} overflows one byte over`);
+    assert.equal(out.val, "headroom");
+  }
+});
+
 // -------------------------------------------------------------------------------- gate 5
 
 /** A custom command that blocks until released; resolves the arrival gate on entry. */
@@ -551,6 +601,8 @@ test("gate 5 (separate, fs: a.fs): trapping the attached store leaves the owner 
   pc.release();
   await assert.rejects(b.exec("echo hi"), KernelPoisonedError);
   await assert.rejects(b.exec("echo hi"), KernelPoisonedError, "no stale resume reaches the guest");
+  await assert.rejects(b.readFile("/sentinel"), KernelPoisonedError, "dead-shell reads observe D8");
+  await assert.rejects(b.writeFile("/dead-write", "x"), KernelPoisonedError, "dead-shell writes observe D8");
   assert.equal((await a.exec("echo ok")).stdout, "ok\n");
   assert.equal(await a.readFile("/sentinel"), "pre-trap");
   assert.equal((await a.exec("__write /after yes")).exitCode, 0);
