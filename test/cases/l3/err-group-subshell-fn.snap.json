@@ -1,0 +1,126 @@
+{
+  "case": "l3/err-group-subshell-fn",
+  "caseHash": "5191b832aed606050ce5d11e06b8ea4aeb1d385b4137573b8b309915227002c2",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:11: Expected RBRACE, got EOF\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:9: Expected RPAREN, got EOF\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:10: Expected function name\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:4: syntax error near unexpected token `('\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:10: Expected function name\n",
+      "stdout": ""
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:5: Expected compound command for function body\n",
+      "stdout": ""
+    }
+  ]
+}

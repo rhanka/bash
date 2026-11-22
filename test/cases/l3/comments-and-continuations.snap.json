@@ -1,0 +1,112 @@
+{
+  "case": "l3/comments-and-continuations",
+  "caseHash": "3436b5291bb5b6340997b6624bacb31b4d4473e51d60bef136ff5f3b0a68965e",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "hi\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "ab\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "hi\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "hi\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "a#b\n"
+    }
+  ]
+}

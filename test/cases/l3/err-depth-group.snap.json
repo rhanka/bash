@@ -1,0 +1,51 @@
+{
+  "case": "l3/err-depth-group",
+  "caseHash": "5521b3c78105e9e0f56c14fdc7ec7f4f31c493341a39be40188bfe3eb6f3495f",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "deep\n"
+    },
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 2,
+      "stderr": "bash: syntax error: Parse error at 1:403: Maximum parser nesting depth exceeded (200)\n",
+      "stdout": ""
+    }
+  ]
+}
