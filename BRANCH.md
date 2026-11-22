@@ -67,6 +67,8 @@ Deliver `kernel::regex` (Thompson NFA/PikeVM plus byte-capped lazy DFA, bounded 
      native/Wasm assertions for regex `[!a]` negation and `!(!(a)|b)` De Morgan semantics.
   6. **Minor — two-dot diff artifact:** `feat/l8a-regex` branched before `spec/lots/L1d.md` and `spec/lots/L8b.md`
      merged to `main` (`1f90267`); three-dot diff confirms zero overlap — rebase onto `main` before merge.
+- PR #22 v2 verification fix:
+  1. **Major (S3 panic / Wasm trap) — `Inst::Backref` slice bounds on nested self-referencing groups:** guarded `a <= b_end` (and `self.haystack.get(a..b_end)`) in `Inst::Backref` (`backref_at`), `captures_at`, and `push_group_slice` (`kernel/src/regex/engine.rs`) so an in-progress capture where `Save(2*g)` updates `slots[2*g]` past the prior iteration's `slots[2*g+1]` is rejected cleanly without panicking; added native and Wasm regression tests for `((a\2?)b)+` and `(?:(a\1?)b)+`.
 
 ## Plan / Todo (lot-based)
 - [x] **Lot 0 — Baseline & constraints**

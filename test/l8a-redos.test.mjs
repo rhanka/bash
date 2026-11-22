@@ -223,6 +223,18 @@ describe("L8a S9 regex/glob ReDoS, compile caps, and bounded backrefs", () => {
     assert.equal(keepRes.exitCode, 0);
     assert.equal(keepRes.stdout, "b\nc\n");
 
+    // 5. Nested self-referencing backreference group in outer loop must not trap on Wasm (`a > b_end`).
+    const selfRefEre = await sh.exec(`__regex ere bo ${quote("((a\\2?)b)+")}`, { stdin: "abaa\nabab\n" });
+    assert.equal(selfRefEre.exitCode, 0);
+    assert.equal(selfRefEre.stdout, "ab\nabab\n");
+
+    const selfRefEreMiss = await sh.exec(`__regex ere b ${quote("^((a\\2?)b)+$")}`, { stdin: "abaa\n" });
+    assert.equal(selfRefEreMiss.exitCode, 1);
+
+    const selfRefPerl = await sh.exec(`__regex perl bo ${quote("(?:(a\\1?)b)+")}`, { stdin: "abaa\n" });
+    assert.equal(selfRefPerl.exitCode, 0);
+    assert.equal(selfRefPerl.stdout, "ab\n");
+
     // Instance stays healthy after all adversarial checks.
     const ok = await sh.exec("echo ok");
     assert.equal(ok.exitCode, 0);
