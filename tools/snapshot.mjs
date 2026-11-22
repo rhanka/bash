@@ -615,6 +615,8 @@ export async function snapshotCore(corePath, name) {
   }
 }
 
+export { parseSections, sectionBodies, initialImage };
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const [corePath, name] = process.argv.slice(2);
   if (!corePath) throw new Error("usage: node tools/snapshot.mjs <core.wasm> [name]");
