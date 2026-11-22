@@ -1,0 +1,14 @@
+{
+  "divergence": "V12",
+  "id": "l4/div-case-toggle",
+  "steps": [
+    {
+      "script": "s='hElLo 42 WoRlD'; u='AbC'; a=(fOo BaR); printf '<%s>' \"${s~}\" \"${s~~}\" \"${u~}\" \"${s~~[hloW]}\" \"${empty~}\" \"${a[@]~}\" \"${a[@]~~}\"; echo"
+    }
+  ],
+  "tags": [
+    "param",
+    "divergence"
+  ],
+  "title": "Case toggle ~ and ~~ divergence (V12)"
+}

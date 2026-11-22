@@ -1,0 +1,15 @@
+{
+  "divergence": "V14",
+  "id": "l4/div-transform-kv",
+  "steps": [
+    {
+      "script": "IFS=:; s=\"a'b\"; a=(one 'two 2'); declare -A m=([k1]=v1 ['k 2']='v \"2\"'); e=(); printf '<%s>' \"${s@K}\" \"${s@k}\" \"${u@K}\" \"${u@k}\" \"${a[@]@K}\" \"${a[@]@k}\" \"${a[*]@k}\" \"${m[@]@K}\" \"${m[@]@k}\" \"${e[@]@K}\" \"${e[*]@K}\"; echo"
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays",
+    "divergence"
+  ],
+  "title": "Parameter @K and @k transformation divergence (V14)"
+}

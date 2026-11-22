@@ -1,0 +1,23 @@
+{
+  "divergence": "V11",
+  "id": "l4/div-prompt-clock",
+  "steps": [
+    {
+      "env": {
+        "TZ": "UTC"
+      },
+      "script": "p='\\d|\\t|\\T|\\@|\\A|\\D{}|\\D{%F %Z}'; echo \"${p@P}\""
+    },
+    {
+      "env": {
+        "TZ": "EST5"
+      },
+      "script": "p='\\d|\\t|\\@|\\D{%F %T %Z %z}'; echo \"${p@P}\""
+    }
+  ],
+  "tags": [
+    "param",
+    "divergence"
+  ],
+  "title": "Prompt clock escapes in ${var@P} divergence (V11)"
+}
