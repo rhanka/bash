@@ -473,10 +473,12 @@ impl<'a> ExecCtx<'a> {
             let s = m.slots.as_slice().get(g * 2).copied().flatten();
             let e = m.slots.as_slice().get(g * 2 + 1).copied().flatten();
             out.try_push(match (s, e) {
-                (Some(a), Some(b_end)) => Some(Span {
-                    start: a,
-                    end: b_end,
-                }),
+                (Some(a), Some(b_end)) if a <= b_end && b_end <= self.haystack.len() => {
+                    Some(Span {
+                        start: a,
+                        end: b_end,
+                    })
+                }
                 _ => None,
             })?;
         }
@@ -716,7 +718,11 @@ impl<'a> ExecCtx<'a> {
         let s = m.slots.as_slice().get(g * 2).copied().flatten();
         let e = m.slots.as_slice().get(g * 2 + 1).copied().flatten();
         if let (Some(a), Some(b_end)) = (s, e) {
-            out.try_extend_from_slice(&self.haystack[a..b_end])?;
+            if a <= b_end {
+                if let Some(slice) = self.haystack.get(a..b_end) {
+                    out.try_extend_from_slice(slice)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1267,15 +1273,20 @@ impl<'a> ExecCtx<'a> {
                             let g = group as usize;
                             let s = slots.as_slice().get(g * 2).copied().flatten();
                             let e = slots.as_slice().get(g * 2 + 1).copied().flatten();
+                            // Skip unset or in-progress captures (`a > b_end` when an outer loop
+                            // re-enters group `g` and overwrites `slots[2*g]` before `Save(2*g+1)`).
                             if let (Some(a), Some(b_end)) = (s, e) {
-                                let cap_slice = &self.haystack[a..b_end];
-                                if let Some(new_pos) =
-                                    match_slice_at(self.haystack, pos, cap_slice, icase)
-                                {
-                                    stack.try_push(BtOp::Eval {
-                                        pc: pc + 1,
-                                        pos: new_pos,
-                                    })?;
+                                if a <= b_end {
+                                    if let Some(cap_slice) = self.haystack.get(a..b_end) {
+                                        if let Some(new_pos) =
+                                            match_slice_at(self.haystack, pos, cap_slice, icase)
+                                        {
+                                            stack.try_push(BtOp::Eval {
+                                                pc: pc + 1,
+                                                pos: new_pos,
+                                            })?;
+                                        }
+                                    }
                                 }
                             }
                         }

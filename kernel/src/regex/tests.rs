@@ -1102,3 +1102,46 @@ fn regex_bracket_bang_negation_matches_oracle() {
     assert!(r.is_match(b"b", &b, &mut no_limit).unwrap());
     assert!(!r.is_match(b"a", &b, &mut no_limit).unwrap());
 }
+
+#[test]
+fn backref_nested_self_referencing_group_does_not_panic() {
+    let b = test_budget();
+    let flags = RegexFlags {
+        allow_backrefs: true,
+        ..Default::default()
+    };
+
+    // ERE `((a\2?)b)+` on `"abaa"`: iteration 2 updates `slots[4]` to 2 while `slots[5]` still
+    // holds 1 from iteration 1 (`a > b_end`); must reject in-progress capture without panicking.
+    let mut r_ere = compile_ere(br"((a\2?)b)+", flags, &b);
+    assert_eq!(
+        r_ere.find_at(b"abaa", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 2 })
+    );
+    let caps = r_ere.captures_at(b"abab", 0, &b, &mut no_limit).unwrap().unwrap();
+    assert_eq!(caps.full(), Span { start: 0, end: 4 });
+    assert_eq!(caps.group(1), Some(Span { start: 2, end: 4 }));
+    assert_eq!(caps.group(2), Some(Span { start: 2, end: 3 }));
+
+    let mut r_ere_anch = compile_ere(br"^((a\2?)b)+$", flags, &b);
+    assert_eq!(r_ere_anch.find_at(b"abaa", 0, &b, &mut no_limit).unwrap(), None);
+
+    // Perl non-capturing outer loop `(?:(a\1?)b)+` and case-insensitive variant.
+    let mut r_perl = compile_perl(br"(?:(a\1?)b)+", flags, &b);
+    assert_eq!(
+        r_perl.find_at(b"abaa", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 2 })
+    );
+    let mut r_icase = compile_ere(
+        br"((A\2?)b)+",
+        RegexFlags {
+            ignore_case: true,
+            ..flags
+        },
+        &b,
+    );
+    assert_eq!(
+        r_icase.find_at(b"abaa", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 2 })
+    );
+}
