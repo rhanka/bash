@@ -1,0 +1,25 @@
+{
+  "id": "l3/trailing-ops-and-bang",
+  "steps": [
+    {
+      "script": "!"
+    },
+    {
+      "script": "! ! echo ok"
+    },
+    {
+      "script": "echo a &&"
+    },
+    {
+      "script": "echo a |"
+    },
+    {
+      "script": "echo a |\n echo b"
+    }
+  ],
+  "tags": [
+    "lists",
+    "pipelines"
+  ],
+  "title": "Lone bang, double bang, and trailing and, pipe, and pipelined newline"
+}

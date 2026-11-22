@@ -1,0 +1,12 @@
+{
+  "id": "l3/brace-and-subscript-lexing",
+  "steps": [
+    {
+      "script": "if ! echo -n; then a[1 + 2]=x; b=(one \"two three\"); echo ${x:-\"}\"} $(case y in a) echo 1;; esac); fi; echo lex-ok"
+    }
+  ],
+  "tags": [
+    "grammar"
+  ],
+  "title": "Subscript, array, quoted brace, and case substitution lexing in dead code"
+}

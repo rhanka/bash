@@ -1,0 +1,15 @@
+{
+  "id": "l3/dparen-vs-subshell",
+  "steps": [
+    {
+      "script": "((echo sub1) && (echo sub2))"
+    },
+    {
+      "script": "if ! echo -n; then echo $( (echo inner) ); fi"
+    }
+  ],
+  "tags": [
+    "grammar"
+  ],
+  "title": "Nested subshells versus arithmetic command and spaced command substitution"
+}

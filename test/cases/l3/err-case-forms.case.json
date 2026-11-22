@@ -1,0 +1,19 @@
+{
+  "id": "l3/err-case-forms",
+  "steps": [
+    {
+      "script": "case x in a) echo 1 ;;"
+    },
+    {
+      "script": "case x echo 1 ;; esac"
+    },
+    {
+      "script": "case x in a echo 1 ;; esac"
+    }
+  ],
+  "tags": [
+    "case",
+    "errors"
+  ],
+  "title": "Malformed case statements and their expected-token errors"
+}

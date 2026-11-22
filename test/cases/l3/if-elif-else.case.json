@@ -1,0 +1,12 @@
+{
+  "id": "l3/if-elif-else",
+  "steps": [
+    {
+      "script": "if false; then\necho no1\nelif true; then\necho elif1\nelse\necho else1\nfi\nif false; then\necho no2\nfi\necho after:$?\nif true; then\nif true; then\necho nested\nfi\nfi"
+    }
+  ],
+  "tags": [
+    "if"
+  ],
+  "title": "Multi-branch if with elif, else, nested if, and false if without else"
+}

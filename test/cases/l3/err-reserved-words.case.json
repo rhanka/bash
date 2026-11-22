@@ -1,0 +1,30 @@
+{
+  "id": "l3/err-reserved-words",
+  "steps": [
+    {
+      "script": "then"
+    },
+    {
+      "script": "fi"
+    },
+    {
+      "script": "do"
+    },
+    {
+      "script": "done"
+    },
+    {
+      "script": "esac"
+    },
+    {
+      "script": "elif"
+    },
+    {
+      "script": "else"
+    }
+  ],
+  "tags": [
+    "errors"
+  ],
+  "title": "Reserved words outside a compound command are syntax errors"
+}
