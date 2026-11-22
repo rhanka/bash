@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-function-def-and-call",
+  "steps": [
+    {
+      "script": "greet() { echo -n \"$1\"; }\ngreet world"
+    }
+  ],
+  "title": "Function definition and call coverage hits"
+}

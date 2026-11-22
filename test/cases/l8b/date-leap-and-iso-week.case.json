@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/date-leap-and-iso-week",
+  "steps": [
+    {
+      "script": "date -u -d @951782400 '+%F %j %U %W %V %G'"
+    },
+    {
+      "script": "date -u -d @1609459200 '+%F %u %V %G %g'"
+    }
+  ],
+  "title": "date -u leap day and ISO-8601 week year"
+}

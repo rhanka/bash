@@ -1,0 +1,16 @@
+{
+  "capture": {
+    "coverage": true,
+    "trace": true
+  },
+  "id": "l1d/cov-empty-and-whitespace",
+  "steps": [
+    {
+      "script": ""
+    },
+    {
+      "script": "   \n\t "
+    }
+  ],
+  "title": "Empty and whitespace-only scripts emit no coverage or trace"
+}

@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-int-bases-signs",
+  "steps": [
+    {
+      "script": "printf '%d|%d|%d|%d|%d|%d|%d' '+42' '-42' '0x10' '+0x10' '010' '+010' '-010'"
+    },
+    {
+      "script": "printf '%d' '08'"
+    }
+  ],
+  "title": "printf integer bases and signs"
+}

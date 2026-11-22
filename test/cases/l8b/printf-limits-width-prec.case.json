@@ -1,0 +1,23 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxStringLength": 16
+    }
+  },
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-limits-width-prec",
+  "steps": [
+    {
+      "script": "printf '%20s' 'hi'"
+    },
+    {
+      "script": "printf '%.20d' '1'"
+    },
+    {
+      "script": "printf '%10s%10s' 'a' 'b'"
+    }
+  ],
+  "title": "printf width and precision limits"
+}

@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-echo-repeated-flags",
+  "steps": [
+    {
+      "script": "echo -n -n -e hi"
+    }
+  ],
+  "title": "Repeated echo flags record each occurrence in argument order"
+}

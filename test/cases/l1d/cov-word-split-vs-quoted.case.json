@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-word-split-vs-quoted",
+  "steps": [
+    {
+      "script": "S='one two'\necho $S \"$S\""
+    }
+  ],
+  "title": "word_split hit emitted on unquoted expansion only"
+}

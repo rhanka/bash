@@ -1,0 +1,31 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/md5sum-vectors",
+  "steps": [
+    {
+      "script": "md5sum",
+      "stdin": ""
+    },
+    {
+      "script": "md5sum",
+      "stdin": "a"
+    },
+    {
+      "script": "md5sum",
+      "stdin": "abc"
+    },
+    {
+      "script": "md5sum",
+      "stdin": "message digest"
+    },
+    {
+      "script": "md5sum",
+      "stdin": {
+        "base64": "AP8BAg=="
+      }
+    }
+  ],
+  "title": "md5sum standard and binary vectors"
+}

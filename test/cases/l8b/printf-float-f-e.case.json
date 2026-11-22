@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-float-f-e",
+  "steps": [
+    {
+      "script": "printf '%f|%.2f|%.0f|%#.0f|%e|%.2E|%+010.2f' '1.5' '1.25' '2.5' '1' '1.5' '1234.5' '3.5'"
+    }
+  ],
+  "title": "printf %f and %e/%E formatting"
+}

@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "id": "l1d/cov-group-and-andor",
+  "steps": [
+    {
+      "script": "{ echo a && echo b; } || echo c"
+    }
+  ],
+  "title": "Group and short-circuiting || skips unexecuted branch"
+}

@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-bad-placeholder",
+  "steps": [
+    {
+      "script": "printf '%z' '1'"
+    },
+    {
+      "script": "printf '%10%' '1'"
+    }
+  ],
+  "title": "printf invalid placeholder errors"
+}

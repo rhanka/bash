@@ -1,0 +1,33 @@
+{
+  "case": "l8b/printf-strftime-directives",
+  "caseHash": "12743385bbcb3b112c81ec56cf42992bba5db71f957d0c31a2839e20fee8d968",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "TZ": "UTC"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "1970-01-01 00:00:00 UTC +0000 Thu Thursday Jan Jan January 19 01 01/01/70  1 1970-01-01 70 1970 12 001  0 12 01 00 AM am 12:00:00 AM 00:00 0 00 4 00 01 4 00 01/01/70 00:00:00 70 000000000 %Q"
+    }
+  ]
+}

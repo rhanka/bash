@@ -1,0 +1,31 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/base64-decode-permissive-binary",
+  "steps": [
+    {
+      "script": "base64 -d",
+      "stdin": "YWJj"
+    },
+    {
+      "script": "base64 -d",
+      "stdin": "YW!Jj"
+    },
+    {
+      "script": "base64 -d",
+      "stdin": "YW=Jj"
+    },
+    {
+      "script": "base64",
+      "stdin": {
+        "base64": "AP9+gA=="
+      }
+    },
+    {
+      "script": "base64 -d",
+      "stdin": "AP9+gA==\n"
+    }
+  ],
+  "title": "base64 permissive decoding and binary round-trip"
+}

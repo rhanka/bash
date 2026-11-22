@@ -1,0 +1,17 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "engine": {
+    "executionLimits": {
+      "maxCommandCount": 2
+    }
+  },
+  "id": "l1d/cov-command-count-limit",
+  "steps": [
+    {
+      "script": "echo 1; echo 2; echo 3"
+    }
+  ],
+  "title": "Command count limit preserves hits from executed commands"
+}

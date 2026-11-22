@@ -1,0 +1,13 @@
+{
+  "capture": {
+    "coverage": true,
+    "trace": true
+  },
+  "id": "l1d/cov-syntax-error",
+  "steps": [
+    {
+      "script": "'"
+    }
+  ],
+  "title": "Syntax error emits no coverage or trace"
+}

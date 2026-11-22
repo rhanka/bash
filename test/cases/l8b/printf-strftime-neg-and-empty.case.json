@@ -1,0 +1,18 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-strftime-neg-and-empty",
+  "steps": [
+    {
+      "script": "printf '%(%Y-%m-%d %H:%M:%S %u %w %V %G)T' '-86400'"
+    },
+    {
+      "script": "printf '%12(%Y-%m-%d)T' '1700000000'"
+    },
+    {
+      "script": "printf '%()T' '0'"
+    }
+  ],
+  "title": "printf %(...)T negative timestamp, width, and empty format"
+}

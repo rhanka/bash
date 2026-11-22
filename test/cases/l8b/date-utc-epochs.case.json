@@ -1,0 +1,15 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/date-utc-epochs",
+  "steps": [
+    {
+      "script": "date -u -d @0 '+%Y-%m-%d %H:%M:%S %Z %z %a %b %e %j %u %w %V %G'"
+    },
+    {
+      "script": "date -u -d @1700000000 '+%Y-%m-%d %H:%M:%S %c %r %R %T %D %F %p %P'"
+    }
+  ],
+  "title": "date -u -d @epoch UTC formatting"
+}

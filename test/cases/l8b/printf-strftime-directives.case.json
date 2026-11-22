@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-strftime-directives",
+  "steps": [
+    {
+      "script": "printf '%(%Y-%m-%d %H:%M:%S %Z %z %a %A %b %h %B %C %d %D %e %F %g %G %I %j %k %l %m %M %p %P %r %R %s %S %u %U %V %w %W %x %X %y %N %Q)T' '0'"
+    }
+  ],
+  "title": "printf %(...)T strftime directives at epoch 0"
+}

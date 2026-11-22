@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-format-escapes",
+  "steps": [
+    {
+      "script": "printf '\\a|\\b|\\e|\\E|\\f|\\n|\\r|\\t|\\v|\\\\|\\0101|\\101|\\777|\\x4|\\x41|\\xc3\\xa9|\\xc3\\x28|\\u00e9|\\U0001f600|\\cX'"
+    }
+  ],
+  "title": "printf format string escape sequences"
+}

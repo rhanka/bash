@@ -1,0 +1,12 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-float-g-special",
+  "steps": [
+    {
+      "script": "printf '%g|%g|%g|%#g|%.2g|%F|%E|%f' '10000' '1000000' '0.00001' '100' '123.4' 'Infinity' '-Infinity' 'NaN'"
+    }
+  ],
+  "title": "printf %g formatting and special float values"
+}

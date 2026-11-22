@@ -1,0 +1,33 @@
+{
+  "case": "l8b/printf-int-flags-width-prec",
+  "caseHash": "b406ab5f07c0ebbd308a41c0dc3c4e4020cfcf8a5ca9718c89b4e354f4a6b2be",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "TZ": "UTC"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "+42| 42|+42|00042|42   |    0042|0|     0"
+    }
+  ]
+}

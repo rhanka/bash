@@ -1,0 +1,29 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/base64-encode-empty-and-short",
+  "steps": [
+    {
+      "script": "base64",
+      "stdin": ""
+    },
+    {
+      "script": "base64",
+      "stdin": "f"
+    },
+    {
+      "script": "base64",
+      "stdin": "fo"
+    },
+    {
+      "script": "base64",
+      "stdin": "foo"
+    },
+    {
+      "script": "base64",
+      "stdin": "hello"
+    }
+  ],
+  "title": "base64 encoding of empty and short inputs"
+}

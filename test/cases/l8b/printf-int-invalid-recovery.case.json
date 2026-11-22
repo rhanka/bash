@@ -1,0 +1,24 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/printf-int-invalid-recovery",
+  "steps": [
+    {
+      "script": "printf '%d' '-0x10'"
+    },
+    {
+      "script": "printf '%d' '64#a'"
+    },
+    {
+      "script": "printf '%d' '3abc'"
+    },
+    {
+      "script": "printf '%d' 'abc'"
+    },
+    {
+      "script": "printf '%d' '42 '"
+    }
+  ],
+  "title": "printf integer invalid argument recovery"
+}
