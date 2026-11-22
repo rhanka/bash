@@ -6,11 +6,14 @@ import { camelCase, functions, namespace, resourceKinds } from "./layout.js";
 export function instantiateEngine(getCoreModule, instantiateCore, options, coreName) {
   const wasm = options?.shim?.globals?.WebAssembly ?? globalThis.WebAssembly;
   const instantiate = instantiateCore ?? ((module, imports) => new wasm.Instance(module, imports));
-  return linkEngine((imports) => instantiate(getCoreModule(coreName), imports).exports, { onTrap: options?.onTrap });
+  return linkEngine((imports) => instantiate(getCoreModule(coreName), imports).exports, {
+    onTrap: options?.onTrap,
+    inspect: options?.inspect,
+  });
 }
 
 /** Links core exports. The linker and registry are injectable for deterministic ABI fixtures. */
-export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {}, bindings = functions) {
+export function linkEngine(link, { onTrap, Registry = FinalizationRegistry, inspect } = {}, bindings = functions) {
   const table = new Map();
   const wrappers = new WeakMap();
   const resources = new Map();
@@ -204,6 +207,40 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
   }
 
   core = link({ ["[export]" + namespace]: intrinsics });
+  const restoreExport = typeof core["__restore_default"] === "function" ? core["__restore_default"] : null;
+
+  /** Restores the build-matched default shell inside this fresh store, or returns `0n` on refusal. */
+  function restoreDefault() {
+    checkEntry();
+    busy = true;
+    inGuest = true;
+    try {
+      const packed = restoreExport();
+      if (packed === 0n) return 0n;
+      if (typeof packed !== "bigint") throw trap("restore returned a non-i64 value");
+      const vfsId = Number(packed & 0xffffffffn);
+      const shellId = Number((packed >> 32n) & 0xffffffffn);
+      if (!vfsId || !shellId || vfsId === shellId) throw trap("restore returned invalid handles");
+      const vfs = liftOwner("vfs", vfsId);
+      const shell = liftOwner("shell", shellId);
+      return { vfs, shell };
+    } catch (error) {
+      throw fail(error);
+    } finally {
+      inGuest = false;
+      busy = false;
+    }
+  }
+
+  // Passive observation for the offline snapshot capture tool (and ABI fixtures). Production
+  // passes no `inspect`, so this changes nothing observable there.
+  if (inspect) {
+    inspect({
+      exports: core,
+      handles: () => [...table.values()].map(({ id, kind, rep, hostOwned, borrows }) =>
+        ({ id, kind, rep, hostOwned, borrows })),
+    });
+  }
   const types = {};
   return {
     types,
@@ -217,6 +254,7 @@ export function linkEngine(link, { onTrap, Registry = FinalizationRegistry } = {
         stop();
       },
       async whenIdle() {},
+      ...(restoreExport ? { restoreDefault } : null),
     },
   };
 }

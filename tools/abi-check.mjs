@@ -85,6 +85,12 @@ export function checkLoaderCore(wat) {
     memory: ["memory", "0"],
     cabi_realloc: wasmSignature(["i32", "i32", "i32", "i32"], ["i32"]),
     memcmp: wasmSignature(["i32", "i32", "i32"], ["i32"]),
+    // L2c snapshot restore: Wasm-internal exports, invisible to the WIT. The generator appends
+    // `__restore_default`; the other two are hand-written glue helpers it calls by index.
+    __restore_preflight: wasmSignature(["i32"], ["i32"]),
+    __restore_grow: wasmSignature(["i32"], ["i32"]),
+    __restore_default: wasmSignature([], ["i64"]),
+    __snapshot_probe: wasmSignature([], ["i64"]),
   };
   if (memories.length !== 1 || !/^  \(memory \(;0;\) \d+\)$/.test(memories[0])) {
     throw new Error("ABI core must have one unshared wasm32 memory without a maximum");

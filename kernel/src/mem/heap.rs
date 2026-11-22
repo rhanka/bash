@@ -555,6 +555,28 @@ mod wasm {
             WasmHeap(UnsafeCell::new(Heap::new()))
         }
 
+        /// Grows linear memory by exactly `pages` for a snapshot restore, without touching the free
+        /// lists: the restored image carries the heap metadata itself. Checks the final linear-memory
+        /// byte size against the explicit 268,435,456 B default cap with non-wrapping arithmetic.
+        /// Returns false (growing nothing) when the cap would be exceeded or the engine refuses.
+        pub(crate) fn restore_grow(&self, pages: usize) -> bool {
+            const DEFAULT_CAP: u64 = 268_435_456;
+            let Some(want) = (pages as u64).checked_mul(PAGE as u64) else { return false };
+            let current = (core::arch::wasm32::memory_size(0) as u64).saturating_mul(PAGE as u64);
+            let Some(final_bytes) = current.checked_add(want) else { return false };
+            if final_bytes > DEFAULT_CAP {
+                return false;
+            }
+            if Memory.grow(pages).is_none() {
+                return false;
+            }
+            // The grown bytes hold restored live data, not free blocks; only the footprint moves,
+            // by exactly the grown amount (every page since start was grown, so this rejoins the
+            // capture; the restored arenas keep their own split once the image is installed).
+            self.heap().ordinary.footprint += want;
+            true
+        }
+
         fn heap(&self) -> &mut Heap {
             // SAFETY: single-threaded, and no allocator method re-enters another one while it holds this
             // reference (the heap calls no allocation function).

@@ -7,6 +7,12 @@ use crate::mem::{MemError, MemResult};
 // The largest implemented return (exec-oneshot) lowers three lists of records.
 static mut LOWERING: [Option<Cleanup>; 3] = [None, None, None];
 
+/// True when no lowering slot is held: the quiescence a snapshot capture requires.
+pub(crate) fn lowering_clean() -> bool {
+    // SAFETY: the Wasm instance is single-threaded; reading the three option slots cannot race.
+    unsafe { &*(&raw const LOWERING) }.iter().all(Option::is_none)
+}
+
 /// Allocate the generated record arrays while the adapter can still report a refusal. Keep the
 /// actual blocks until `Cleanup::new` takes them, even if the ordinary heap is fragmented.
 pub fn prepare_lowering(lists: &[(usize, usize, usize)]) -> MemResult<()> {
