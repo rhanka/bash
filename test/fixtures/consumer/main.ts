@@ -6,7 +6,7 @@ import {
 } from "@sentropic/bash";
 import type {
   BashExecResult, BashLogger, BashOptions, Command, CommandContext, CustomCommand, ExecOptions, ExecResult, ExecutionLimitProfile,
-  ExecutionLimits, IFileSystem, InitialFiles, LazyCommand, NetworkConfig, OverlayFsOptions, ReadWriteFsOptions, SecureFetch, TraceEvent,
+  ExecutionLimits, IFileSystem, InitialFiles, LazyCommand, NetworkConfig, OverlayFsOptions, ReadWriteFsOptions, SecureFetch, SyncWriteOptions, TraceEvent,
 } from "@sentropic/bash";
 import { Bash as BrowserBash } from "@sentropic/bash/browser";
 
@@ -41,6 +41,11 @@ const options: BashOptions = {
   sleep: async () => {}, customCommands: all, logger, trace: (e: TraceEvent) => void e, coverage: { hit: (f: string) => void f },
   defenseInDepth: { enabled: false }, processInfo: { pid: 1, ppid: 0, uid: 2, gid: 3 },
 };
+
+const separate: BashOptions = { fs: new InMemoryFs(), isolation: "separate" };
+const shared: BashOptions = { fs: new InMemoryFs(), isolation: "shared" };
+const syncWrite: SyncWriteOptions = { encoding: "utf8", mode: 0o600, mtime: new Date(0) };
+void [separate, shared, syncWrite];
 
 async function main(): Promise<void> {
   const bash = new Bash(options);
