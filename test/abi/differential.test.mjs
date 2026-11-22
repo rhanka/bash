@@ -86,8 +86,10 @@ function transcript({ engine, _util }, testKernel) {
       if (req.tag === "read-file") assert.deepEqual(result, { tag: "ok", val: { tag: "data", val: binary } });
     }
     assert.deepEqual(err("[method]vfs.mount-vfs", "same-store source", "unsupported", () => v.mountVfs(root, source)).path, root);
-    assert.deepEqual(err("[method]vfs.mount-host", "maximum ID", "unsupported", () => v.mountHost(root, 0xffffffff)).path, root);
-    assert.deepEqual(err("[method]vfs.unmount", "root", "unsupported", () => v.unmount(root)).path, root);
+    value("[method]vfs.mount-host", "maximum ID", () => v.mountHost(root, 0xffffffff));
+    assert.deepEqual(err("[method]vfs.mount-host", "duplicate", "exists", () => v.mountHost(root, 1)).path, root);
+    value("[method]vfs.unmount", "mounted path", () => v.unmount(root));
+    assert.deepEqual(err("[method]vfs.unmount", "missing mount", "not-found", () => v.unmount(root)).path, root);
     value("[method]vfs.take-dirty", "L2 drain", () => v.takeDirty());
     value("[method]vfs.used-bytes", "after writes", () => v.usedBytes());
     drop(source);

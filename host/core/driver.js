@@ -7,6 +7,7 @@ import { fsState } from "./fs.js";
 import { resolvePath } from "./paths.js";
 import { stringLimit } from "./limits.js";
 import { FS_METHODS, Scope, settleWithin } from "./membrane.js";
+import { serveFsBatch } from "./fs-batch.js";
 
 const CHUNK = 1 << 20;
 const FUEL = 2_048n;
@@ -300,7 +301,7 @@ function* serve(x, pc) {
       return yield* serveExtension(x, (scope) => scope.guard(B.sleep)(Number(req.val)).then(() => ({ tag: "completed" })), { tag: "failed", val: utf8("sleep failed") });
     }
     case "fs-batch":
-      return yield* serveFsBatch(x, req.val);
+      return yield* serveFsBatch(x, req.val, serveExtension);
     default:
       return { outcome: { tag: "denied" } };
   }
@@ -327,34 +328,6 @@ function* serveExtension(x, start, onError) {
   x.scopes.delete(scope);
   if (r.kind === "err") return { outcome: onError };
   return { outcome: r.value };
-}
-
-function* serveFsBatch(x, batch) {
-  const B = x.B;
-  const fs = B.userFs;
-  if (!fs) return { outcome: { tag: "denied" } };
-  return yield* serveExtension(
-    x,
-    async (scope) => {
-      const g = scope.wrap(fs, FS_METHODS);
-      const results = [];
-      for (const op of batch.ops) {
-        if (op.tag !== "stat") {
-          results.push({ tag: "err", val: { code: "unsupported", path: new Uint8Array(0) } });
-          continue;
-        }
-        const path = decodeUtf8(op.val);
-        try {
-          const s = await g.stat(path);
-          results.push({ tag: "ok", val: { tag: "info", val: { kind: s.isDirectory ? "directory" : s.isSymbolicLink ? "symlink" : "file", size: BigInt(s.size), mode: s.mode, mtimeMs: BigInt(s.mtime.getTime()), dev: 0n, ino: 0n } } });
-        } catch {
-          results.push({ tag: "err", val: { code: "not-found", path: op.val } });
-        }
-      }
-      return { tag: "fs", val: results };
-    },
-    { tag: "failed", val: utf8("fs-batch failed") },
-  );
 }
 
 const HOST_PATH_HINTS = new Set();

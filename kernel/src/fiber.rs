@@ -1,5 +1,6 @@
 //! One exec: a resumable VM, its pipe streams and the epoch-checked resource boundary.
 use crate::cmd::{CmdCtx, CmdFrame, CmdPoll};
+use crate::fs::{BatchList, BatchOk, BatchOp, BatchResult, Code};
 use crate::limits::{
     self, I_ARRAY_ELEMENTS, I_CALL_DEPTH, I_COMMAND_COUNT, I_EXEC_DEPTH, I_FS_BYTES, I_INPUT_BYTES,
     I_LIVE_BYTES, I_OUTPUT_SIZE, I_SOURCE_BYTES, I_STRING_LENGTH, I_WORK_UNITS,
@@ -17,7 +18,7 @@ mod syntax;
 mod vm;
 pub(crate) use expand::BYTE_CHUNK;
 use syntax::{utf16_len, Ast};
-use vm::Vm;
+use vm::{ResolveOutcome, Vm};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -49,9 +50,9 @@ impl TryClone for ExecResult {
 
 /// A host request, owned (it leaves the kernel through the adapter).
 pub enum HostReq {
-    FsStat {
+    FsBatch {
         mount_id: u32,
-        path: KBytes,
+        ops: KVec<BatchOp>,
     },
     LazyFile(KBytes),
     Custom {
@@ -77,8 +78,7 @@ pub enum Step {
 
 /// The driver's answer to a host call, borrowed from the adapter's decoded value.
 pub enum Outcome<'a> {
-    /// First result of an `fs-batch`: `None` for success, else the error code name.
-    Fs(Option<&'static str>),
+    Fs(&'a dyn BatchList<'a, BatchResult<'a>>),
     Data(&'a [u8]),
     CommandExit(i32),
     /// Status of a fetch response.
@@ -140,6 +140,8 @@ impl From<MemError> for Fail {
 pub(crate) enum Pending {
     Custom,
     Kernel,
+    /// A command-path stat issued by VM dispatch against a host mount.
+    ResolveStat,
     #[allow(dead_code)]
     Test(u8, u64),
 }
@@ -229,6 +231,15 @@ pub struct Fiber {
     epoch: u64,
     state: State,
     pub(crate) body: KChunks,
+    #[cfg(feature = "test-commands")]
+    fs_test_path: KBytes,
+    /// Normalized path awaiting its `ResolveStat` outcome (set at emit, taken on resume).
+    resolve_want: Option<KBytes>,
+    /// A chained host call parked when the fuel slice ran out; re-emitted by `advance`.
+    parked: Option<(Pending, HostReq)>,
+    /// Full `__write` payload still being appended chunk by chunk (`test-commands` only).
+    #[cfg(feature = "test-commands")]
+    fs_write_data: Option<KBytes>,
     call_env: Option<Env>,
     fuel: Cell<u64>,
     fuel_credit: Cell<u8>,
@@ -254,6 +265,18 @@ pub struct Opts<'a> {
 }
 
 impl Fiber {
+    pub fn host_fs_batch(&self, mount_id: u32, ops: KVec<BatchOp>) -> Result<HostReq, Code> {
+        if !self.shell.granted(G_HOST_FS) {
+            return Err(Code::Permission);
+        }
+        // One tick per op, best-effort: the slice gate in `resume` decides whether a
+        // chained call may continue, but the fuel itself is always accounted here.
+        for _ in 0..ops.len() {
+            self.tick();
+        }
+        Ok(HostReq::FsBatch { mount_id, ops })
+    }
+
     pub fn spawn(shell: KRc<Shell>, parent: Option<&Fiber>, o: &Opts<'_>) -> MemResult<Fiber> {
         let cap = shell.lim.vals[I_LIVE_BYTES];
         let live = parent
@@ -338,6 +361,12 @@ impl Fiber {
             stdin: KChunks::new_in(&live),
             input_window: KBytes::new_in(&live),
             body: KChunks::new_in(&live),
+            #[cfg(feature = "test-commands")]
+            fs_test_path: KBytes::new_in(&scratch),
+            resolve_want: None,
+            parked: None,
+            #[cfg(feature = "test-commands")]
+            fs_write_data: None,
             kept: KVec::new_in(&live),
             vm: Vm::new(&live),
             params: KVec::new_in(&live),
@@ -696,7 +725,16 @@ impl Fiber {
             });
         }
         match self.complete(pending, outcome) {
-            Ok(()) => {}
+            Ok(Some((next, req))) => {
+                // Chained host calls (test-command chunking, resolve retries) must still
+                // yield when the fuel slice is spent, instead of chaining without bound.
+                if !self.take_fuel() {
+                    self.parked = Some((next, req));
+                    return Ok(Step::OutOfFuel);
+                }
+                return Ok(self.host(next, req));
+            }
+            Ok(None) => {}
             Err(CompleteError::BadOutcome) => {
                 self.state = State::Pending(pending);
                 return Err(CallError::BadState);
@@ -735,6 +773,11 @@ impl Fiber {
             State::Done => return self.done_step(),
             State::Pending(_) | State::Spin => return Step::OutOfFuel,
             State::Ready => {}
+        }
+        // A chained host call parked by `resume` on an empty fuel slice is re-emitted
+        // on the next slice instead of being dropped.
+        if let Some((pending, req)) = self.parked.take() {
+            return self.host(pending, req);
         }
         if let Some(source) = self.script.take() {
             if let Some(step) = self.prepare(source) {
@@ -893,7 +936,7 @@ impl Fiber {
         ))
     }
 
-    fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<(), CompleteError> {
+    fn complete(&mut self, p: Pending, o: Outcome<'_>) -> Result<Option<(Pending, HostReq)>, CompleteError> {
         match p {
             Pending::Custom => match o {
                 Outcome::CommandExit(n) => self.last_exit = n,
@@ -909,10 +952,32 @@ impl Fiber {
                 }
                 _ => return Err(CompleteError::BadOutcome),
             },
+            Pending::ResolveStat => return self.complete_resolve(o),
             Pending::Kernel => return Err(CompleteError::BadOutcome),
-            Pending::Test(code, aux) => self.complete_test(code, aux, o)?,
+            Pending::Test(code, aux) => return self.complete_test(code, aux, o),
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// Stores a `ResolveStat` outcome in the stashed dispatch so the VM re-derives
+    /// the same path and continues synchronously.
+    fn complete_resolve(&mut self, o: Outcome<'_>) -> Result<Option<(Pending, HostReq)>, CompleteError> {
+        let outcome = match o {
+            Outcome::Fs(list) if list.len() == 1 => match list.at(0) {
+                Some(Ok(BatchOk::Info(stat))) => ResolveOutcome::of_stat(stat),
+                // An unreadable host path resolves as missing: resolution keeps the
+                // kernel's fail-closed 127 / search-continue / registry-fallback shape.
+                Some(Err(_)) => ResolveOutcome::Missing,
+                _ => return Err(CompleteError::BadOutcome),
+            },
+            // A revoked mount reads as missing rather than dispatching a command.
+            Outcome::Denied => ResolveOutcome::Missing,
+            _ => return Err(CompleteError::BadOutcome),
+        };
+        let want = self.resolve_want.take().ok_or(CompleteError::BadOutcome)?;
+        let simple = self.vm.simple.as_mut().ok_or(CompleteError::BadOutcome)?;
+        simple.path.resolve_cache = Some((want, outcome));
+        Ok(None)
     }
 
     fn end_fail(&mut self, fail: Fail) -> Step {
@@ -1048,6 +1113,12 @@ impl Fiber {
         self.active = None;
         self.stdin.clear();
         self.body.clear();
+        self.resolve_want = None;
+        self.parked = None;
+        #[cfg(feature = "test-commands")]
+        {
+            self.fs_write_data = None;
+        }
         self.input_window = KBytes::new_in(&self.live);
         self.last_arg = None;
         self.params = KVec::new_in(&self.live);
@@ -1139,7 +1210,7 @@ impl Fiber {
         _code: u8,
         _aux: u64,
         _o: Outcome<'_>,
-    ) -> Result<(), CompleteError> {
+    ) -> Result<Option<(Pending, HostReq)>, CompleteError> {
         Err(CompleteError::BadOutcome)
     }
 }
