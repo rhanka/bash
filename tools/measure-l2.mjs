@@ -193,8 +193,8 @@ export function packageSplit(tree, env) {
 
 /**
  * The Gate L2 verdict function (spec section 6). Compares unrounded median-of-run medians against
- * the inclusive kernel thresholds and the fixed JS bounds, and reports the browser graph against
- * both candidate caps while the owner choice is pending. Returns `{ verdict, kernel, js }` where
+ * the inclusive kernel thresholds and the fixed JS bounds, with the provisional browser cap
+ * B <= 58,000 B decided by the owner on 21/11. Returns `{ verdict, kernel, js }` where
  * verdict is one of "go", "go-kernel-only" or "no-go". A red correctness suite forces "no-go".
  */
 export function decideGateL2({ m1, m2, m3a, m5, wasmRaw, wasmGzip, b, n, t, z, suitesPass }) {
@@ -211,10 +211,11 @@ export function decideGateL2({ m1, m2, m3a, m5, wasmRaw, wasmGzip, b, n, t, z, s
     z: z <= 30000,
     b45: b <= 45000,
     b58: b <= 58000,
+    b: b <= 58000,
   };
   if (!suitesPass) return { verdict: "no-go", kernel, js, reason: "correctness suite is red" };
   if (!Object.values(kernel).every(Boolean)) return { verdict: "no-go", kernel, js, reason: "kernel miss" };
-  if (!js.n || !js.t || !js.z || b > 45000) {
+  if (!js.n || !js.t || !js.z || !js.b) {
     return { verdict: "go-kernel-only", kernel, js, reason: "JS-only miss" };
   }
   return { verdict: "go", kernel, js, reason: "all thresholds pass" };
