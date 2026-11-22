@@ -1,0 +1,40 @@
+{
+  "case": "l4/tilde-unset-and-empty-home",
+  "caseHash": "762c284b96d942b32843a46f8bf9815f0b7f875aa466b65c7e8777c85ee8cb01",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "/home/user\n"
+    },
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "[~][~/a]\n"
+    }
+  ]
+}

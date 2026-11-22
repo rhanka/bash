@@ -1,0 +1,34 @@
+{
+  "case": "l4/arith-command-and-cfor",
+  "caseHash": "bd6b80f49577a54037d9deb4764d998f54dd8e83a449085d164d5f661913d722",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "i": "6",
+        "s": "12"
+      },
+      "exitCode": 0,
+      "stderr": "bash: arithmetic expression: syntax error: operand expected (error token is \"+\")\n",
+      "stdout": "z:1\nnz:0\nerr:1\nsum:12:i:6\n"
+    }
+  ]
+}

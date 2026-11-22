@@ -1,0 +1,12 @@
+{
+  "id": "l4/arith-text-vs-var-indirection",
+  "steps": [
+    {
+      "script": "x='1 + 2'; a=b; b='3 + 4'; echo $(( $x * 3 )) $(( x * 3 )) $(( a * 2 ))"
+    }
+  ],
+  "tags": [
+    "arith"
+  ],
+  "title": "Arithmetic text-level $var pre-expansion versus bare variable and recursive indirection"
+}

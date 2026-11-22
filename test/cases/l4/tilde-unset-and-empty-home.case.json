@@ -1,0 +1,17 @@
+{
+  "id": "l4/tilde-unset-and-empty-home",
+  "steps": [
+    {
+      "env": {},
+      "replaceEnv": true,
+      "script": "echo ~"
+    },
+    {
+      "script": "HOME=''; echo \"[~][~/a]\""
+    }
+  ],
+  "tags": [
+    "tilde"
+  ],
+  "title": "Tilde expansion with unset HOME and empty HOME"
+}

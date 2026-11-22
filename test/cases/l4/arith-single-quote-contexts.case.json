@@ -1,0 +1,12 @@
+{
+  "id": "l4/arith-single-quote-contexts",
+  "steps": [
+    {
+      "script": "echo $(('a')); echo s1:$?; (( x = '42' )); echo s2:$?:$x; (( y = 'a' )); echo s3:$?:$y; echo $(($'15' + $\"27\"))"
+    }
+  ],
+  "tags": [
+    "arith"
+  ],
+  "title": "Single-quote error in $((...)) versus decimal parse in ((...)) and $'...'/$\"...\" primaries"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "l4/arith-incdec-compound",
+  "steps": [
+    {
+      "script": "x=5; echo $((x++)) $((++x)) $((x--)) $((--x)); (( x += 3, x *= 2, x -= 4, x &= 15, x |= 16, x ^= 3 )); echo $x"
+    }
+  ],
+  "tags": [
+    "arith"
+  ],
+  "title": "Arithmetic pre/post inc/dec and arithmetic/bitwise compound assignments"
+}

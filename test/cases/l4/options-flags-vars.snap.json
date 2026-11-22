@@ -1,0 +1,32 @@
+{
+  "case": "l4/options-flags-vars",
+  "caseHash": "8c66ada9a1ec7b6ea85e68039f731af090592b3f7c1489d7a259db66c08f4baf",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "hBs|braceexpand:hashall:interactive-comments|globskipdots\nhfuBs|braceexpand:hashall:interactive-comments:noglob:nounset|extglob:globskipdots:nullglob\nhBs\n"
+    }
+  ]
+}

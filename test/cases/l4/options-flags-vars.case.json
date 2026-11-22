@@ -1,0 +1,12 @@
+{
+  "id": "l4/options-flags-vars",
+  "steps": [
+    {
+      "script": "echo \"$-|$SHELLOPTS|$BASHOPTS\"; set -uf; shopt -s extglob nullglob; echo \"$-|$SHELLOPTS|$BASHOPTS\"; set +uf; shopt -u extglob nullglob; echo \"$-\""
+    }
+  ],
+  "tags": [
+    "options"
+  ],
+  "title": "Shell option flags $-, SHELLOPTS, and BASHOPTS"
+}

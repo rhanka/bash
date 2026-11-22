@@ -1,0 +1,35 @@
+{
+  "case": "l4/arith-precedence-shortcircuit",
+  "caseHash": "c9da1fb102905df2c721c6cb75bd8b2f4c48d127f6af65c66f7c59770c5dec04",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "a": "2",
+        "b": "5",
+        "x": "1"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "0 1 1 1 10 1 20 2 5\n"
+    }
+  ]
+}
