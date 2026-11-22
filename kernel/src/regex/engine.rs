@@ -490,8 +490,6 @@ impl<'a> ExecCtx<'a> {
         while pos <= self.haystack.len() {
             let m = self.match_full_at(pos, false)?;
             let Some(m) = m else { break };
-            let empty_reported = m.reported_start == m.end;
-            let zero_progress = m.end == pos && m.raw_start == pos;
 
             if last_nonempty && m.raw_start == pos && m.end == pos {
                 match policy {
@@ -519,19 +517,11 @@ impl<'a> ExecCtx<'a> {
                 pos = m.end;
             } else {
                 last_nonempty = false;
-                if pos >= self.haystack.len() {
+                if m.end >= self.haystack.len() {
                     break;
                 }
-                let advance_from = if zero_progress || empty_reported {
-                    m.end
-                } else {
-                    m.end
-                };
-                if advance_from >= self.haystack.len() {
-                    break;
-                }
-                let (_, step) = decode_scalar(self.haystack, advance_from);
-                pos = advance_from + step;
+                let (_, step) = decode_scalar(self.haystack, m.end);
+                pos = m.end + step;
             }
         }
         Ok(out)
@@ -1102,9 +1092,18 @@ impl<'a> ExecCtx<'a> {
         steps: &mut u64,
     ) -> Result<Option<MatchSlots>, MatchError> {
         enum BtOp {
-            Eval { pc: u32, pos: usize },
-            RestoreSlot { slot: usize, prev: Option<usize> },
-            RestoreKeep { prev: Option<usize> },
+            Eval {
+                pc: u32,
+                pos: usize,
+            },
+            RestoreSlot {
+                slot: usize,
+                prev: Option<usize>,
+                prev_cap_id: u32,
+            },
+            RestoreKeep {
+                prev: Option<usize>,
+            },
         }
 
         let num_slots = ((self.groups as usize) + 1) * 2;
@@ -1113,10 +1112,19 @@ impl<'a> ExecCtx<'a> {
             slots.try_push(None)?;
         }
         let mut keep: Option<usize> = None;
-        let mut cap_epoch = 0u64;
 
-        // Bounded visited table keyed by `(cap_epoch, pc, pos)`, capped at MAX_BACKREF_VISITED_STATES.
-        let mut visited: KMap<(u64, u32, usize), ()> = KMap::new_in(self.b);
+        // Intern active capture slot slices (`slots[2..]`) so `visited` keys on `(cap_id, pc, pos)`
+        // and stays invariant when `Save` writes an unchanged value or `RestoreSlot` restores a prior state.
+        let mut cap_intern: KMap<KVec<Option<usize>>, u32> = KMap::new_in(self.b);
+        let mut init_key: KVec<Option<usize>> =
+            KVec::with_capacity_in(num_slots.saturating_sub(2), self.b)?;
+        init_key.try_extend_from_slice(&slots.as_slice()[2..])?;
+        cap_intern.try_insert(init_key, 0u32)?;
+        let mut next_cap_id = 1u32;
+        let mut cap_id = 0u32;
+
+        // Bounded visited table keyed by `(cap_id, pc, pos)`, capped at MAX_BACKREF_VISITED_STATES.
+        let mut visited: KMap<(u32, u32, usize), ()> = KMap::new_in(self.b);
         let mut visited_count = 0usize;
 
         let mut stack: KVec<BtOp> = KVec::new_in(self.b);
@@ -1127,9 +1135,13 @@ impl<'a> ExecCtx<'a> {
 
         while let Some(op) = stack.pop() {
             match op {
-                BtOp::RestoreSlot { slot, prev } => {
+                BtOp::RestoreSlot {
+                    slot,
+                    prev,
+                    prev_cap_id,
+                } => {
                     slots.as_mut_slice()[slot] = prev;
-                    cap_epoch = cap_epoch.wrapping_add(1);
+                    cap_id = prev_cap_id;
                     continue;
                 }
                 BtOp::RestoreKeep { prev } => {
@@ -1144,7 +1156,7 @@ impl<'a> ExecCtx<'a> {
                     if (*steps & 15) == 0 {
                         self.charge(1)?;
                     }
-                    let key = (cap_epoch, pc, pos);
+                    let key = (cap_id, pc, pos);
                     if visited.get(&key).is_some() {
                         continue;
                     }
@@ -1171,11 +1183,32 @@ impl<'a> ExecCtx<'a> {
                         }
                         Inst::Save(slot_u32) => {
                             let slot = slot_u32 as usize;
-                            if slot < slots.len() {
+                            if slot >= 2 && slot < slots.len() {
                                 let prev = slots.as_slice()[slot];
-                                slots.as_mut_slice()[slot] = Some(pos);
-                                cap_epoch = cap_epoch.wrapping_add(1);
-                                stack.try_push(BtOp::RestoreSlot { slot, prev })?;
+                                let next_val = Some(pos);
+                                if prev != next_val {
+                                    let prev_cap_id = cap_id;
+                                    slots.as_mut_slice()[slot] = next_val;
+                                    let active_slice = &slots.as_slice()[2..];
+                                    cap_id = if let Some(&existing) = cap_intern.get(active_slice) {
+                                        existing
+                                    } else {
+                                        let id = next_cap_id;
+                                        next_cap_id = next_cap_id.wrapping_add(1);
+                                        if cap_intern.len() < MAX_BACKREF_VISITED_STATES {
+                                            let mut k =
+                                                KVec::with_capacity_in(active_slice.len(), self.b)?;
+                                            k.try_extend_from_slice(active_slice)?;
+                                            cap_intern.try_insert(k, id)?;
+                                        }
+                                        id
+                                    };
+                                    stack.try_push(BtOp::RestoreSlot {
+                                        slot,
+                                        prev,
+                                        prev_cap_id,
+                                    })?;
+                                }
                             }
                             stack.try_push(BtOp::Eval { pc: pc + 1, pos })?;
                         }

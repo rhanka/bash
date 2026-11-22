@@ -874,3 +874,231 @@ fn perl_unclosed_quote_runs_to_end() {
     assert!(r.is_match(b"[a+b](c*)", &b, &mut no_limit).unwrap());
     assert!(!r.is_match(b"ac", &b, &mut no_limit).unwrap());
 }
+
+#[test]
+fn backref_nullable_capture_loops_succeed_without_limit() {
+    let b = test_budget();
+    let flags = RegexFlags {
+        allow_backrefs: true,
+        ..Default::default()
+    };
+
+    // `(a*)*\1` on "", "a", "aa", "b": previously hit BacktrackLimitExceeded due to cap_epoch bumping on unchanged Save.
+    let mut r = compile_ere(br"(a*)*\1", flags, &b);
+    assert_eq!(
+        r.find_at(b"", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 0 })
+    );
+    assert_eq!(
+        r.find_at(b"a", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 1 })
+    );
+    assert_eq!(
+        r.find_at(b"aa", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 2 })
+    );
+    assert_eq!(
+        r.find_at(b"b", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 0 })
+    );
+
+    // Anchored failing match on nullable capture loop must return Ok(None), not BacktrackLimitExceeded.
+    let mut r_anch = compile_ere(br"^(a*)*\1$", flags, &b);
+    assert_eq!(r_anch.find_at(b"b", 0, &b, &mut no_limit).unwrap(), None);
+    assert_eq!(
+        r_anch.find_at(b"a", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 1 })
+    );
+
+    // Nested nullable capture loops and alternation branches.
+    let mut r_nested = compile_ere(br"^((a?)+)*\1$", flags, &b);
+    assert_eq!(
+        r_nested.find_at(b"", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 0 })
+    );
+    assert_eq!(
+        r_nested.find_at(b"aa", 0, &b, &mut no_limit).unwrap(),
+        Some(Span { start: 0, end: 2 })
+    );
+    assert_eq!(r_nested.find_at(b"b", 0, &b, &mut no_limit).unwrap(), None);
+
+    // Unreferenced nullable capture group preserves its empty capture span.
+    let mut r_unref = compile_ere(br"(a)(b*)*\1", flags, &b);
+    let caps = r_unref.captures_at(b"aa", 0, &b, &mut no_limit).unwrap().unwrap();
+    assert_eq!(caps.full(), Span { start: 0, end: 2 });
+    assert_eq!(caps.group(1), Some(Span { start: 0, end: 1 }));
+    assert_eq!(caps.group(2), Some(Span { start: 1, end: 1 }));
+}
+
+#[test]
+fn stacked_postfix_quantifiers_capped_and_iterative() {
+    let b = test_budget();
+
+    // 201 stacked `*` exceeds MAX_NESTING_DEPTH (200).
+    let mut p201 = KBytes::new_in(&b);
+    p201.try_push(b'a').unwrap();
+    for _ in 0..201 {
+        p201.try_push(b'*').unwrap();
+    }
+    assert_eq!(
+        CompiledRegex::compile(
+            p201.as_slice(),
+            RegexMode::Extended,
+            RegexFlags::default(),
+            CompileLimits::default(),
+            &b
+        )
+        .err(),
+        Some(RegexError::CompileCap(CapKind::NestingTooDeep {
+            limit: MAX_NESTING_DEPTH
+        }))
+    );
+
+    // Adversarial 25,000 stacked `*` bytes rejected immediately with NestingTooDeep (no stack overflow).
+    let mut p25k = KBytes::with_capacity_in(25_001, &b).unwrap();
+    p25k.try_push(b'a').unwrap();
+    for _ in 0..25_000 {
+        p25k.try_push(b'*').unwrap();
+    }
+    assert_eq!(
+        CompiledRegex::compile(
+            p25k.as_slice(),
+            RegexMode::Extended,
+            RegexFlags::default(),
+            CompileLimits::default(),
+            &b
+        )
+        .err(),
+        Some(RegexError::CompileCap(CapKind::NestingTooDeep {
+            limit: MAX_NESTING_DEPTH
+        }))
+    );
+
+    // 201 stacked `{1}` intervals also rejected with NestingTooDeep.
+    let mut p_int = KBytes::new_in(&b);
+    p_int.try_push(b'a').unwrap();
+    for _ in 0..201 {
+        p_int.try_extend_from_slice(b"{1}").unwrap();
+    }
+    assert_eq!(
+        CompiledRegex::compile(
+            p_int.as_slice(),
+            RegexMode::Extended,
+            RegexFlags::default(),
+            CompileLimits::default(),
+            &b
+        )
+        .err(),
+        Some(RegexError::CompileCap(CapKind::NestingTooDeep {
+            limit: MAX_NESTING_DEPTH
+        }))
+    );
+
+    // Combined group + quantifier depth exceeding 200 is rejected.
+    let mut p_mix = KBytes::new_in(&b);
+    for _ in 0..100 {
+        p_mix.try_extend_from_slice(b"(?:").unwrap();
+    }
+    p_mix.try_push(b'a').unwrap();
+    for _ in 0..101 {
+        p_mix.try_push(b'*').unwrap();
+    }
+    for _ in 0..100 {
+        p_mix.try_push(b')').unwrap();
+    }
+    assert_eq!(
+        CompiledRegex::compile(
+            p_mix.as_slice(),
+            RegexMode::Perl,
+            RegexFlags::default(),
+            CompileLimits::default(),
+            &b
+        )
+        .err(),
+        Some(RegexError::CompileCap(CapKind::NestingTooDeep {
+            limit: MAX_NESTING_DEPTH
+        }))
+    );
+
+    // Exact boundary (200 stacked `*`) compiles and matches cleanly.
+    let mut p200 = KBytes::new_in(&b);
+    p200.try_push(b'a').unwrap();
+    for _ in 0..200 {
+        p200.try_push(b'*').unwrap();
+    }
+    let mut r200 = compile_ere(p200.as_slice(), RegexFlags::default(), &b);
+    assert!(r200.is_match(b"aaa", &b, &mut no_limit).unwrap());
+
+    // Zero-length repeated intervals `a{0}{1000}{1000}` do not spin the compiler.
+    let mut r_zero = compile_ere(b"a{0}{1000}{1000}", RegexFlags::default(), &b);
+    assert!(r_zero.is_match(b"", &b, &mut no_limit).unwrap());
+
+    // Capturing empty nested repeats `(()){1000}{1000}` hit ProgramTooLarge cleanly.
+    assert_eq!(
+        CompiledRegex::compile(
+            b"(()){1000}{1000}",
+            RegexMode::Extended,
+            RegexFlags::default(),
+            CompileLimits::default(),
+            &b
+        )
+        .err(),
+        Some(RegexError::CompileCap(CapKind::ProgramTooLarge {
+            limit: MAX_PROGRAM_INSTS
+        }))
+    );
+
+    // High custom depth verifies iterative compiler, estimator, prefilter, and Drop have no stack overflow.
+    let mut p3000 = KBytes::with_capacity_in(3_001, &b).unwrap();
+    p3000.try_push(b'a').unwrap();
+    for _ in 0..3_000 {
+        p3000.try_push(b'*').unwrap();
+    }
+    let custom = CompileLimits {
+        max_nesting_depth: 5_000,
+        ..CompileLimits::default()
+    };
+    let mut r3000 = CompiledRegex::compile(
+        p3000.as_slice(),
+        RegexMode::Extended,
+        RegexFlags::default(),
+        custom,
+        &b,
+    )
+    .unwrap();
+    assert!(r3000.is_match(b"aa", &b, &mut no_limit).unwrap());
+}
+
+#[test]
+fn find_all_keep_reset_and_zero_length_boundaries() {
+    let b = test_budget();
+    // `a\K` consumes 'a' (m.end > m.raw_start) while reporting empty span (reported_start == end).
+    let mut rk = compile_perl(br"a\K", RegexFlags::default(), &b);
+    let spans = rk.find_all(b"aba", EmptyAdvance::Standard, &b, &mut no_limit).unwrap();
+    assert_eq!(
+        spans.as_slice(),
+        &[Span { start: 1, end: 1 }, Span { start: 3, end: 3 }]
+    );
+
+    // Zero-length word boundaries advance cleanly without stalling.
+    let mut rb = compile_ere(br"\b", RegexFlags::default(), &b);
+    let bspans = rb.find_all(b"a b", EmptyAdvance::Standard, &b, &mut no_limit).unwrap();
+    assert_eq!(
+        bspans.as_slice(),
+        &[
+            Span { start: 0, end: 0 },
+            Span { start: 1, end: 1 },
+            Span { start: 2, end: 2 },
+            Span { start: 3, end: 3 },
+        ]
+    );
+}
+
+#[test]
+fn regex_bracket_bang_negation_matches_oracle() {
+    let b = test_budget();
+    let mut r = compile_ere(b"[!a]", RegexFlags::default(), &b);
+    assert!(r.is_match(b"!", &b, &mut no_limit).unwrap());
+    assert!(r.is_match(b"b", &b, &mut no_limit).unwrap());
+    assert!(!r.is_match(b"a", &b, &mut no_limit).unwrap());
+}

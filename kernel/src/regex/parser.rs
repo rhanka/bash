@@ -1,14 +1,15 @@
 //! Pattern parsers for ERE, BRE (`Grep`/`Sed`/`Expr`), `Fixed` and Perl-subset modes.
 //!
-//! Produces an [`Ast`] plus the bracket-class table and named-group map, enforcing
-//! compile-time structural caps (`max_nesting_depth`, `max_capture_groups`,
-//! `max_repeat_expansion`) and validating backreferences against `allow_backrefs`.
+//! Produces a flat post-order [`AstNode`] arena plus the bracket-class table and
+//! named-group map, enforcing compile-time structural caps (`max_nesting_depth` on both
+//! groups and stacked postfix quantifiers, `max_capture_groups`, `max_repeat_expansion`)
+//! and validating backreferences against `allow_backrefs`.
 
 use super::{
     decode_scalar, BreDialect, CapKind, CompileLimits, RegexError, RegexFlags, RegexMode,
     SyntaxKind, RAW_BYTE_BASE,
 };
-use crate::mem::{Budget, KBox, KBytes, KVec, MemResult};
+use crate::mem::{Budget, KBytes, KVec, MemResult};
 use crate::util::bytes_in;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +32,7 @@ pub(crate) struct CharClass {
     pub ranges: KVec<(u32, u32)>,
 }
 
-pub(crate) enum Ast {
+pub(crate) enum AstNode {
     Empty,
     Char {
         ch: u32,
@@ -47,22 +48,23 @@ pub(crate) enum Ast {
         group: u8,
         icase: bool,
     },
-    Seq(KVec<Ast>),
-    Alt(KVec<Ast>),
+    Seq(KVec<u32>),
+    Alt(KVec<u32>),
     Repeat {
-        inner: KBox<Ast>,
+        inner: u32,
         min: u32,
         max: Option<u32>,
         lazy: bool,
     },
     Group {
-        inner: KBox<Ast>,
+        inner: u32,
         index: u32,
     },
 }
 
 pub(crate) struct Parsed {
-    pub root: Ast,
+    pub nodes: KVec<AstNode>,
+    pub root: u32,
     pub classes: KVec<CharClass>,
     pub names: KVec<(KBytes, u32)>,
     pub groups: u32,
@@ -96,6 +98,7 @@ struct Parser<'a> {
     refs: KVec<u8>,
     names: KVec<(KBytes, u32)>,
     classes: KVec<CharClass>,
+    nodes: KVec<AstNode>,
     b: &'a Budget,
 }
 
@@ -138,6 +141,7 @@ pub(crate) fn parse(
         refs: KVec::new_in(b),
         names: KVec::new_in(b),
         classes: KVec::new_in(b),
+        nodes: KVec::new_in(b),
         b,
     };
     let mut root = p.parse_alt(false)?;
@@ -158,12 +162,14 @@ pub(crate) fn parse(
         }
     }
     if matches!(mode, RegexMode::Basic(BreDialect::Expr)) {
+        let start_id = p.push_node(AstNode::Assert(AssertKind::StartText))?;
         let mut seq = KVec::new_in(b);
-        seq.try_push(Ast::Assert(AssertKind::StartText))?;
+        seq.try_push(start_id)?;
         seq.try_push(root)?;
-        root = Ast::Seq(seq);
+        root = p.push_node(AstNode::Seq(seq))?;
     }
     Ok(Parsed {
+        nodes: p.nodes,
         root,
         classes: p.classes,
         names: p.names,
@@ -174,26 +180,36 @@ pub(crate) fn parse(
 
 fn parse_fixed(pattern: &[u8], flags: RegexFlags, b: &Budget) -> Result<Parsed, RegexError> {
     let icase = flags.ignore_case;
-    let build_needle = |slice: &[u8]| -> Result<Ast, RegexError> {
+    let mut nodes: KVec<AstNode> = KVec::new_in(b);
+
+    let mut build_needle = |slice: &[u8]| -> Result<u32, RegexError> {
         if slice.is_empty() {
-            return Ok(Ast::Empty);
+            let id = nodes.len() as u32;
+            nodes.try_push(AstNode::Empty)?;
+            return Ok(id);
         }
         let mut items = KVec::new_in(b);
         let mut i = 0;
         while i < slice.len() {
             let (ch, len) = decode_scalar(slice, i);
-            items.try_push(Ast::Char { ch, icase })?;
+            let id = nodes.len() as u32;
+            nodes.try_push(AstNode::Char { ch, icase })?;
+            items.try_push(id)?;
             i += len;
         }
         if items.len() == 1 {
-            Ok(items.pop().unwrap_or(Ast::Empty))
+            Ok(items.pop().unwrap())
         } else {
-            Ok(Ast::Seq(items))
+            let id = nodes.len() as u32;
+            nodes.try_push(AstNode::Seq(items))?;
+            Ok(id)
         }
     };
 
     let root = if pattern.is_empty() {
-        Ast::Empty
+        let id = nodes.len() as u32;
+        nodes.try_push(AstNode::Empty)?;
+        id
     } else {
         let mut branches = KVec::new_in(b);
         let mut start = 0;
@@ -205,12 +221,15 @@ fn parse_fixed(pattern: &[u8], flags: RegexFlags, b: &Budget) -> Result<Parsed, 
         }
         branches.try_push(build_needle(&pattern[start..])?)?;
         if branches.len() == 1 {
-            branches.pop().unwrap_or(Ast::Empty)
+            branches.pop().unwrap()
         } else {
-            Ast::Alt(branches)
+            let id = nodes.len() as u32;
+            nodes.try_push(AstNode::Alt(branches))?;
+            id
         }
     };
     Ok(Parsed {
+        nodes,
         root,
         classes: KVec::new_in(b),
         names: KVec::new_in(b),
@@ -287,15 +306,17 @@ impl<'a> Parser<'a> {
         self.pat.get(self.pos).copied()
     }
 
-    fn boxed(&self, ast: Ast) -> Result<KBox<Ast>, RegexError> {
-        KBox::try_new_in(ast, self.b).map_err(|(_, e)| RegexError::Mem(e))
+    fn push_node(&mut self, node: AstNode) -> Result<u32, RegexError> {
+        let id = self.nodes.len() as u32;
+        self.nodes.try_push(node)?;
+        Ok(id)
     }
 
-    fn char_ast(&self, ch: u32) -> Ast {
-        Ast::Char {
+    fn char_node(&mut self, ch: u32) -> Result<u32, RegexError> {
+        self.push_node(AstNode::Char {
             ch,
             icase: self.cur.i,
-        }
+        })
     }
 
     fn push_class(
@@ -315,11 +336,12 @@ impl<'a> Parser<'a> {
         Ok(id)
     }
 
-    fn class_escape(&mut self, c: u8) -> Result<Ast, RegexError> {
+    fn class_escape(&mut self, c: u8) -> Result<u32, RegexError> {
         let Some((neg, ranges)) = shorthand_ranges(c) else {
             return self.err(SyntaxKind::InvalidEscape);
         };
-        Ok(Ast::Class(self.push_class(neg, false, ranges)?))
+        let cid = self.push_class(neg, false, ranges)?;
+        self.push_node(AstNode::Class(cid))
     }
 
     fn enter_nesting(&mut self) -> Result<(), RegexError> {
@@ -404,7 +426,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_alt(&mut self, in_group: bool) -> Result<Ast, RegexError> {
+    fn parse_alt(&mut self, in_group: bool) -> Result<u32, RegexError> {
         let mut branches = KVec::new_in(self.b);
         let mut branch_idx = 0usize;
         branches.try_push(self.parse_seq(in_group, branch_idx)?)?;
@@ -414,13 +436,13 @@ impl<'a> Parser<'a> {
             branches.try_push(self.parse_seq(in_group, branch_idx)?)?;
         }
         if branches.len() == 1 {
-            Ok(branches.pop().unwrap_or(Ast::Empty))
+            Ok(branches.pop().unwrap())
         } else {
-            Ok(Ast::Alt(branches))
+            self.push_node(AstNode::Alt(branches))
         }
     }
 
-    fn parse_seq(&mut self, in_group: bool, branch_idx: usize) -> Result<Ast, RegexError> {
+    fn parse_seq(&mut self, in_group: bool, branch_idx: usize) -> Result<u32, RegexError> {
         let mut items = KVec::new_in(self.b);
         self.star_lit = self.is_bre_escaped_ops();
         loop {
@@ -451,11 +473,12 @@ impl<'a> Parser<'a> {
                     }
                     let (ch, len) = decode_scalar(self.pat, self.pos);
                     self.pos += len;
-                    items.try_push(self.char_ast(ch))?;
+                    let id = self.char_node(ch)?;
+                    items.try_push(id)?;
                     pushed_any = true;
                 }
                 if pushed_any {
-                    let last = items.pop().unwrap_or(Ast::Empty);
+                    let last = items.pop().unwrap();
                     let wrapped = self.parse_suffix(last)?;
                     items.try_push(wrapped)?;
                 }
@@ -463,7 +486,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let atom = self.parse_atom(first, branch_idx)?;
-            let quantifiable = !matches!(atom, Ast::Assert(_) | Ast::Keep | Ast::Empty);
+            let quantifiable = !matches!(
+                self.nodes.as_slice()[atom as usize],
+                AstNode::Assert(_) | AstNode::Keep | AstNode::Empty
+            );
             let atom = if quantifiable {
                 self.parse_suffix(atom)?
             } else {
@@ -474,17 +500,17 @@ impl<'a> Parser<'a> {
                 }
                 atom
             };
-            if !matches!(atom, Ast::Empty) {
+            if !matches!(self.nodes.as_slice()[atom as usize], AstNode::Empty) {
                 items.try_push(atom)?;
             }
             self.star_lit = self.is_bre_escaped_ops() && self.caret;
         }
         if items.is_empty() {
-            Ok(Ast::Empty)
+            self.push_node(AstNode::Empty)
         } else if items.len() == 1 {
-            Ok(items.pop().unwrap_or(Ast::Empty))
+            Ok(items.pop().unwrap())
         } else {
-            Ok(Ast::Seq(items))
+            self.push_node(AstNode::Seq(items))
         }
     }
 
@@ -492,7 +518,7 @@ impl<'a> Parser<'a> {
         matches!(self.peek(), Some(b'*' | b'+' | b'?'))
     }
 
-    fn parse_atom(&mut self, first: bool, branch_idx: usize) -> Result<Ast, RegexError> {
+    fn parse_atom(&mut self, first: bool, branch_idx: usize) -> Result<u32, RegexError> {
         self.caret = false;
         let c = self.peek().unwrap_or(0);
         if self.is_bre_escaped_ops() {
@@ -502,7 +528,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_atom_bre(&mut self, c: u8, first: bool, branch_idx: usize) -> Result<Ast, RegexError> {
+    fn parse_atom_bre(&mut self, c: u8, first: bool, branch_idx: usize) -> Result<u32, RegexError> {
         match c {
             b'\\' => {
                 let Some(&nc) = self.pat.get(self.pos + 1) else {
@@ -522,10 +548,7 @@ impl<'a> Parser<'a> {
                         self.pop_scope();
                         self.depth -= 1;
                         self.star_lit = save_star;
-                        Ok(Ast::Group {
-                            inner: self.boxed(inner)?,
-                            index,
-                        })
+                        self.push_node(AstNode::Group { inner, index })
                     }
                     (RegexMode::Basic(BreDialect::Sed), b'+' | b'?') => {
                         self.err(SyntaxKind::DanglingQuantifier)
@@ -540,7 +563,7 @@ impl<'a> Parser<'a> {
                             }
                             Err(IntervalErr::NotAnInterval) => {
                                 self.pos = save + 2;
-                                Ok(self.char_ast(b'{' as u32))
+                                self.char_node(b'{' as u32)
                             }
                             Err(IntervalErr::Fail(e)) => Err(e),
                         }
@@ -554,14 +577,15 @@ impl<'a> Parser<'a> {
             b'*' => {
                 if self.star_lit {
                     self.pos += 1;
-                    Ok(self.char_ast(b'*' as u32))
+                    self.char_node(b'*' as u32)
                 } else {
                     self.err(SyntaxKind::DanglingQuantifier)
                 }
             }
             b'.' => {
                 self.pos += 1;
-                Ok(Ast::Dot { dot_all: self.cur.s })
+                let dot_all = self.cur.s;
+                self.push_node(AstNode::Dot { dot_all })
             }
             b'^' => {
                 self.pos += 1;
@@ -571,13 +595,14 @@ impl<'a> Parser<'a> {
                     _ => first,
                 };
                 if anchor_ok {
-                    Ok(Ast::Assert(if self.cur.m {
+                    let kind = if self.cur.m {
                         AssertKind::StartLine
                     } else {
                         AssertKind::StartText
-                    }))
+                    };
+                    self.push_node(AstNode::Assert(kind))
                 } else {
-                    Ok(self.char_ast(b'^' as u32))
+                    self.char_node(b'^' as u32)
                 }
             }
             b'$' => {
@@ -593,29 +618,30 @@ impl<'a> Parser<'a> {
                     }
                 };
                 if at_end {
-                    Ok(Ast::Assert(if self.cur.m {
+                    let kind = if self.cur.m {
                         AssertKind::EndLine
                     } else {
                         AssertKind::EndText
-                    }))
+                    };
+                    self.push_node(AstNode::Assert(kind))
                 } else {
-                    Ok(self.char_ast(b'$' as u32))
+                    self.char_node(b'$' as u32)
                 }
             }
             b'[' => self.parse_bracket_ast(),
             b'(' | b')' | b'|' | b'+' | b'?' | b'{' | b'}' => {
                 self.pos += 1;
-                Ok(self.char_ast(c as u32))
+                self.char_node(c as u32)
             }
             _ => {
                 let (ch, len) = decode_scalar(self.pat, self.pos);
                 self.pos += len;
-                Ok(self.char_ast(ch))
+                self.char_node(ch)
             }
         }
     }
 
-    fn parse_atom_ere(&mut self, c: u8) -> Result<Ast, RegexError> {
+    fn parse_atom_ere(&mut self, c: u8) -> Result<u32, RegexError> {
         match c {
             b'\\' => {
                 let Some(&nc) = self.pat.get(self.pos + 1) else {
@@ -639,42 +665,45 @@ impl<'a> Parser<'a> {
                     }
                     Err(IntervalErr::NotAnInterval) => {
                         self.pos = save + 1;
-                        Ok(self.char_ast(b'{' as u32))
+                        self.char_node(b'{' as u32)
                     }
                     Err(IntervalErr::Fail(e)) => Err(e),
                 }
             }
             b'.' => {
                 self.pos += 1;
-                Ok(Ast::Dot { dot_all: self.cur.s })
+                let dot_all = self.cur.s;
+                self.push_node(AstNode::Dot { dot_all })
             }
             b'^' => {
                 self.pos += 1;
-                Ok(Ast::Assert(if self.cur.m {
+                let kind = if self.cur.m {
                     AssertKind::StartLine
                 } else {
                     AssertKind::StartText
-                }))
+                };
+                self.push_node(AstNode::Assert(kind))
             }
             b'$' => {
                 self.pos += 1;
-                Ok(Ast::Assert(if self.cur.m {
+                let kind = if self.cur.m {
                     AssertKind::EndLine
                 } else {
                     AssertKind::EndText
-                }))
+                };
+                self.push_node(AstNode::Assert(kind))
             }
             b'[' => self.parse_bracket_ast(),
             b'(' => self.parse_ere_group(),
             _ => {
                 let (ch, len) = decode_scalar(self.pat, self.pos);
                 self.pos += len;
-                Ok(self.char_ast(ch))
+                self.char_node(ch)
             }
         }
     }
 
-    fn parse_ere_group(&mut self) -> Result<Ast, RegexError> {
+    fn parse_ere_group(&mut self) -> Result<u32, RegexError> {
         self.pos += 1; // consume '('
         if self.perl && self.peek() == Some(b'?') {
             self.pos += 1; // consume '?'
@@ -689,13 +718,10 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         self.pop_scope();
         self.depth -= 1;
-        Ok(Ast::Group {
-            inner: self.boxed(inner)?,
-            index,
-        })
+        self.push_node(AstNode::Group { inner, index })
     }
 
-    fn parse_perl_special_group(&mut self) -> Result<Ast, RegexError> {
+    fn parse_perl_special_group(&mut self) -> Result<u32, RegexError> {
         match self.peek() {
             Some(b'=') | Some(b'!') => self.err(SyntaxKind::LookaroundUnsupported),
             Some(b'<') => {
@@ -761,7 +787,7 @@ impl<'a> Parser<'a> {
                         b')' => {
                             self.pos += 1;
                             self.cur = next_flags;
-                            return Ok(Ast::Empty);
+                            return self.push_node(AstNode::Empty);
                         }
                         _ => return self.err(SyntaxKind::InvalidEscape),
                     }
@@ -773,7 +799,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_named_group(&mut self) -> Result<Ast, RegexError> {
+    fn parse_named_group(&mut self) -> Result<u32, RegexError> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c == b'>' {
@@ -797,28 +823,23 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         self.pop_scope();
         self.depth -= 1;
-        Ok(Ast::Group {
-            inner: self.boxed(inner)?,
-            index,
-        })
+        self.push_node(AstNode::Group { inner, index })
     }
 
-    fn common_escape(&mut self, nc: u8) -> Result<Ast, RegexError> {
+    fn common_escape(&mut self, nc: u8) -> Result<u32, RegexError> {
         match nc {
-            b't' => Ok(self.char_ast(0x09)),
-            b'n' => Ok(self.char_ast(0x0A)),
-            b'r' => Ok(self.char_ast(0x0D)),
-            b'b' => Ok(Ast::Assert(AssertKind::WordBound)),
-            b'B' => Ok(Ast::Assert(AssertKind::NotWordBound)),
+            b't' => self.char_node(0x09),
+            b'n' => self.char_node(0x0A),
+            b'r' => self.char_node(0x0D),
+            b'b' => self.push_node(AstNode::Assert(AssertKind::WordBound)),
+            b'B' => self.push_node(AstNode::Assert(AssertKind::NotWordBound)),
             b'w' | b'W' | b's' | b'S' | b'd' | b'D' => self.class_escape(nc),
             b'1'..=b'9' => {
                 let n = nc - b'0';
                 self.refs.try_push(n)?;
                 self.has_backrefs = true;
-                Ok(Ast::Backref {
-                    group: n,
-                    icase: self.cur.i,
-                })
+                let icase = self.cur.i;
+                self.push_node(AstNode::Backref { group: n, icase })
             }
             _ if nc.is_ascii_alphanumeric() => self.err(SyntaxKind::InvalidEscape),
             _ => {
@@ -827,23 +848,23 @@ impl<'a> Parser<'a> {
                     self.pos -= 1;
                     let (ch, len) = decode_scalar(self.pat, self.pos);
                     self.pos += len;
-                    Ok(self.char_ast(ch))
+                    self.char_node(ch)
                 } else {
-                    Ok(self.char_ast(nc as u32))
+                    self.char_node(nc as u32)
                 }
             }
         }
     }
 
-    fn perl_escape(&mut self, nc: u8) -> Result<Ast, RegexError> {
+    fn perl_escape(&mut self, nc: u8) -> Result<u32, RegexError> {
         match nc {
-            b'f' => Ok(self.char_ast(0x0C)),
-            b'v' => Ok(self.char_ast(0x0B)),
-            b'K' => Ok(Ast::Keep),
+            b'f' => self.char_node(0x0C),
+            b'v' => self.char_node(0x0B),
+            b'K' => self.push_node(AstNode::Keep),
             b'e' | b'a' => self.err(SyntaxKind::InvalidEscape),
             b'x' => {
                 let ch = self.parse_hex_escape()?;
-                Ok(self.char_ast(ch))
+                self.char_node(ch)
             }
             b'0' => {
                 let mut val = 0u32;
@@ -857,7 +878,7 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                Ok(self.char_ast(val))
+                self.char_node(val)
             }
             b'1'..=b'7' => {
                 // 3-digit octal (`\101` = 'A', up to `\377`) vs single-digit backref `\1`..`\7`.
@@ -869,16 +890,14 @@ impl<'a> Parser<'a> {
                         | ((d2 - b'0') as u32);
                     if val <= 0xFF {
                         self.pos += 2;
-                        return Ok(self.char_ast(val));
+                        return self.char_node(val);
                     }
                 }
                 let n = nc - b'0';
                 self.refs.try_push(n)?;
                 self.has_backrefs = true;
-                Ok(Ast::Backref {
-                    group: n,
-                    icase: self.cur.i,
-                })
+                let icase = self.cur.i;
+                self.push_node(AstNode::Backref { group: n, icase })
             }
             _ => self.common_escape(nc),
         }
@@ -922,7 +941,8 @@ impl<'a> Parser<'a> {
         Ok((h1 << 4) | h2)
     }
 
-    fn parse_suffix(&mut self, mut atom: Ast) -> Result<Ast, RegexError> {
+    fn parse_suffix(&mut self, mut atom: u32) -> Result<u32, RegexError> {
+        let mut q_depth = 0u32;
         loop {
             let (min, max) = if self.is_bre_escaped_ops() {
                 match self.peek() {
@@ -990,12 +1010,19 @@ impl<'a> Parser<'a> {
             } else {
                 false
             };
-            atom = Ast::Repeat {
-                inner: self.boxed(atom)?,
+            // Bound stacked postfix quantifiers (`a****...`, `a{1}{1}...`) against `max_nesting_depth`.
+            if self.depth.saturating_add(q_depth) >= self.limits.max_nesting_depth {
+                return Err(RegexError::CompileCap(CapKind::NestingTooDeep {
+                    limit: self.limits.max_nesting_depth,
+                }));
+            }
+            q_depth += 1;
+            atom = self.push_node(AstNode::Repeat {
+                inner: atom,
                 min,
                 max,
                 lazy,
-            };
+            })?;
         }
         Ok(atom)
     }
@@ -1086,19 +1113,19 @@ impl<'a> Parser<'a> {
         Ok((min_val, max_val))
     }
 
-    fn parse_bracket_ast(&mut self) -> Result<Ast, RegexError> {
+    fn parse_bracket_ast(&mut self) -> Result<u32, RegexError> {
         // Standalone word-boundary bracket tokens `[[:<:]]` and `[[:>:]]`.
         if self.pat[self.pos..].starts_with(b"[[:<:]]") {
             self.pos += 7;
-            return Ok(Ast::Assert(AssertKind::WordStart));
+            return self.push_node(AstNode::Assert(AssertKind::WordStart));
         }
         if self.pat[self.pos..].starts_with(b"[[:>:]]") {
             self.pos += 7;
-            return Ok(Ast::Assert(AssertKind::WordEnd));
+            return self.push_node(AstNode::Assert(AssertKind::WordEnd));
         }
         self.pos += 1; // consume '['
         // Leading `^` or `!` negates the regex bracket class (matching `just-bash@3.6.0`
-        // oracle snapshot `l8a/bracket-edge-cases` step 2).
+        // oracle snapshot `l8a/bracket-edge-cases` step 3 / 0-indexed step 2, EVOL D1).
         let neg = if matches!(self.peek(), Some(b'^' | b'!')) {
             self.pos += 1;
             true
@@ -1122,7 +1149,7 @@ impl<'a> Parser<'a> {
                     icase: self.cur.i,
                     ranges,
                 })?;
-                return Ok(Ast::Class(id));
+                return self.push_node(AstNode::Class(id));
             }
             first = false;
 
