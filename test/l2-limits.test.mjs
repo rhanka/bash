@@ -44,8 +44,8 @@ async function expectLimit(shell, probe, limit, stderr, script, opts) {
 }
 
 function commandPressure(cap) {
-  if ((cap + 1) * 3 <= 100_000) return "echo x\n".repeat(cap + 1);
-  // A flat list exceeds the independent lexer cap before this profile's command cap.
+  if (cap + 1 <= 10_000 && (cap + 1) * 3 <= 100_000) return "echo x\n".repeat(cap + 1);
+  // A flat list exceeds the independent parser caps (10_000 statements / 100_000 tokens) before this profile's command cap.
   const levels = Math.ceil(Math.log2(cap + 1));
   const script = ["f0() { echo x; }"];
   for (let i = 1; i <= levels; i++) script.push("f" + i + "() { f" + (i - 1) + "; f" + (i - 1) + "; }");
