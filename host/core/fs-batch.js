@@ -51,7 +51,7 @@ async function list(g, path) {
   return (await g.readdir(path)).map((name) => ({ name }));
 }
 
-async function walk(g, root, depth, count, work, budget) {
+async function walk(g, scope, root, depth, count, work, budget) {
   const entries = [];
   if (!depth || !count || !work) return entries;
   const dirs = [{ path: root, depth: 0 }];
@@ -59,10 +59,14 @@ async function walk(g, root, depth, count, work, budget) {
     const parent = dirs[i];
     for (const entry of await list(g, parent.path)) {
       if (work-- <= 0 || entries.length >= count) return entries;
-      if (work % YIELD_EVERY === 0) await letTimersRun();
+      if (work % YIELD_EVERY === 0) {
+        await letTimersRun();
+        scope.check();
+      }
       const path = resolvePath(parent.path, entry.name);
       const bytes = utf8(path);
-      if (bytes.length > CHUNK || (entries.length + 1) * 48 > CHUNK || !consume(budget, 48 + bytes.length)) return entries;
+      // A walk entry lowers as `{ path, info }`: 56 bytes of ABI per record.
+      if (bytes.length > CHUNK || (entries.length + 1) * 56 > CHUNK || !consume(budget, 56 + bytes.length)) return entries;
       let info;
       try {
         info = await g.lstat(path);
@@ -78,14 +82,17 @@ async function walk(g, root, depth, count, work, budget) {
   return entries;
 }
 
-async function directory(g, path, plus, limits, budget) {
+async function directory(g, scope, path, plus, limits, budget) {
   const result = [];
   let work = limits.maxTraversalWork;
   for (const entry of await list(g, path)) {
     if (work-- <= 0 || result.length >= limits.maxTraversalEntries) break;
-    if (work % YIELD_EVERY === 0) await letTimersRun();
+    if (work % YIELD_EVERY === 0) {
+      await letTimersRun();
+      scope.check();
+    }
     const bytes = utf8(plus ? resolvePath(path, entry.name) : entry.name);
-    const fixed = plus ? 48 : 12;
+    const fixed = plus ? 56 : 12;
     if (bytes.length > CHUNK || (result.length + 1) * fixed > CHUNK || !consume(budget, bytes.length + fixed)) break;
     let info = entry;
     if (plus || entry.isDirectory === undefined) {
@@ -137,7 +144,7 @@ async function createExclusive(g, path, mode, directory) {
   await g.chmod(path, mode);
 }
 
-async function runOp(g, { tag, val }, path, limits, budget) {
+async function runOp(g, scope, { tag, val }, path, limits, budget) {
   switch (tag) {
     case "stat": return ok("info", stat(await g.stat(path)));
     case "lstat": return ok("info", stat(await g.lstat(path)));
@@ -149,9 +156,9 @@ async function runOp(g, { tag, val }, path, limits, budget) {
       transfer(budget, bytes.length);
       return ok("path", bytes);
     }
-    case "read-dir": return ok("entries", await directory(g, path, false, limits, budget));
-    case "read-dir-plus": return ok("entries-plus", await directory(g, path, true, limits, budget));
-    case "walk": return ok("entries-plus", await walk(g, path, Math.min(val.maxDepth, limits.maxTraversalDepth),
+    case "read-dir": return ok("entries", await directory(g, scope, path, false, limits, budget));
+    case "read-dir-plus": return ok("entries-plus", await directory(g, scope, path, true, limits, budget));
+    case "walk": return ok("entries-plus", await walk(g, scope, path, Math.min(val.maxDepth, limits.maxTraversalDepth),
       Math.min(val.maxEntries, limits.maxTraversalEntries), limits.maxTraversalWork, budget));
     case "all-paths": {
       const paths = [];
@@ -206,7 +213,7 @@ export function* serveFsBatch(x, batch, serveExtension) {
       scope.check();
       const path = paths[i];
       try {
-        results.push(await runOp(g, batch.ops[i], decodeUtf8(path), B.limits, budget));
+        results.push(await runOp(g, scope, batch.ops[i], decodeUtf8(path), B.limits, budget));
       } catch (error) {
         scope.check();
         const code = /^([A-Z_0-9]+):/.exec(String(error?.message))?.[1] ?? error?.code;

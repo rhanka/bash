@@ -1,5 +1,3 @@
-import { sanitizeMessage } from "../core/driver.js";
-
 const messages = {
   ENOENT: "no such file or directory",
   ENOTDIR: "not a directory",
@@ -14,7 +12,12 @@ const messages = {
 
 class FsError extends Error {
   constructor(code, message) {
-    super(sanitizeMessage(`${code}: ${message}`));
+    // Messages built by this lot carry virtual paths only, so they are thrown
+    // as written (L7b §5.8); sanitizing them here rewrote virtual `/tmp/...`,
+    // `/usr/...` and `/etc/...` to `<path>`, violating L7b §6. Host-derived
+    // errors never reach this constructor with their original text: they are
+    // rebuilt from the error code and the virtual path in `rewriteError`.
+    super(`${code}: ${message}`);
     this.code = code;
     this.stack = this.toString();
   }

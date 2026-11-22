@@ -5,7 +5,7 @@ import { anySignal, envToObject, execLoop, nullObject, runAsync, runSync } from 
 import { AsyncCapabilityError, NotSupportedError } from "./errors.js";
 import { addFiles, createInMemoryFs, fsState } from "./fs.js";
 import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits, stringLimit } from "./limits.js";
-import { resolvePath } from "./paths.js";
+import { dirname, resolvePath } from "./paths.js";
 import { INTERNAL } from "./instance.js";
 
 const OPTION_NAMES = new Set([
@@ -103,8 +103,47 @@ function ignoreUnimplemented(operation) {
   }
 }
 
+/**
+ * Seeds `options.files` into a host-backed `fs`, which the kernel mount at `/`
+ * would otherwise shadow. Entries are validated now (throwing in the
+ * constructor like `addFiles`); adapters with synchronous methods seed
+ * immediately, others seed in the background while `exec`/`readFile`/`writeFile`
+ * wait for the returned promise.
+ */
+function seedUserFiles(fs, files, base) {
+  if (files === null || typeof files !== "object" || Array.isArray(files)) throw new TypeError("initial files must be an object");
+  const entries = [];
+  for (const [path, value] of Object.entries(files)) {
+    if (typeof value === "function") throw new TypeError("files: lazy content is not supported on a host fs");
+    let content = value;
+    if (value !== null && typeof value === "object" && !(value instanceof Uint8Array)) content = value.content;
+    if (typeof content !== "string" && !(content instanceof Uint8Array)) throw new TypeError(`files: the content of ${path} must be a string or bytes`);
+    entries.push([resolvePath(base, path), content]);
+  }
+  if (typeof fs?.mkdirSync === "function" && typeof fs?.writeFileSync === "function") {
+    for (const [p, content] of entries) {
+      const dir = dirname(p);
+      if (dir !== "/") fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(p, content);
+    }
+    return null;
+  }
+  const pending = (async () => {
+    for (const [p, content] of entries) {
+      const dir = dirname(p);
+      if (dir !== "/") await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(p, content);
+    }
+  })();
+  pending.catch(() => {});
+  return pending;
+}
+
 function seedHostCommand(fs, name) {
   if (typeof fs?.mkdirSync !== "function" || typeof fs.writeFileSync !== "function" || name.startsWith("__")) return;
+  // Mirrors the kernel `Shell::stub` guard: `.` and `..` are not commands, and
+  // writing `/bin/.` would replace the `/bin` memory entry instead of seeding.
+  if (name === "" || name.includes("/") || name === "." || name === "..") return;
   const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
   for (const dir of ["/bin", "/usr/bin"]) ignoreUnimplemented(() => fs.writeFileSync(`${dir}/${name}`, content));
 }
@@ -211,8 +250,11 @@ export function createFacade(loader) {
       };
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
-      if (hasFiles) addFiles(rootFs, options.files, B.initialCwd);
+      if (hasFiles && userFs === null) addFiles(rootFs, options.files, B.initialCwd);
       seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
+      // A host mount at `/` shadows the kernel volume: `options.files` belong
+      // in the host `fs`, never in the shadowed `rootFs`.
+      B.seeded = hasFiles && userFs !== null ? seedUserFiles(userFs, options.files, B.initialCwd) : null;
       for (const c of customs) this.#register(B, c, false);
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
@@ -279,11 +321,13 @@ export function createFacade(loader) {
 
     async readFile(path) {
       const B = STATE.get(this);
+      if (B.seeded) await B.seeded;
       return this.fs.readFile(resolvePath(B.initialCwd, path));
     }
 
     async writeFile(path, content) {
       const B = STATE.get(this);
+      if (B.seeded) await B.seeded;
       return this.fs.writeFile(resolvePath(B.initialCwd, path), content);
     }
 
@@ -326,6 +370,7 @@ export function createFacade(loader) {
 
     async exec(commandLine, options) {
       const B = STATE.get(this);
+      if (B.seeded) await B.seeded;
       if (typeof commandLine !== "string") throw fail("the command line must be a string");
       const o = this.#normalize(B, options, false);
       const inst = await B.holder.ensure();

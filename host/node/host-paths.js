@@ -7,8 +7,13 @@ import { checkedPath, errno, fsFailure, outside, rootError, special } from "./fs
 
 const { O_RDONLY, O_DIRECTORY = 0, O_NONBLOCK = 0, O_NOFOLLOW = 0 } = fs.constants;
 const directoryFlags = O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_NOFOLLOW;
-// A traversable descriptor is required for pathname operations that Node does not expose as *at.
-const descriptors = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+
+/**
+ * Test seam: forces the canonical-path fallback that serves platforms without a
+ * usable `/proc/self/fd` (macOS, Windows, procfs-less containers). Tests set it
+ * around a single case; production code never touches it.
+ */
+export const hostTestConfig = { forceFallback: false };
 
 export function contains(root, name) {
   return name === root || name.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
@@ -39,39 +44,59 @@ function keepOpen(fd, run) {
   return result;
 }
 
-function withDirectory(name, run) {
+function withDirectory(ctx, name, run) {
+  if (!ctx || (ctx.fd && typeof ctx.base !== "string")) {
+    throw fsFailure("EIO", "directory context is missing");
+  }
   const info = lstat(name);
   if (!info?.isDirectory()) throw Object.assign(new Error(), { code: info ? "ENOTDIR" : "ENOENT" });
   const fd = fs.openSync(name, directoryFlags);
   return keepOpen(fd, () => {
     const opened = fstat(fd);
     if (!opened.isDirectory() || !sameInode(info, opened)) throw Object.assign(new Error(), { code: "EACCES" });
-    return run(`${descriptors}/${fd}`, fd);
+    return run(ctx.fd ? `${ctx.base}/${fd}` : name, fd);
   });
 }
 
 export function inDirectory(entry, run) {
   if (entry.directory) return run(entry.name, entry.fd);
-  return withDirectory(entry.name, run);
+  return withDirectory(entry.ctx, entry.name, run);
 }
 
-function pinRoot(root, run) {
-  const anchor = path.parse(root).root;
-  const parts = root.slice(anchor.length).split(path.sep).filter(Boolean);
-  function next(dir, fd, index) {
-    if (index === parts.length) return run(dir, fd);
-    return withDirectory(path.join(dir, parts[index]), (child, childFd) => next(child, childFd, index + 1));
-  }
-  return withDirectory(anchor, (dir, fd) => {
-    let sameDirectory = false;
+/**
+ * Opens the canonical root and verifies the descriptor against procfs when it
+ * is usable (Linux). No ancestor above the root is ever opened, so traverse-only
+ * ancestors need no read permission. Where `/proc/self/fd` is unavailable
+ * (macOS, Windows, procfs-less containers) the call falls back to validated
+ * canonical paths: every directory is still opened with `O_NOFOLLOW` and every
+ * open is checked against its pre-open `(dev, ino)`, per L7b §5.2.
+ */
+function openRoot(root, run) {
+  if (!hostTestConfig.forceFallback) {
+    let fd = null;
+    let verified = false;
     try {
-      sameDirectory = sameInode(fs.statSync(`${dir}/.`, { bigint: true }), fstat(fd));
+      fd = fs.openSync(root, directoryFlags);
+      try {
+        verified = fs.readlinkSync(`/proc/self/fd/${fd}`) === root;
+      } catch {
+        // No usable procfs: fall through to the canonical-path fallback below.
+      }
+      if (verified) {
+        return keepOpen(fd, () => run({ fd: true, base: "/proc/self/fd" }, `/proc/self/fd/${fd}`, fd));
+      }
     } catch {
-      // Some platforms expose descriptor numbers without allowing path traversal through them.
+      // Opening the root itself failed; the fallback below reports the cause.
+    } finally {
+      if (!verified && fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+      }
     }
-    if (!sameDirectory) throw fsFailure("ENOSYS", "directory descriptor paths are unavailable");
-    return next(dir, fd, 0);
-  });
+  }
+  // Canonical fallback: operate on canonical path strings. The root descriptor
+  // is still held open so directory entries carry a usable fd.
+  const fd = fs.openSync(root, directoryFlags);
+  return keepOpen(fd, () => run({ fd: false, base: null }, root, fd));
 }
 
 /** Resolves a virtual path and keeps its validated parent available for the synchronous operation. */
@@ -120,15 +145,23 @@ export class HostPaths {
     // Prevent a virtual filename from becoming a host path component separator or a drive/stream name.
     if (path.sep !== "/" && parts.some((part) => /[\\:]/.test(part))) throw outside(virtual);
     let hops = 0;
-    return pinRoot(this.root, (root, rootFd) => {
+    return openRoot(this.root, (ctx, root, rootFd) => {
       const visit = (dir, fd, parent, pending) => {
         if (pending.length === 0) {
-          return run({ name: dir, canonical: path.join(this.root, ...parent), info: fstat(fd), directory: true, fd });
+          return run({ name: dir, canonical: path.join(this.root, ...parent), info: fstat(fd), directory: true, fd, ctx });
         }
         const [part, ...tail] = pending;
         if (part === ".") return visit(dir, fd, parent, tail);
         if (part === "..") {
-          if (!parent.length) throw outside(options.display ?? virtual);
+          // A `..` above the virtual root clamps for direct paths (L7b §5.1:
+          // `/a/../../b` is `/b`), but symlink-target validation stays strict:
+          // climbing above the root there rejects, preserving the `mv` escape
+          // gate. A deeper `..` restarts from the root so every re-walked
+          // component is symlink-checked again instead of being skipped.
+          if (!parent.length) {
+            if (options.strictDotDot) throw outside(options.display ?? virtual);
+            return visit(dir, fd, parent, tail);
+          }
           return visit(root, rootFd, [], [...parent.slice(0, -1), ...tail]);
         }
         const name = path.join(dir, part);
@@ -136,14 +169,14 @@ export class HostPaths {
         let info = lstat(name);
         if (info?.isSymbolicLink() && (tail.length || !options.leaf)) {
           if (!this.allowSymlinks && !options.followLinks) {
-            if (options.ignoreLinks) return run({ blocked: true });
+            if (options.ignoreLinks) return run({ blocked: true, ctx });
             throw outside(options.display ?? virtual);
           }
           if (++hops > 40) throw errno("ELOOP", op, options.display ?? virtual);
           const target = this.targetParts(fs.readlinkSync(name), parent, options.display ?? virtual);
           return visit(root, rootFd, [], [...target, ...tail]);
         }
-        if (tail.length === 0) return run({ name, canonical, info });
+        if (tail.length === 0) return run({ name, canonical, info, ctx });
         if (!info && options.parents) {
           fs.mkdirSync(name, { mode: 0o755 });
           info = lstat(name);
@@ -155,10 +188,10 @@ export class HostPaths {
             else if (suffix !== ".") depth++;
             if (depth < 0) throw outside(options.display ?? virtual);
           }
-          return run({ missingParent: true, canonical: path.join(canonical, ...tail) });
+          return run({ missingParent: true, canonical: path.join(canonical, ...tail), ctx });
         }
         if (!info.isDirectory()) throw errno("ENOTDIR", op, options.display ?? virtual);
-        return withDirectory(name, (child, childFd) => visit(child, childFd, [...parent, part], tail));
+        return withDirectory(ctx, name, (child, childFd) => visit(child, childFd, [...parent, part], tail));
       };
       return visit(root, rootFd, [], parts);
     });
@@ -184,9 +217,17 @@ export class HostPaths {
 
   linkTarget(target, canonicalLink, virtual) {
     const parent = path.relative(this.root, path.dirname(canonicalLink)).split(path.sep).filter(Boolean);
-    const parts = target.startsWith("/") ? resolvePath("/", target).slice(1).split("/").filter(Boolean) : this.targetParts(target, parent, virtual);
-    this.use(`/${parts.join("/")}`, "symlink", {}, () => {});
-    return target.startsWith("/") ? path.join(this.root, ...parts) : target;
+    // Keep `..` segments so the containment check resolves them symlink-aware
+    // instead of collapsing across a link; a `..` climbing above the root
+    // rejects here (strict target validation, like the `mv` escape gate). The
+    // stored host path keeps the same segments (`path.join` would collapse them
+    // to a different file).
+    const parts = target.startsWith("/")
+      ? target.split("/").filter((part) => part !== "" && part !== ".")
+      : this.targetParts(target, parent, virtual);
+    this.use(`/${parts.join("/")}`, "symlink", { strictDotDot: true }, () => {});
+    if (!target.startsWith("/")) return target;
+    return `${this.root.replace(/\/+$/, "")}/${parts.join("/")}`;
   }
 }
 
@@ -260,4 +301,14 @@ export function encodeContent(content, options) {
 export function resolveVirtual(base, name) {
   checkedPath("resolvePath", base, name);
   return resolvePath(base, name);
+}
+
+/**
+ * Makes a virtual path absolute without collapsing `..` or `.`: symlink-aware
+ * lookup must see every component, so lexical pre-collapse is forbidden. The
+ * lookup itself (`HostPaths.use`, overlay `#lookup`) resolves `..` against the
+ * symlink-checked prefix and clamps it at the root (L7b §5.1).
+ */
+export function absoluteVirtual(p) {
+  return p.startsWith("/") ? p : `/${p}`;
 }

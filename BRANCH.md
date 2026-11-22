@@ -49,10 +49,12 @@ Ship Node host filesystem adapters and kernel-to-host filesystem batches with co
 
 - The existing handwritten WIT adapter lives in `kernel/src/glue/adapt.rs`, as identified by the conductor.
 - `BR7b-EX1` permits updating the L1b native host-call test in `kernel/src/fiber/tests.rs`. The test-commands build references the removed request and outcome types. This exception changes the test fixture and assertions only. Rollback restores the old test together with the previous request and outcome types.
-- L2 merges first. After rebasing, dispatch test commands through its VM, seed its kernel command stubs from `COMMAND_NAMES`, and rerun sentinel and walk gates.
+- `BR7b-EX2` permits the host-mount layout guard in `kernel/src/shell.rs` (`Shell::layout` returns early when a host mount covers `/`). Reason: the kernel volume is fully shadowed by the mount, so the facade seeds the same layout into the host adapter instead of duplicating it. Impact: layout and stub code only, behind the mount check; no command or VFS semantics change. Rollback: delete the early return to restore the unconditional in-kernel layout.
+- L2 has merged and this branch is rebased on `main`, which holds L2 and L2b: test commands dispatch through L2's VM, kernel command stubs seed from `COMMAND_NAMES`, and the sentinel and walk gates run on the merged tree.
 - Linux Node 22 reports `ELOOP` for a symlink leaf opened with `O_NOFOLLOW`. A real directory opens with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`.
 - The 1,000-file walk returns 1,010 entries per adapter. Each run makes one host call and 11 directory listings. The final check measured 163.38 ms for `OverlayFs` and 131.64 ms for `ReadWriteFs`.
 - Upstream defect for the owner listing. The reference hangs on host FIFO reads and overlay FIFO append. L7b rejects both operations promptly.
+- Path validation opens the canonical root directly and verifies the descriptor against `/proc/self/fd` on Linux; no ancestor above the root is ever opened, so traverse-only ancestors need no read permission. Where procfs descriptors are unavailable (macOS, Windows, procfs-less containers) the adapters fall back to validated canonical paths with `O_NOFOLLOW` and `(dev, ino)` checks per L7b §5.2.
 
 ## Plan / Todo (lot-based)
 

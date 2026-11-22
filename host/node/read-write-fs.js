@@ -6,7 +6,7 @@ import { latin1FromBytes } from "../core/bytes.js";
 import { resolvePath } from "../core/paths.js";
 import { checkedPath, errno, fsFailure, outside, rewriteError, special } from "./fs-errors.js";
 import {
-  HostPaths, contains, decodeContent, encodeContent, formatStat, fstat, inDirectory, listHost, lstat,
+  HostPaths, absoluteVirtual, contains, decodeContent, encodeContent, formatStat, fstat, inDirectory, listHost, lstat,
   readRegular, resolveVirtual, sameInode, withFile,
 } from "./host-paths.js";
 
@@ -91,10 +91,15 @@ function removeTree(entry, list) {
     for (const { name: child } of list(dir)) {
       const name = host.join(dir, child);
       const info = lstat(name);
-      if (info) removeTree({ name, info }, list);
+      if (info) removeTree({ name, info, ctx: entry.ctx }, list);
     }
   });
   fs.rmdirSync(entry.name);
+}
+
+/** Joins a virtual child without collapsing `..` in the parent (finding 3). */
+function joinVirtual(base, child) {
+  return base === "/" ? `/${child}` : `${base}/${child}`;
 }
 
 /** A writable virtual filesystem rooted at an explicitly granted host directory. */
@@ -115,7 +120,7 @@ export class ReadWriteFs {
   #use(path, op, options, run) {
     checkedPath(op, path);
     try {
-      return this.#paths.use(resolvePath("/", path), op, { ...options, display: path }, run);
+      return this.#paths.use(absoluteVirtual(path), op, { ...options, display: path }, run);
     } catch (error) {
       throw rewriteError(error, op, path, true);
     }
@@ -326,6 +331,16 @@ export class ReadWriteFs {
 
   async #copy(src, dest, source, target, recursive) {
     requireEntry(source, "cp", src);
+    if (source.info.isSymbolicLink()) {
+      // A contained link copies through to its target when links are allowed;
+      // otherwise copying a link is rejected as before.
+      if (!this.#paths.allowSymlinks) throw fsFailure("EIO", `cp '${src}'`);
+      const raw = fs.readlinkSync(source.name);
+      const at = host.relative(this.#paths.root, host.dirname(source.canonical)).split(host.sep).filter(Boolean);
+      const parts = this.#paths.targetParts(raw, at, src);
+      return this.#paths.use(`/${parts.join("/")}`, "cp", { followLinks: true, strictDotDot: true, display: src }, (resolved) =>
+        this.#copy(src, dest, resolved, target, recursive));
+    }
     if (target.missingParent) throw errno("ENOENT", "cp", dest);
     if (source.info.isDirectory()) {
       if (!recursive) throw fsFailure("EIO", `cp '${src}'`);
@@ -339,9 +354,9 @@ export class ReadWriteFs {
         for (const { name: child } of this._listHost(from)) {
           const name = host.join(from, child);
           const next = host.join(to, child);
-          await this.#copy(resolvePath(src, child), resolvePath(dest, child),
-            { name, info: lstat(name), canonical: host.join(source.canonical, child) },
-            { name: next, info: lstat(next), canonical: host.join(target.canonical, child) }, recursive);
+          await this.#copy(joinVirtual(src, child), joinVirtual(dest, child),
+            { name, info: lstat(name), canonical: host.join(source.canonical, child), ctx: source.ctx },
+            { name: next, info: lstat(next), canonical: host.join(target.canonical, child), ctx: target.ctx }, recursive);
         }
       }));
     }
@@ -368,13 +383,13 @@ export class ReadWriteFs {
       // A stored absolute target is a host path, unlike the virtual argument to symlink().
       const parent = host.relative(this.#paths.root, host.dirname(entry.canonical)).split(host.sep).filter(Boolean);
       const parts = this.#paths.targetParts(raw, parent, path);
-      this.#paths.use(`/${parts.join("/")}`, "mv", { followLinks: true }, () => {});
+      this.#paths.use(`/${parts.join("/")}`, "mv", { followLinks: true, strictDotDot: true }, () => {});
     } else if (entry.info.isDirectory()) {
       inDirectory(entry, (dir) => {
         for (const { name: child } of this._listHost(dir)) {
           const name = host.join(dir, child);
           const info = lstat(name);
-          if (info) this.#checkMovedLinks({ name, info, canonical: host.join(entry.canonical, child) }, path);
+          if (info) this.#checkMovedLinks({ name, info, canonical: host.join(entry.canonical, child), ctx: entry.ctx }, path);
         }
       });
     }
