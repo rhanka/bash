@@ -138,7 +138,7 @@ test("the verdict function decides each bound at equality and just over", () => 
   assert.equal(decideGateL2({ ...passing, suitesPass: false }).verdict, "no-go");
 });
 
-test("the verdict function returns go on the measured fix numbers", (t) => {
+test("the verdict function passes all kernel bounds and B/N on the measured numbers", (t) => {
   // The benchmark runs separately on the green release artifacts; without its output there is
   // nothing to tie to the report, so this test skips instead of failing.
   const results = new URL("../tmp/bench-l2/committed/results.json", import.meta.url);
@@ -159,8 +159,10 @@ test("the verdict function returns go on the measured fix numbers", (t) => {
   assert.equal(out.kernel.m3a, true);
   assert.equal(out.kernel.m5, true);
   assert.equal(out.kernel.wasm, true);
-  assert.equal(out.verdict, "go");
-  assert.equal(out.reason, "all thresholds pass");
+  assert.equal(out.js.b, true);
+  assert.equal(out.js.n, true);
+  assert.equal(out.verdict, "go-kernel-only");
+  assert.equal(out.reason, "JS-only miss");
 });
 
 test("the wasm-opt request records that Binaryen optimization was not measured", () => {

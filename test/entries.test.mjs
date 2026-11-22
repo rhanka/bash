@@ -17,8 +17,30 @@ test("cold entries do not load the test-only probe", () => {
     assert.match(trace.stderr, entry.endsWith("browser") ? /dist\/js\/browser\.js/ : /dist\/js\/index\.js/);
     assert.doesNotMatch(trace.stderr, /\/host\//);
     assert.doesNotMatch(trace.stderr, /\/probe\/probe\.js|browser-probe\.js/);
-    if (entry.endsWith("browser")) assert.doesNotMatch(trace.stderr, /dist\/js\/node\/load\.js/);
+    assert.doesNotMatch(trace.stderr, /dist\/js\/core\/ext\.js/);
+    if (entry.endsWith("browser")) {
+      assert.doesNotMatch(trace.stderr, /dist\/js\/node\/load\.js/);
+      assert.doesNotMatch(trace.stderr, /dist\/js\/node\/adapters\.js/);
+    }
   }
+});
+
+test("cold new Bash() and first echo do not load lazy extension or node-fs-only builtins", () => {
+  const js = `
+    const seen = [];
+    const orig = process.getBuiltinModule;
+    process.getBuiltinModule = (name) => { seen.push(name); return orig.call(process, name); };
+    const { Bash } = await import("@sentropic/bash");
+    const r = await new Bash().exec("echo hi");
+    if (r.stdout !== "hi\\n") process.exit(2);
+    console.log(JSON.stringify(seen));
+  `;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", js], {
+    encoding: "utf8", env: { ...process.env, NODE_DEBUG: "esm" },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), ["node:fs", "node:url"]);
+  assert.doesNotMatch(r.stderr, /dist\/js\/core\/ext\.js/);
 });
 
 test("require of the package root", () => {
