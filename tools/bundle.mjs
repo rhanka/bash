@@ -6,6 +6,7 @@
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripComments } from "./gates.mjs";
 import { repoRoot, toolsDir } from "./lib.mjs";
 
 // Splits ESM source into code and non-code segments so renames never touch strings, comments,
@@ -302,7 +303,9 @@ function topDeclNames(src) {
     let pos = 0;
     let d = depth;
     const events = [];
-    while ((m = decl.exec(text)) !== null) events.push({ index: m.index, name: m[1], length: m[0].length });
+    while ((m = decl.exec(text)) !== null) {
+      events.push({ index: m.index + m[0].length - m[1].length, name: m[1] });
+    }
     // Walk text tracking depth to assign each event its depth at match start.
     let e = 0;
     let cur = 0;
@@ -410,10 +413,16 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
   const order = [...sharedIds];
   const set = new Set(sharedIds);
   const used = new Set();
+  for (const id of order) {
+    for (const imp of modules.get(id).imports) {
+      if (!imp.reExport && externals.has(imp.target)) {
+        for (const { local } of imp.names) used.add(local);
+      }
+    }
+  }
   const mapping = new Map();
   const bodies = [];
-  const keptHeader = [];
-  const seenHeaders = new Set();
+  const externalBySpec = new Map();
   for (const id of order) {
     const rec = modules.get(id);
     const bindings = rec.imports.filter((imp) => !imp.reExport);
@@ -421,12 +430,14 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
     for (const imp of bindings) {
       if (imp.namespace) throw new Error(rec.file + ": namespace imports are entry-only");
       if (externals.has(imp.target)) {
-        const stmt = "import { " + imp.names.map(({ imported, local }) =>
-          imported === local ? local : imported + " as " + local).join(", ") +
-          " } from " + JSON.stringify(externals.get(imp.target)) + ";";
-        if (!seenHeaders.has(stmt)) {
-          seenHeaders.add(stmt);
-          keptHeader.push(stmt);
+        const spec = externals.get(imp.target);
+        let specMap = externalBySpec.get(spec);
+        if (!specMap) externalBySpec.set(spec, specMap = new Map());
+        for (const { imported, local } of imp.names) {
+          if (specMap.has(local) && specMap.get(local) !== imported) {
+            throw new Error(rec.file + ": external import conflict on " + local);
+          }
+          specMap.set(local, imported);
         }
       }
       if (!imp.namespace && !externals.has(imp.target) && !set.has(imp.target)) {
@@ -499,6 +510,10 @@ function flattenShared(modules, sharedIds, root, externals = new Map()) {
     }
     bodies.push("// " + relative(root, id) + "\n" + body);
   }
+  const keptHeader = [...externalBySpec].map(([spec, specMap]) =>
+    "import { " + [...specMap].map(([local, imported]) =>
+      imported === local ? local : imported + " as " + local).join(", ") +
+    " } from " + JSON.stringify(spec) + ";");
   return { code: bodies.join("\n\n"), mapping, header: keptHeader };
 }
 
@@ -596,6 +611,20 @@ async function minifyFile(name, code) {
 // literals; flattenShared proves cross-module collisions alpha-rename instead of colliding.
 export { splitCode, flattenShared };
 
+// Collects static relative `import()` specifiers (lazy chunks) from one source.
+// Comments are stripped first (JSDoc type imports such as
+// `import("../../types/...")` are not runtime chunks); strings stay so the
+// literal remains visible. Only single- or double-quoted literals qualify;
+// anything else stays a G2 error at gate time and is ignored here.
+function lazySpecs(src) {
+  const stripped = stripComments(src);
+  const out = [];
+  const re = /\bimport\s*\(\s*(['"])(\.[^'"]*?\.js)\1\s*\)/g;
+  let m;
+  while ((m = re.exec(stripped)) !== null) out.push(m[2]);
+  return out;
+}
+
 // Packs one package: the shared browser-safe chunk plus the entry files, minified. `files`
 // names the entry sources and outputs; `alias` swaps the engine adapter; `externals` maps kept
 // separate files to their specifier from the shared chunk; `urls` rewrites core-URL literals.
@@ -638,6 +667,35 @@ export async function bundlePackage({
     }
   }
   const ordered = topoOrder(modules, browserEntry).filter((id) => sharedIds.has(id));
+  // Lazy chunks: static relative `import()` targets (L7b fs-batch, L7c volume
+  // helpers) stay out of the shared chunk and ship as separate minified files.
+  // They load only when used (`fs` given, `isolation` set, or a host mount),
+  // keeping them off the cold path while staying G2-clean.
+  const lazyIds = [];
+  const lazySeen = new Set();
+  const lazyQueue = [];
+  for (const id of [...browserClosure, ...indexClosure]) {
+    const rec = modules.get(id);
+    if (!rec || rec.src === null) continue;
+    for (const spec of lazySpecs(rec.src)) {
+      let target = resolveSpec(id, spec);
+      if (target === alias.from) target = alias.to;
+      if (sharedIds.has(target) || externals.has(target) || lazySeen.has(target)) continue;
+      if (id === browserEntry || id === indexEntry || id === loadEntry) {
+        throw new Error(relative(root, id) + ": lazy chunk entry is not supported for " + spec);
+      }
+      lazySeen.add(target);
+      lazyQueue.push([id, spec, target]);
+    }
+  }
+  for (const [, , target] of lazyQueue) {
+    if (!target.startsWith(root + "/")) throw new Error("lazy chunk escapes the repository: " + target);
+    loadGraph(target, { alias, externals: new Set(externals.keys()), root, modules });
+  }
+  for (const [, , target] of lazyQueue) {
+    if (externals.has(target) || sharedIds.has(target)) continue;
+    lazyIds.push(target);
+  }
   const { code, mapping, header } = flattenShared(modules, ordered, root, externals);
   const rewritten = new Map();
   const needed = new Map();
@@ -655,28 +713,116 @@ export async function bundlePackage({
     rewritten.set(entry, r);
     mergeNeeded(r);
   }
-  // Mirror the node-private files into `dist/js/node/`: their relative specifiers stay valid
-  // because the mirror preserves the `host/` layout, and their shared needs join the chunk.
   const jsDir = dirname(outShared);
-  const extraOuts = [];
-  for (const id of topoOrder(modules, indexEntry).filter((x) => nodePrivate.includes(x))) {
+  const flatOuts = [];
+  const addSharedNeed = (target, name) => {
+    const flat = mapping.get(target + "::" + name);
+    if (!flat) throw new Error(relative(root, target) + ": no flattened export " + name);
+    if (needed.has(name) && needed.get(name) !== flat) throw new Error("shared export conflict: " + name);
+    needed.set(name, flat);
+  };
+  const flattenClosure = (order, outFile, exportSpecs) => {
+    const chunkExternals = new Map(externals);
+    const sharedSpec = relativeTo(outShared, outFile);
+    for (const sid of sharedIds) chunkExternals.set(sid, sharedSpec);
+    for (const id of order) {
+      for (const imp of modules.get(id).imports) {
+        if (imp.reExport || !sharedIds.has(imp.target)) continue;
+        for (const { imported } of imp.names) addSharedNeed(imp.target, imported);
+      }
+    }
+    const { code: chunkCode, mapping: chunkMap, header: chunkHeader } = flattenShared(modules, order, root, chunkExternals);
+    const exportList = exportSpecs.map(([id, name]) => {
+      const ref = chunkMap.get(id + "::" + name);
+      if (!ref) throw new Error(relative(root, id) + ": no flattened export " + name);
+      return ref === name ? name : ref + " as " + name;
+    });
+    const out = chunkHeader.join("\n") + (chunkHeader.length ? "\n" : "") +
+      chunkCode + "\n\nexport { " + exportList.join(", ") + " };\n";
+    return { out, map: chunkMap };
+  };
+  // Flatten the node-private adapter files into one module (`dist/js/node/adapters.js`)
+  // so Node cold import parses one file instead of four and shared imports point at
+  // `../shared.js`. Rewrite `index.js` imports/re-exports of those modules to it.
+  if (nodePrivate.length) {
+    const nodeOrder = topoOrder(modules, indexEntry).filter((x) => nodePrivate.includes(x));
+    const outAdapters = join(jsDir, "node", "adapters.js");
+    const nodeExports = [];
+    const nodeSet = new Set(nodePrivate);
+    for (const imp of modules.get(indexEntry).imports) {
+      if (!nodeSet.has(imp.target)) continue;
+      for (const { imported } of imp.names) nodeExports.push([imp.target, imported]);
+    }
+    const { out } = flattenClosure(nodeOrder, outAdapters, nodeExports);
+    flatOuts.push([outAdapters, out]);
+    const indexRec = rewritten.get(indexEntry);
+    const adaptersSpec = relativeTo(outAdapters, outIndex);
+    indexRec.code = joinStatements(indexRec.code).map((line) => {
+      const m = line.match(REEXPORT) ?? line.match(IMPORT);
+      if (!m) return line;
+      const spec = m[2];
+      if (!spec.startsWith(".")) return line;
+      const target = resolveSpec(indexEntry, spec);
+      return nodeSet.has(target) ? line.split(JSON.stringify(spec)).join(JSON.stringify(adaptersSpec)) : line;
+    }).join("\n");
+  }
+  // Emit lazy chunks (static relative `import()` targets outside the shared set)
+  // as flattened minified modules under `dist/js/`, with shared imports pointed at
+  // `shared.js`. Their specifiers in the importing code are rewritten to the shipped path.
+  const lazyRewrites = [];
+  for (const id of lazyIds) {
+    if (!id.startsWith(join(root, "host") + "/")) {
+      throw new Error("lazy chunk outside host/: " + relative(root, id));
+    }
+    const chunkOrder = topoOrder(modules, id).filter((x) => !sharedIds.has(x) && !externals.has(x));
+    for (const x of chunkOrder) {
+      if (nodePrivate.includes(x) || x.startsWith(nodeDir)) {
+        throw new Error("lazy chunk reaches host/node/: " + relative(root, x));
+      }
+    }
     const out = join(jsDir, relative(join(root, "host"), id));
-    const r = rewriteEntry(id, out, outShared, modules, sharedIds, mapping, root, []);
-    rewritten.set(id, r);
-    mergeNeeded(r);
-    extraOuts.push([id, out]);
+    const exportSpecs = declaredExports(modules.get(id)).map((name) => [id, name]);
+    const { out: chunkCode } = flattenClosure(chunkOrder, out, exportSpecs);
+    flatOuts.push([out, chunkCode]);
+  }
+  for (const [fromId, spec, target] of lazyQueue) {
+    if (!lazyIds.includes(target)) continue;
+    const chunkOut = join(jsDir, relative(join(root, "host"), target));
+    // Shared modules are flattened into the shared chunk, so their runtime
+    // importer is always the shared chunk itself.
+    const runtimeImporterOut = sharedIds.has(fromId) || ordered.includes(fromId) ? outShared
+      : fromId === indexEntry ? outIndex
+      : fromId === browserEntry ? outBrowser
+      : fromId === loadEntry ? outLoad
+      : join(jsDir, relative(join(root, "host"), fromId));
+    let runtimeRel = relative(dirname(runtimeImporterOut), chunkOut);
+    if (!runtimeRel.startsWith(".")) runtimeRel = "./" + runtimeRel;
+    runtimeRel = runtimeRel.split("\\").join("/");
+    lazyRewrites.push([spec, runtimeRel]);
   }
   const exported = "export { " + [...needed].map(([name, ref]) =>
     ref === name ? name : ref + " as " + name).join(", ") + " };";
-  const sharedCode = header.join("\n") + (header.length ? "\n" : "") +
+  let sharedCode = header.join("\n") + (header.length ? "\n" : "") +
     code + "\n\n" + exported + "\n";
-  mkdirSync(dirname(outShared), { recursive: true });
-  writeFileSync(outShared, await minifyFile(relative(root, outShared), sharedCode));
-  for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad], ...extraOuts]) {
-    mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, await minifyFile(relative(root, out), rewritten.get(entry).code));
+  for (const [spec, runtimeRel] of lazyRewrites) {
+    sharedCode = sharedCode.split(JSON.stringify(spec)).join(JSON.stringify(runtimeRel));
   }
-  return { shared: outShared, modules: ordered.length + extraOuts.length };
+  let minifiedShared = await minifyFile(relative(root, outShared), sharedCode);
+  for (const [, runtimeRel] of lazyRewrites) {
+    minifiedShared = minifiedShared.split("import(`" + runtimeRel + "`)").join("import(" + JSON.stringify(runtimeRel) + ")");
+  }
+  mkdirSync(dirname(outShared), { recursive: true });
+  writeFileSync(outShared, minifiedShared);
+  for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad]]) {
+    const entryCode = rewritten.get(entry).code;
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, await minifyFile(relative(root, out), entryCode));
+  }
+  for (const [out, flatCode] of flatOuts) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, await minifyFile(relative(root, out), flatCode));
+  }
+  return { shared: outShared, modules: ordered.length + nodePrivate.length + lazyIds.length };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
