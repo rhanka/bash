@@ -574,6 +574,7 @@ function verifyAugment(plainBytes, augmented, manifest, parts) {
 
 export async function snapshotCore(corePath, name) {
   const root = repoRoot;
+  mkdirSync(join(root, "tmp"), { recursive: true });
   const scratch = mkdtempSync(join(root, "tmp", "snapshot-"));
   try {
     const plainBytes = readFileSync(corePath);
