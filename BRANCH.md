@@ -29,14 +29,17 @@ Implement the Wasm-owned default snapshot restore path, share and minify the fac
   - `LICENSE`
 - **Conditional Paths (allowed only with explicit exception when not already listed in Allowed Paths)**:
   - `package.json` via `BR<n>-EX1` (route normal pack and consumers to the built entry graphs)
+  - `spec/SPEC_EVOL_BASH_SANDBOX.md` via `BR23-EX2` (apply the 22/11 owner decision on JS budgets in Annex H and record it in Annex J)
 - **Exception process**:
   - Declare exception ID `BRxx-EXn` in `## Feedback Loop` before touching any conditional/forbidden path.
   - Include reason, impact, and rollback strategy.
 
 ## Exceptions
 - `BR<n>-EX1` (`package.json`): route normal pack and consumers to the built entry graphs. Same specifiers, declarations and engine support, empty dependencies. Rollback: restore the preceding manifest and matching pack recipe.
+- `BR23-EX2` (`spec/SPEC_EVOL_BASH_SANDBOX.md`): apply the 22/11 owner decision splitting cold-path JS budgets (`B_cold <= 58,000 B`, `Z_cold <= 30,000 B`) from total shipped JS budgets (`B_total <= 75,000 B`, `Z_total <= 50,000 B`, `T <= 110,000 B`) in Annex H and record it in Annex J. Impact: normative Annex H JS budget row/prose and Annex J reconciliation table only; no kernel, WIT or public API change. Rollback: revert the Annex H, Section 3 and Annex J edits in `spec/SPEC_EVOL_BASH_SANDBOX.md`.
 
 ## Feedback Loop
+- `BR23-EX2` (`spec/SPEC_EVOL_BASH_SANDBOX.md`): 22/11 owner decision (PR #23 review) — update Annex H JS budgets and record in Annex J.
 - subagent/agent: `blocked` / `deferred` / `cancelled` / `attention`
 - conductor/owner: `clarification` / `acknowledge` / `refuse`
 
