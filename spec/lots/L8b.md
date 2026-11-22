@@ -57,9 +57,10 @@ In scope:
     2. `parse_printf_int` for `printf` integer specifiers (`'c` / `"c` / `\'c` / `\"c` character code units,
        leading/trailing whitespace diagnostics, `+` prefix, `0x` hex, positive `0`-prefixed octal, `N#...`
        prefix recovery with error, partial leading decimal `3abc` recovery with error).
-    3. `parse_f64_prefix` (JS `parseFloat(s)` prefix parser for `printf` float specifiers and `awk` string-to-number
-       coercion).
-    4. `parse_f64_strict` (JS `Number(s)` full-string parser for `seq` and numeric comparisons).
+    3. `parse_f64_prefix` (JS `parseFloat(s)` prefix parser for `printf` float specifiers, `seq` operands, and
+       `awk` general string-to-number coercion).
+    4. `parse_f64_strict` (JS `Number(s)` full-string parser for `awk` numeric-string detection `looksLikeNumber`,
+       `awk` `sprintf`/`printf` numeric conversion, and `jq` `tonumber`).
 - `kernel::format` (`kernel/src/format.rs` or `kernel/src/format/**`):
   - Escape processors for `printf` format strings (`process_format_escapes`) and `%b` operand strings
     (`process_b_escapes`), including `\c` early stop and UTF-8 byte-run decoding differences.
@@ -69,8 +70,9 @@ In scope:
     `.*` precision, length modifiers `h l L`, multi-pass argument reuse, soft parse-error reporting (`exit 1`),
     and prospective byte-budget enforcement (`exit 126`).
   - `awk` `sprintf`/`printf`/`OFMT` formatter (`format_awk_printf`) supporting `%n$` 1-based positional
-    arguments, `hh ll l z j h` length modifiers, signed `-%x`/`-%o`, `100`-digit float precision limit, and
-    `min(10_000, max_bytes)` width/precision cap.
+    arguments, `hh ll l z j h` length modifiers, `floor()` integer rounding (`%d/%i/%o/%x/%X`), signed `-%x`/`-%o`,
+    AWK `%g`/`%G` exponent switching (`exp < -4 || exp >= prec`), empty `%.f` -> precision `6`, `%F` rejection,
+    `100`-digit float precision limit, and `min(10_000, max_bytes)` width/precision cap.
   - Civil-calendar `strftime` engine (`format_strftime`, `parse_tz_spec`) over 64-bit Unix epoch seconds in
     proleptic Gregorian calendar with all 39 directives (`%a`..`%Z`, `%%`), UTC default (EVOL D9, S11),
     `Etc/GMT±N` and fixed-offset `TZ` parsing, and UTC fallback on unknown `TZ`.
@@ -131,7 +133,7 @@ L1d merge to `main` before L4's final PR:
 | `kernel/src/{num,format,hash,base64}*` | consumes `num` & `format` at exit | owns | untouched |
 | `kernel/src/fiber/{syntax,expand}*` | owns | untouched | untouched |
 | `kernel/src/fiber/vm.rs` | owns expansion & command hooks | untouched | bounded coverage helper call |
-| `kernel/src/{shell,fiber,cmd/mod,glue/adapt}.rs` | consumes `hit_coverage` at exit | untouched | owns trace/coverage/clock plumbing |
+| `kernel/src/{shell,fiber,cmd/mod,glue/adapt,glue/rt}.rs` | consumes `hit_coverage` at exit | untouched | owns trace/coverage/clock plumbing |
 | `kernel/src/fiber/testcmd.rs` | untouched | adds `__num`, `__printf`, `__strftime`, `__hash`, `__base64` | branches after L8b; adds `__trace`, `__cov` |
 | `host/**`, `harness/parity/sentropic-adapter.mjs` | untouched | untouched | owns logger, drain, browser filter, adapter capture |
 
@@ -163,7 +165,7 @@ pub struct PrintfInt {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FloatFmtError {
-    /// Precision outside supported bounds (`> 100` in ECMA-262 / `awk`, or `> max_precision` in `printf`).
+    /// Precision outside ECMA-262 bounds (`> 100` for `fmt_f64_fixed`/`fmt_f64_exp`, or `0` / `> 100` for `fmt_f64_prec`).
     PrecisionRange,
     Mem(MemError),
 }
@@ -178,13 +180,14 @@ pub fn fmt_f64_js(val: f64, out: &mut KString) -> Result<(), MemError>;
 /// Convenience wrapper returning an owned `KString` in `b`.
 pub fn f64_to_js_string(val: f64, b: &Budget) -> Result<KString, MemError>;
 
-/// ECMA-262 `Number.prototype.toFixed(precision)` (`0 <= precision <= 100`, or up to `1_024` for `printf`
-/// zero-extension after the significant decimal digits). Rounds exact binary float ties away from zero.
+/// ECMA-262 `Number.prototype.toFixed(precision)` (`0 <= precision <= 100`; returns `PrecisionRange` when
+/// `precision > 100`). Rounds exact binary float ties away from zero.
 pub fn fmt_f64_fixed(val: f64, precision: usize, b: &Budget) -> Result<KString, FloatFmtError>;
 
-/// ECMA-262 `Number.prototype.toExponential(precision)`. When `two_digit_exp` is `true` (bash `printf`),
-/// single-digit exponents are zero-padded to two digits (`e+00`, `E-05`); when `false` (`awk` `sprintf`),
-/// JS single-digit exponents (`e+0`, `e-5`) are preserved.
+/// ECMA-262 `Number.prototype.toExponential(precision)` (`0 <= precision <= 100`; returns `PrecisionRange` when
+/// `precision > 100` on finite `val`). When `two_digit_exp` is `true` (bash `printf`), single-digit exponents
+/// are zero-padded to two digits (`e+00`, `E-05`); when `false` (`awk` `sprintf`), JS single-digit exponents
+/// (`e+0`, `e-5`) are preserved.
 pub fn fmt_f64_exp(
     val: f64,
     precision: usize,
@@ -193,8 +196,9 @@ pub fn fmt_f64_exp(
     b: &Budget,
 ) -> Result<KString, FloatFmtError>;
 
-/// ECMA-262 `Number.prototype.toPrecision(significant)` (`significant >= 1`), with optional trailing-zero
-/// stripping (`!keep_zeros`, used by `%g`/`%G` without `#`) and optional 2-digit minimum exponent.
+/// ECMA-262 `Number.prototype.toPrecision(significant)` (`1 <= significant <= 100`; returns `PrecisionRange`
+/// outside `1..=100` on finite `val`), with optional fractional trailing-zero stripping (`!keep_zeros`, used by
+/// `%g`/`%G` without `#` when a decimal point is present) and optional 2-digit minimum exponent.
 pub fn fmt_f64_prec(
     val: f64,
     significant: usize,
@@ -212,13 +216,15 @@ pub fn parse_arith_literal(raw: &[u8]) -> Result<f64, ArithNumError>;
 /// whitespace rules, and partial-parse error recovery.
 pub fn parse_printf_int(raw: &[u8]) -> PrintfInt;
 
-/// JavaScript `Number.parseFloat` prefix parser: skips leading JS whitespace, parses the longest valid
-/// decimal/scientific prefix or case-sensitive `[+-]?Infinity`, and ignores trailing garbage (`"3.5abc"` -> `Some(3.5)`).
+/// JavaScript `Number.parseFloat` prefix parser (used by `printf` float specifiers, `seq` operands, and `awk`
+/// general string-to-number coercion): skips leading JS whitespace, parses the longest valid decimal/scientific
+/// prefix or case-sensitive `[+-]?Infinity`, and ignores trailing garbage (`"3.5abc"` -> `Some(3.5)`).
 pub fn parse_f64_prefix(raw: &[u8]) -> Option<f64>;
 
-/// JavaScript `Number(s)` full-string parser: trims leading/trailing JS whitespace; empty/blank -> `Some(0.0)`;
-/// accepts `0x`/`0X`, `0b`/`0B`, `0o`/`0O` unsigned integer literals and decimal floats or `[+-]?Infinity`;
-/// returns `None` (`NaN`) if any unparsed byte remains.
+/// JavaScript `Number(s)` full-string parser (used by `awk` numeric-string detection `looksLikeNumber`, `awk`
+/// `sprintf`/`printf` numeric conversion, and `jq` `tonumber`): trims leading/trailing JS whitespace; empty/blank
+/// -> `Some(0.0)`; accepts `0x`/`0X`, `0b`/`0B`, `0o`/`0O` unsigned integer literals and decimal floats or
+/// `[+-]?Infinity`; returns `None` (`NaN`) if any unparsed byte remains.
 pub fn parse_f64_strict(raw: &[u8]) -> Option<f64>;
 ```
 
@@ -237,7 +243,7 @@ pub enum FormatLimitKind {
     Precision { limit_bytes: usize },
     /// `printf floating-point precision limit exceeded (100 digits)` (`awk` only)
     AwkFloatPrecision,
-    /// `formatted value size limit exceeded (<rem> bytes)` (or `formatted string size limit exceeded (<cap> bytes)` in `awk`)
+    /// `formatted value size limit exceeded (<rem> bytes)` (or `formatted string size limit exceeded (<max_bytes> bytes)` in `awk`)
     FormattedValueSize { limit_bytes: usize },
     /// `printf: output size limit exceeded (<max> bytes)`
     OutputSize { limit_bytes: usize },
@@ -506,16 +512,24 @@ pub fn decode(
           - Emit `'e'`, `'+'` if `n - 1 >= 0` else `'-'`, and the decimal digits of `|n - 1|` **without**
             leading zeros (`1e+21`, `1e-7`, `5e-324`).
 2. **Exact binary-float `toFixed`, `toExponential`, and `toPrecision` (`fmt_f64_fixed`, `fmt_f64_exp`, `fmt_f64_prec`):**
-   - In ECMA-262 (`toFixed`, `toExponential`, `toPrecision`), non-finite values (`NaN`, `±Infinity`) format via
-     `fmt_f64_js` (`"NaN"`, `"Infinity"`, `"-Infinity"`), and `-0.0` is normalized to `+0.0` (so `(-0.0).toFixed(2)`
-     is `"0.00"`, never `"-0.00"`).
-   - For finite `|x| >= 10^21`, `fmt_f64_fixed` delegates to `fmt_f64_js(x)` exactly as `Number.prototype.toFixed`
-     does (`(1e21).toFixed(2)` -> `"1e+21"`).
+   - Precision bounds (matching V8/ECMA-262 `RangeError` rules):
+     - `fmt_f64_fixed`: returns `Err(FloatFmtError::PrecisionRange)` when `precision > 100` (**checked before**
+       non-finite handling, per ECMA-262 `Number.prototype.toFixed`).
+     - `fmt_f64_exp`: formats non-finite values (`NaN`, `±Infinity`) first via `fmt_f64_js` (uppercased if
+       `upper`), then returns `Err(FloatFmtError::PrecisionRange)` when `precision > 100`.
+     - `fmt_f64_prec`: formats non-finite values first via `fmt_f64_js` (uppercased if `upper`), then returns
+       `Err(FloatFmtError::PrecisionRange)` when `significant == 0 || significant > 100`.
+   - `-0.0` is normalized to `+0.0` (so `(-0.0).toFixed(2)` is `"0.00"`, never `"-0.00"`).
+   - For finite `|x| >= 10^21`, `fmt_f64_fixed` delegates to `fmt_f64_js(x)` as `Number.prototype.toFixed` does
+     (`(1e21).toFixed(2)` -> `"1e+21"`).
    - For finite values within fixed/exponential/precision range, compute digits from the **exact mathematical
      real value** `|x| = m * 2^e` of the IEEE-754 double (using stack big-integer arithmetic; do **not** round
      the shortest Ryū string, because `(1.15)` in IEEE-754 is `1.14999999999999991118...`, so `(1.15).toFixed(1)`
      is `"1.1"` whereas `(1.25).toFixed(1)` is `"1.3"`!). On an exact decimal half-way tie (`0.5`, `2.5`, `1.25`),
-     round the magnitude **up (away from zero)** (`0.5 -> "1"`, `2.5 -> "3"`), matching ECMA-262!
+     round the magnitude **up (away from zero)** (`0.5 -> "1"`, `2.5 -> "3"`), matching ECMA-262.
+   - In `fmt_f64_prec`, when `keep_zeros == false`, strip trailing `'0'` digits and a preceding `'.'` **only when
+     a decimal point `'.'` is present** in the significand (before `'e'`/`'E'` or end-of-string), leaving integer
+     zeros untouched (`100_000.0` at `significant = 6` stays `"100000"`, `0.0` at `significant = 1` stays `"0"`).
    - Exponent formatting:
      - When `two_digit_exp == true` (bash `printf` `%e`/`%E`/`%g`/`%G`), pad 1-digit exponents to 2 digits
        (`1.500000e+00`, `1e+06`, `1.000000e+100`).
@@ -632,15 +646,20 @@ pub fn decode(
          and `precision <= rem` (`Precision { limit_bytes: rem }`).
        - Consume 1 argument (`""` if exhausted): `""`, `"-1"`, or `"-2"` selects `opts.now_sec` (`"-2"` selects
          `opts.start_sec`); otherwise leading decimal integer (`parseInt(arg, 10) || 0`).
-       - Call `format_strftime(fmt, ts, opts.tz, rem, rem)`, then apply string precision (truncate to `precision`
-         UTF-16 code units when `>= 0`) and space padding to `|width|` (left-aligned if `width < 0`, checking
-         prospective padded bytes `<= rem` -> `FormattedValueSize { limit_bytes: rem }`). Notice `%()T` (empty
-         `fmt`) emits `""`!
+       - Call `format_strftime(fmt, ts, opts.tz, rem, rem)`, then apply string precision and width in **UTF-16
+         code units**: truncate to `precision` UTF-16 code units when `precision >= 0` (any lone UTF-16
+         surrogate created by splitting a 4-byte astral scalar encodes as `U+FFFD` `0xEF 0xBF 0xBD`), compute
+         `pad_spaces = |width|.saturating_sub(utf16_units(truncated))`, check
+         `utf8_byte_len(truncated) + pad_spaces <= rem` (`FormattedValueSize { limit_bytes: rem }`), and
+         space-pad (left-aligned if `width < 0`, right-aligned otherwise). Notice `%()T` (empty `fmt`) emits `""`!
      - **General specifiers `%[+-0 #']*[width|*][.[precision|*]][hlL]<spec>`:**
        - If `*` width: consume 1 arg, parse `w = leading_int_or_0(arg)`, check `|w| <= rem` (and safe integer) ->
          else `Width { limit_bytes: rem }`; negative `w` sets `-` (left-align) and `width = |w|`.
        - If `.*` precision: consume 1 arg, parse `p = leading_int_or_0(arg)`; if `p >= 0`, check `p <= rem` ->
-         else `Precision { limit_bytes: rem }`; if `p < 0` (and safe integer), precision is **omitted** (`None`)!
+         else `Precision { limit_bytes: rem }`; if `p < 0` and `!is_safe_integer(p)` (`p < -9_007_199_254_740_991`),
+         fail with `Precision { limit_bytes: rem }`; if `-9_007_199_254_740_991 <= p < 0` (**ANSWERED by the owner on 22/11: diverge as upstream-defect —
+         `upstream-defect` divergence**), precision is **omitted** (`None`) for every specifier without mutating
+         width or alignment (`printf '%.*d' -2 7` -> `"7"`, `printf '%.*s' -2 hi` -> `"hi"`).
        - Check literal `width <= rem` (`Width { limit_bytes: rem }`) and literal `precision <= rem`
          (`Precision { limit_bytes: rem }`).
        - Consume 1 value argument (`""` if exhausted):
@@ -648,48 +667,95 @@ pub fn decode(
            `abs_str` on the left to `precision` chars (note: `%.0d` on `0` still emits `"0"`, **not** `""`!);
            prepend sign (`"-"` if `val < 0`, else `"+"` if `+` flag, else `" "` if space flag); pad to `width`
            (`-` -> right spaces; `0` flag **and** no precision -> zeros after sign; else left spaces).
-         - **`u`:** `parse_printf_int(arg)`; if `val < 0.0`, convert to 32-bit unsigned `(val as i64 as i32 as u32) as f64`
-           (`-1` -> `4294967295`); format identically to `d` (`+` and `' '` flags still apply since `unsigned >= 0`!).
-         - **`o`:** `parse_printf_int(arg)`; base-8 digits of `|val| as u64` (**no** minus sign on negative inputs:
-           `-8` -> `"10"`, `%#o` on `-8` -> `"010"`); zero-pad to `precision`; if `#` flag and string does not
-           start with `'0'`, prepend `'0'`; apply width (`-`, `0` when no precision, else spaces).
-         - **`x`, `X`:** `parse_printf_int(arg)`; base-16 digits of `|val| as u64` (lowercase for `x`, uppercase
-           for `X`, **no** minus sign on negative inputs: `-16` -> `"10"`; `+` and `' '` flags ignored); zero-pad
-           to `precision`; if `#` flag and `val != 0.0`, prepend `"0x"` / `"0X"`; apply width (zero-pad after
-           `0x`/`0X` when `0` flag and no precision).
+         - **`u`:** `parse_printf_int(arg)`; if `val < 0.0`, convert to 32-bit unsigned via ECMA-262 `ToUint32`
+           (`if val.is_finite() { (val.trunc().rem_euclid(4_294_967_296.0) as u32) as f64 } else { 0.0 }`, so
+           `-1` -> `4294967295`); format identically to `d` (`+` and `' '` flags still apply since `unsigned >= 0`!).
+         - **`o`:** `parse_printf_int(arg)`; format `|val|` as an **IEEE-754 double in base 8** (matching JS
+           `Math.abs(val).toString(8)`, **never** clamping or truncating to `u64`: for `+Infinity`, `"Infinity"`;
+           for finite integer `|val| <= u64::MAX as f64` with exact integer value, standard base-8 `u64`; for
+           `|val| = m * 2^k` with 53-bit significand `m` and `k > 0`, format `(m << (k % 3))` in base 8 and
+           append `k / 3` ASCII `'0'` bytes, e.g. `1e25`); **no** minus sign on negative inputs (`-8` -> `"10"`,
+           `%#o` on `-8` -> `"010"`); zero-pad to `precision`; if `#` flag and string does not start with `'0'`,
+           prepend `'0'`; apply width (`-`, `0` when no precision, else spaces).
+         - **`x`, `X`:** `parse_printf_int(arg)`; format `|val|` as an **IEEE-754 double in base 16** (matching
+           JS `Math.abs(val).toString(16)`, **never** clamping or truncating to `u64`: for `+Infinity`,
+           `"Infinity"` / `"INFINITY"`; for finite integer `|val| = m * 2^k` with `k > 0`, format `(m << (k % 4))`
+           in base 16 and append `k / 4` ASCII `'0'` bytes; lowercase for `x`, uppercase for `X`, **no** minus
+           sign on negative inputs: `-16` -> `"10"`; `+` and `' '` flags ignored); zero-pad to `precision`; if
+           `#` flag and `val != 0.0`, prepend `"0x"` / `"0X"`; apply width (zero-pad after `0x`/`0X` when `0`
+           flag and no precision).
          - **`f`, `F`, `e`, `E`, `g`, `G`:** `val = parse_f64_prefix(arg).unwrap_or(0.0)` (if `val.is_nan()`,
            replace with `0.0`! Verified in `just-bash@3.6.0`: `printf '%f|%+10.2f' NaN NaN` ->
            `0.000000|     +0.00`, whereas `Infinity` and `-Infinity` format as `Infinity` / `-Infinity` / `INFINITY`!);
            normalize `-0.0` to `+0.0`; default precision is `6` (`%.f` / `%.e` / `%.g` -> precision `0`);
            - `f`/`F`: `fmt_f64_fixed(|val|, precision)`; if `#` and `precision == 0` and finite, append `'.'`.
            - `e`/`E`: `fmt_f64_exp(|val|, precision, spec == 'E', true)`.
-           - `g`/`G`: `fmt_f64_prec(|val|, precision.max(1), spec == 'G', has_hash_flag, true)`.
+           - `g`/`G` (**ANSWERED by the owner on 22/11: diverge as upstream-defect — `upstream-defect` divergence**):
+             `fmt_f64_prec(|val|, precision.max(1), spec == 'G', has_hash_flag, true)` — without `#`, strips
+             trailing `'0'`s and `'.'` only when a decimal point `'.'` is present (`100000` -> `"100000"`,
+             `%.1g` on `0` -> `"0"`).
+           - If `fmt_f64_{fixed,exp,prec}` returns `Err(FloatFmtError::PrecisionRange)` (`precision > 100` after
+             passing `precision <= rem`), abort `format_printf` immediately with `bytes` cleared (`""`),
+             `had_error = true`, and `stderr` set to `"printf: toFixed() digits argument must be between 0 and 100\n"`
+             (`f`/`F`), `"printf: toExponential() argument must be between 0 and 100\n"` (`e`/`E`), or
+             `"printf: toPrecision() argument must be between 1 and 100\n"` (`g`/`G`) (`exit 1`).
            Prepend sign (`"-"` if `val < 0`, `"+"` if `+`, `" "` if `' '`); apply width (`-`, `0` after sign for
            finite or `Infinity`, else left spaces).
          - **`c`:** if `arg.is_empty()` -> `""`; otherwise take the **first byte** `b0` of `arg` and emit scalar
            `char::from(b0)` (`'é'` `[0xC3, 0xA9]` -> `U+00C3` `'Ã'`, `'😀'` `[0xF0, ...]` -> `U+00F0` `'ð'`).
-         - **`s`:** ignore `0`, `+`, `' '`, `#` flags; truncate to `precision` UTF-16 code units when `precision >= 0`;
-           pad with spaces to `width` (checking prospective bytes `<= rem` -> `FormattedValueSize { limit_bytes: rem }`).
-         - **`q`:** run `shell_quote_printf(arg, rem)`, then pad with spaces to `width` (`-` left-aligns;
-           precision is not accepted on `%q`, falling through to unknown placeholder if given).
+         - **`s`:** ignore `0`, `+`, `' '`, `#` flags; both `.precision` truncation and `width` padding count
+           **UTF-16 code units** (not UTF-8 bytes or Unicode scalars): truncate decoded string to `precision`
+           UTF-16 code units when `precision >= 0` (lone surrogate -> `U+FFFD`), compute
+           `pad_spaces = width.saturating_sub(utf16_units(truncated))`, check
+           `utf8_byte_len(truncated) + pad_spaces <= rem` -> `FormattedValueSize { limit_bytes: rem }`, and pad
+           with spaces (`-` left-aligns, else right-aligns).
+         - **`q`:** run `shell_quote_printf(arg, rem)`, then pad with spaces to `width` counting **UTF-16 code
+           units** (checking `utf8_byte_len(quoted) + width.saturating_sub(utf16_units(quoted)) <= rem` ->
+           `FormattedValueSize { limit_bytes: rem }`; `-` left-aligns; precision is not accepted on `%q`, falling
+           through to unknown placeholder if given).
          - **`b`:** run `process_b_escapes(arg, rem)`; if `stopped`, append `bytes` and terminate both `format_once`
            and the outer reuse loop immediately!
          - **Any other specifier:** set `had_error = true`, `stderr = "printf: [sprintf] unexpected placeholder\n"`,
            and emit `""`.
    - Whenever an integer conversion sets `invalid == true`, record `had_error = true` and `stderr = format!("printf: {arg}: invalid number\n")` (preserving the formatted fallback value in `bytes`).
 5. **`awk` `sprintf`/`OFMT` mode (`format_awk_printf`):**
-   - Differs from bash `format_printf` in five exact ways (verified on `just-bash@3.6.0`):
-     1. Does **not** run format-string escapes upfront; only `\n`, `\t`, `\r`, `\\`, and `\X -> X` are decoded
-        inline outside `%` directives, and there is **no** outer argument-reuse loop.
-     2. Supports `%n$` 1-based positional argument indexing (`%2$s-%1$04d`), and skips `hh`, `ll`, `l`, `z`, `j`,
-        `h` length modifiers.
-     3. Field width and precision cap is `cap = min(10_000, max_bytes)` (`Width { limit_bytes: cap }` /
-        `Precision { limit_bytes: cap }`), and float precision `> 100` returns `AwkFloatPrecision`
-        (`printf floating-point precision limit exceeded (100 digits)`).
-     4. `%x`, `%X`, and `%o` preserve `"-"` on negative numbers (`-16` -> `"-10"`), `%e`/`%E` use 1-digit
-        JS exponents (`e+0`), and `%c` on `AwkArg::Num(n)` emits `char::from_u32(n as u32)` while on
-        `AwkArg::Str(s)` emits the first Unicode char of `s`.
-     5. Unknown `%z` emits the raw directive text (`"%z"`) literally without error.
+   - Verified on `just-bash@3.6.0`, `format_awk_printf` obeys seven exact rules distinct from bash `format_printf`:
+     1. **Inline escapes & single pass:** Does **not** run `process_format_escapes` upfront; only `\n`, `\t`, `\r`,
+        `\\`, and `\X -> X` are decoded inline outside `%` directives, and there is **no** outer argument-reuse loop.
+     2. **Positional `%n$`, length modifiers, & `AwkArg` coercion:** Supports `%n$` 1-based positional argument
+        indexing (`%2$s-%1$04d`, which does not advance sequential `value_idx`), skips `hh`, `ll`, `l`, `z`, `j`,
+        `h` length modifiers before the specifier, and coerces `AwkArg::Str(s)` for numeric specifiers (`*`, `.*`,
+        `d`, `i`, `o`, `x`, `X`, `f`, `e`, `E`, `g`, `G`) via `parse_f64_strict(s).unwrap_or(0.0)` (`NaN` and
+        missing arguments become `0.0`; missing `%s` becomes `""`).
+     3. **Limit messages (`cap` vs `max_bytes`):** Width and precision are checked against `cap = min(10_000, max_bytes)`
+        -> `Width { limit_bytes: cap }` (`printf width limit exceeded (<cap> bytes)`) and
+        `Precision { limit_bytes: cap }` (`printf precision limit exceeded (<cap> bytes)`). Float precision `> 100`
+        returns `AwkFloatPrecision` (`printf floating-point precision limit exceeded (100 digits)`). Accumulated
+        UTF-8 output bytes exceeding `max_bytes` return `FormattedValueSize { limit_bytes: max_bytes }`
+        (`formatted string size limit exceeded (<max_bytes> bytes)` — printing `max_bytes`, **not** `cap`).
+     4. **Empty precision `%.f` vs `%.0f`:** An empty `.` precision (`%.f`, `%.e`, `%.g`, or `.*` with negative
+        argument) is treated as omitted: on `%f`/`%e`/`%E`/`%g`/`%G` it defaults to **`6`** (whereas explicit
+        `%.0f` / `%.0e` uses precision `0`), and on `%s` / `%d/%i/%o/%x/%X` it performs no truncation / no
+        minimum-digit padding.
+     5. **`floor()` integer rounding & signed `%o`/`%x`/`%X`:** `*`, `.*`, `%d`, `%i`, `%o`, `%x`, and `%X` round
+        via **`floor()`** (not truncation toward zero, so `-1.5` -> `-2`, `-0.1` -> `-1`), format `|val.floor()|`
+        across the full IEEE-754 `f64` range (base 10 via `fmt_f64_js`, base 8/16 via IEEE-754 double radix
+        formatting), preserve `"-"` on negative `%o`/`%x`/`%X` (`-16` -> `"-10"`, `-1.5` -> `"-2"`), and ignore
+        `#` on every specifier (`+` and `' '` apply only on `%d`/`%i`; `0` zero-padding applies only on
+        `%d`/`%i`/`%o`/`%x`/`%X` when precision is absent/empty; float specifiers honor `-` width alignment only).
+     6. **AWK `%g`/`%G` (`exp < -4 || exp >= prec`):** Distinct from JS `toPrecision`: `0.0` (and `-0.0` / `NaN`)
+        always emits `"0"` regardless of precision; `#` is ignored; for non-zero finite `num`, compute
+        `exp = num.abs().log10().floor() as i32` (exact decimal exponent `e` with `10^e <= |num| < 10^(e+1)`):
+        when **`exp < -4 || exp >= prec as i32`**, format via `fmt_f64_exp(num, prec - 1, spec == 'G', false)`
+        (`1e-5` -> `"1e-5"`, **not** `"0.00001"`!), else via `fmt_f64_prec(num, prec, spec == 'G', true, false)`;
+        then, **only if `'.'` is present**, strip trailing fractional zeros and unnecessary `'.'` (`\.?0+$` and
+        `\.?0+e` -> `e`).
+     7. **Supported specifiers (`%F` rejected) & UTF-16 `%s`/`%c`:** Only `s`, `d`, `i`, `o`, `x`, `X`, `f`, `e`,
+        `E`, `g`, `G`, `c`, and `%` are recognized. **`%F`, `%u`, and any other unknown specifier (`%z`)** emit
+        the raw directive substring (`"%F"`, `"%z"`) literally without error and without incrementing sequential
+        `value_idx`. `%s` truncation and width count UTF-16 code units; `%c` on `AwkArg::Num(n)` emits UTF-16
+        code unit `(n as i64 as u32) & 0xFFFF` (as UTF-8 / `U+FFFD` if surrogate) and on `AwkArg::Str(s)` emits
+        the first UTF-16 code unit / Unicode char of `s` (empty -> `""`).
 
 ### 5.4 Civil-calendar `strftime` and timezone rules (`kernel::format`)
 
@@ -817,12 +883,28 @@ Add five test-only commands under `cfg(feature = "test-commands")` (zero bytes i
 `kernel.core.wasm`), charging `Fiber::charge_work` through `work`:
 
 1. **`__num <op:js|fixed|exp|prec|arith|printf-int|f64-prefix|f64-strict> <arg1> [arg2] [flags]`**
-   - `js <hex_u64_bits_or_f64>` -> writes `fmt_f64_js` + `\n` (`0x...` raw IEEE-754 `u64` bits when `arg1` starts
-     with `0x` and flag `bits` is passed, else parsed `f64`).
-   - `fixed`/`exp`/`prec` -> writes formatted output + `\n` (or exits `2` on `PrecisionRange`).
-   - `arith <token>` -> writes `fmt_f64_js(val)` + `\n` (exit `0`), or `bash: value too great for base\n` /
-     `bash: invalid number\n` on stderr with exit `1`.
-   - `printf-int <raw>` -> writes `<fmt_f64_js(value)>|<0_or_1>\n`.
+   - `js <val_or_hex> [bits]` -> parses `arg1` as raw 64-bit IEEE-754 hex bits (`f64::from_bits(u64)`) when
+     `arg2 == Some(b"bits")` and `arg1` starts with `0x`/`0X`, else via `parse_f64_strict` (`t_bad` on `None`);
+     writes `fmt_f64_js(val)` + `\n` (`exit 0`).
+   - `fixed <val_or_hex> <precision> [bits]` -> parses `val` (raw `0x...` `u64` bits when `arg3 == Some(b"bits")`,
+     else `parse_f64_strict`) and `precision: usize`; writes `fmt_f64_fixed(val, precision)` + `\n` (`exit 0`),
+     or `__num: precision range\n` on stderr with `exit 2` on `FloatFmtError::PrecisionRange`.
+   - `exp <val_or_hex> <precision> [flags]` -> parses `val` and `precision: usize`, with optional `<flags>` (`-`
+     or combination of `b` / `bits` = raw `0x...` `u64` bits, `u` = `upper: true`, `2` = `two_digit_exp: true`;
+     defaults `upper = false, two_digit_exp = false`); writes `fmt_f64_exp(...)` + `\n` (`exit 0`), or `exit 2`
+     on `PrecisionRange`.
+   - `prec <val_or_hex> <significant> [flags]` -> parses `val` and `significant: usize`, with optional `<flags>`
+     (`-` or combination of `b` = raw `0x...` `u64` bits, `u` = `upper: true`, `k` = `keep_zeros: true`, `2` =
+     `two_digit_exp: true`; passing literal `bits` sets `b` + `k` with `two_digit_exp = false` to match raw JS
+     `toPrecision(significant)` in `l8b-js-numbers.json`); writes `fmt_f64_prec(...)` + `\n` (`exit 0`), or
+     `exit 2` on `PrecisionRange`.
+   - `arith <token>` -> writes `fmt_f64_js(val)` + `\n` (`exit 0`), or `bash: value too great for base\n` /
+     `bash: invalid number\n` on stderr with `exit 1`.
+   - `printf-int <raw>` -> writes `<fmt_f64_js(value)>|<0_or_1>\n` (`exit 0`).
+   - `f64-prefix <raw>` -> runs `parse_f64_prefix(raw)`; writes `fmt_f64_js(val)` + `\n` (`exit 0`) on `Some(val)`,
+     or `none\n` (`exit 1`) on `None`.
+   - `f64-strict <raw>` -> runs `parse_f64_strict(raw)`; writes `fmt_f64_js(val)` + `\n` (`exit 0`) on `Some(val)`,
+     or `none\n` (`exit 1`) on `None`.
 2. **`__printf [--tz <tz>] [--] <format> [args...]`**
    - If zero positional args after options (`__printf` alone): stderr `printf: usage: printf format [arguments]\n`,
      exit `2` (`exit 1` when `--` was given, matching `printf --`).
@@ -849,14 +931,15 @@ Add five test-only commands under `cfg(feature = "test-commands")` (zero bytes i
 `test/parity/l8b.test.mjs` passes `harness/parity/l8b-adapter.mjs` to `defineParityTests`:
 - `create(init)` constructs `Bash` on `kernel-test` (`import { T } from "../../test/kt.mjs"`), forwarding
   `files`, `env`, `cwd`, `executionLimitProfile: init.profile ?? "normal"`, and `init.engine`.
-- Uses the exact single-quote `unquote(s)` / `quote(s)` helpers (never injecting adapter variables into `env`):
-  `token = '(?:[^']|'\\'')*'`.
+- Uses shell `unquote(s)` / `quote(s)` helpers (never injecting adapter variables into `env`): `unquote(s)` decodes
+  single-quoted `'(?:[^']|'\\'')*'` tokens, literal double-quoted `"(?:[^"$`\\]|\\["$`\\])*"` tokens, and bare
+  safe `[A-Za-z0-9_./+-]+` tokens; `quote(s)` re-encodes in single-quoted canonical form.
 - Recognizes five canonical step forms (any non-matching step throws an error with `err.code = "UNSUPPORTED"` so
   the runner marks it `notCovered`):
   1. `^printf$`: runs `__printf` (no args -> exit `2`).
-  2. `^printf( --)?((?: (?:'(?:[^']|'\\'')*'|[A-Za-z0-9_./+-]+))+)$`: tokenizes single-quoted or bare safe tokens
-     and runs `__printf [--] <quoted_tokens...>`, forwarding `step.env` (e.g. `TZ`) via `exec` options when
-     `step.env` is explicitly present on the step.
+  2. `^printf( --)?((?: (?:'(?:[^']|'\\'')*'|"(?:[^"$`\\]|\\["$`\\])*"|[A-Za-z0-9_./+-]+))+)$`: tokenizes quoted or
+     bare safe tokens and runs `__printf [--] <quoted_tokens...>`, forwarding `step.env` (e.g. `TZ`) via `exec`
+     options when `step.env` is explicitly present on the step.
   3. `^date -u -d @(-?[0-9]+) '(\+(?:[^']|'\\'')*)'$`: decodes `+fmt`, strips leading `+`, and runs
      `__strftime <epoch> <quote(fmt)> 'UTC'`.
   4. `^base64(?: -w ([0-9]+)| (-d|--decode))?$`: runs `__base64 encode <w|76>` or `__base64 decode` with
@@ -901,18 +984,18 @@ All 30 cases set `"env": { "TZ": "UTC" }` unless testing explicit `step.env`:
 |---:|---|---|
 | 1 | `printf-usage-errors` | Steps: `printf` (`exit 2`), `printf --` (`exit 1`) |
 | 2 | `printf-int-bases-signs` | `printf '%d\|%d\|%d\|%d\|%d\|%d\|%d' '+42' '-42' '0x10' '+0x10' '010' '+010' '-010'` (`42\|-42\|16\|16\|8\|8\|-10`) and `'08'` (`8`) |
-| 3 | `printf-int-char-consts` | `printf '%d\|%d\|%d\|%d' "'a" '"A' "'é" "\\'z"` (`97\|65\|233\|122`) |
+| 3 | `printf-int-char-consts` | `printf '%d\|%d\|%d\|%d' ''\''a' '"A' ''\''é' '\\'\''z'` (`97\|65\|233\|122`) |
 | 4 | `printf-int-invalid-recovery` | Steps: `printf '%d' '-0x10'`, `printf '%d' '64#a'`, `printf '%d' '3abc'`, `printf '%d' 'abc'`, `printf '%d' '42 '` (all `exit 1` with formatted partial/0 stdout and `printf: <arg>: invalid number\n`) |
 | 5 | `printf-int-flags-width-prec` | `printf '%+d\|% d\|%+ d\|%05d\|%-5d\|%08.4d\|%.0d\|%6.d' '42' '42' '42' '42' '42' '42' '0' '0'` |
 | 6 | `printf-unsigned-oct-hex` | `printf '%u\|%o\|%x\|%X\|%#o\|%#o\|%#x\|%#X\|%#x' '-1' '-8' '-16' '-16' '0' '8' '16' '16' '0'` |
 | 7 | `printf-large-int-double` | `printf '%d\|%d\|%d' '9007199254740991' '9223372036854775807' '99999999999999999999999999999'` |
 | 8 | `printf-float-f-e` | `printf '%f\|%.2f\|%.0f\|%#.0f\|%e\|%.2E\|%+010.2f' '1.5' '1.25' '2.5' '1' '1.5' '1234.5' '3.5'` |
-| 9 | `printf-float-g-special` | `printf '%g\|%g\|%g\|%#g\|%.2g\|%F\|%E\|%f' '100000' '1000000' '0.00001' '100' '123.4' 'Infinity' '-Infinity' 'NaN'` |
+| 9 | `printf-float-g-special` | `printf '%g\|%g\|%g\|%#g\|%.2g\|%F\|%E\|%f' '10000' '1000000' '0.00001' '100' '123.4' 'Infinity' '-Infinity' 'NaN'` (*ANSWERED by the owner on 22/11: diverge as upstream-defect*) |
 | 10 | `printf-string-and-char` | `printf '%5s\|%-5s\|%05s\|%.3s\|%.2s\|%c\|%c\|%c' 'hi' 'hi' 'hi' 'héllo' '😀ab' '' 'abc' 'é'` |
-| 11 | `printf-quote-q` | `printf '%q\|' '' 'abc_1-2./' 'hello world' "a'b" 'é' '~foo' 'a=b' '{a,b}' '!hist'` |
+| 11 | `printf-quote-q` | `printf '%q\|' '' 'abc_1-2./' 'hello world' 'a'\''b' 'é' '~foo' 'a=b' '{a,b}' '!hist'` |
 | 12 | `printf-format-escapes` | `printf '\\a\|\\b\|\\e\|\\E\|\\f\|\\n\|\\r\|\\t\|\\v\|\\\\\|\\0101\|\\101\|\\777\|\\x4\|\\x41\|\\xc3\\xa9\|\\xc3\\x28\|\\u00e9\|\\U0001f600\|\\cX'` |
 | 13 | `printf-b-escapes-and-stop` | Steps: `printf '%b' '\\a\|\\e\|\\0\|\\0101\|\\101\|\\777\|\\x4g\|\\xc3\\xa9\|\\xc3\\x28\|\\u00e9\|\\U0001f600'` and `printf '%b-%s' 'abc\\cdef' 'ignored'` |
-| 14 | `printf-dynamic-star` | `printf '%*.*f\|%*d\|%.*d' '-8' '2' '3.5' '-4' '7' '-2' '7'` |
+| 14 | `printf-dynamic-star` | `printf '%*.*f\|%*d\|%.*d' '-8' '2' '3.5' '-4' '7' '3' '7'` (*ANSWERED by the owner on 22/11: diverge as upstream-defect*) |
 | 15 | `printf-arg-reuse-and-pct` | Steps: `printf 'a:%d b:%s\\n' '1' 'one' '2' 'two' '3'`, `printf 'plain%%' 'extra1' 'extra2'`, `printf '%'` |
 | 16 | `printf-bad-placeholder` | Steps: `printf '%z' '1'` and `printf '%10%' '1'` (`exit 1`, `printf: [sprintf] unexpected placeholder\n`) |
 | 17 | `printf-strftime-directives` | `printf '%(%Y-%m-%d %H:%M:%S %Z %z %a %A %b %h %B %C %d %D %e %F %g %G %I %j %k %l %m %M %p %P %r %R %s %S %u %U %V %w %W %x %X %y %N %Q)T' '0'` |
@@ -929,6 +1012,13 @@ All 30 cases set `"env": { "TZ": "UTC" }` unless testing explicit `step.env`:
 | 28 | `sha256sum-vectors` | Steps: `sha256sum` on `""`, `"abc"`, `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`, and binary `{ base64: "AP8BAg==" }` |
 | 29 | `printf-quote-control-bytes` | `printf '%q' 'a	b'` (tab -> `$'a\tb'`) and `printf '%b' '\\x01\\x7f\\x1b'` |
 | 30 | `printf-output-size-limit` | `engine: { executionLimits: { maxStringLength: 12 } }`, step: `printf '%s%s' '01234567' '89abX'` (`exit 126`, `bash: formatted value size limit exceeded (4 bytes)\n` / output limit) |
+
+Deliberately excluded from the snapshot table above (*ANSWERED by the owner on 22/11: diverge as upstream-defect — `upstream-defect`, EVOL D23 & Annex E.7*):
+`printf '%g'` on `p`-digit round integers without a decimal point (`100000` -> `"100000"`, `%.1g` on `0` -> `"0"`,
+where `just-bash@3.6.0` strips integer zeros to `"1"` / `""`) and negative dynamic `.*` precision
+(`printf '%.*d' -2 7` -> `"7"`, `printf '%.*s' -2 hi` -> `"hi"`, `printf '%.*d' -100000000 7` -> `"7"`, where
+`just-bash@3.6.0` splices `.-2` into `sprintf` and either right-pads `"7 "`, errors with `[sprintf] unexpected placeholder`,
+or allocates unbounded padding bypassing `maxStringLength`). Those behaviours are verified directly by Gates 5 and 6.
 
 ## 7. Executable exit gates
 
@@ -954,16 +1044,22 @@ All gates run in `make check` (`cargo test` + `node tools/run-tests.mjs`):
      both `Permissive` and `Strict` decode edge cases.
 5. **Prospective byte-limit and S11 timezone gate (`test/l8b-limits.test.mjs`).**
    - `%2147483647s` and `%.2147483647d` under default `contain` (`maxStringLength = 16 MiB`) fail prospectively
-     in **`< 10 ms`** without allocating gigabytes (`exitCode: 126`, `Bash` instance still runs `echo ok` -> `"ok\n"`).
+     in **`< 10 ms`** without allocating gigabytes (`exitCode: 126`, `Bash` instance still runs `echo ok` -> `"ok\n"`),
+     and `%.101f` / `%.101e` / `%.101g` fail with `exitCode: 1` (`RangeError` message on stderr).
+   - Negative dynamic precision `printf '%.*d' -100000000 7` (*ANSWERED by the owner on 22/11: diverge as upstream-defect*) omits precision and outputs `"7"`
+     (`exitCode: 0`) in **`< 10 ms`** under `micro` (`maxStringLength = 4 MiB`) without allocating `100 MB` padding.
    - `base64` with `-w 1` on a payload exceeding `maxArrayElements` (`100` override) fails prospectively with
      `exitCode: 126` (`bash: base64: wrapped line limit exceeded (100)\n`).
    - S11 timezone non-disclosure: `__strftime 0 '%Y-%m-%d %H:%M:%S %Z %z'` with `TZ` unset, `TZ=""`, and
      `TZ="Invalid/Zone"` all output `"1970-01-01 00:00:00 UTC +0000\n"` regardless of the host `TZ` env var.
 6. **Native unit suite (`cargo test --lib`).** At least **70** native unit tests across `num`, `format`, `hash`,
    and `base64`, including `parse_arith_literal` (`2..=64` bases, `36#Z` == `35` vs `37#Z` == `61`, `64#@_` ==
-   `4031`, `08` error, `MAX_SAFE_INT + 1` clamping), `format_awk_printf` (`%2$s`, `ll`/`z` modifiers, `-%x`,
-   `> 100` precision error), and `strftime` negative pre-1970 dates, year `2038+` (`> i32::MAX`), and `Etc/GMT±N`
-   sign inversion.
+   `4031`, `08` error, `MAX_SAFE_INT + 1` clamping), `format_printf` UTF-16 width padding (`%5s` on `'😀'`),
+   IEEE-754 `f64` `%o`/`%x`/`%X` on `1e25`, `%g` on `100_000` -> `"100000"` and `%.1g` on `0` -> `"0"` plus
+   `%.*d`/`%.*s`/`%.*f` with `-2` (*ANSWERED by the owner on 22/11: diverge as upstream-defect*), `format_awk_printf` (`%2$s`, `ll`/`z` modifiers, `floor()`
+   on `-1.5` -> `"-2"`, `-%x`, AWK `%g` on `1e-5` -> `"1e-5"` and `0` -> `"0"`, `#` ignored, `%.f` -> precision `6`,
+   `%F` literal, `<max_bytes>` vs `<cap>` limit messages, `> 100` precision error), and `strftime` negative
+   pre-1970 dates, year `2038+` (`> i32::MAX`), and `Etc/GMT±N` sign inversion.
 7. **Deterministic seeded fuzz slice (`test/l8b-fuzz.test.mjs` + native `cargo test`).** Fixed seed
    `0x5345_4E54_4C38_4231` running **>= 2 000** random format strings, escape sequences, timestamps, number
    strings, and byte slices in `make check`: 0 panics, 0 Wasm traps, `< 2 s` total runtime.
@@ -978,6 +1074,7 @@ Record in `BRANCH.md` and the PR description:
 2. **Vector and round-trip counts:** exact count of `test/fixtures/l8b-js-numbers.json` vectors and seeded live
    `String(x)` comparisons passing with 0 mismatches.
 3. **Downstream handoff verification:** confirm the exact public signatures consumed by L4 (`fmt_f64_js`,
-   `parse_arith_literal`), L9b (`format_printf`, `format_strftime`, `base64::{encode,decode}`, `parse_f64_strict`),
-   L14a/L14b (`format_awk_printf`, `fmt_f64_js`, `parse_f64_prefix`), L15a-1/L15a-2 (`fmt_f64_js`,
-   `format_strftime`, `base64::{encode,decode}`), and L16c (`Md5`, `Sha1`, `Sha256`).
+   `parse_arith_literal`), L9b (`format_printf`, `format_strftime`, `base64::{encode,decode}`, `parse_f64_prefix`
+   for `seq`), L14a/L14b (`format_awk_printf`, `fmt_f64_js`, `parse_f64_prefix`, `parse_f64_strict`),
+   L15a-1/L15a-2 (`fmt_f64_js`, `parse_f64_strict`, `format_strftime`, `base64::{encode,decode}`), and L16c
+   (`Md5`, `Sha1`, `Sha256`).

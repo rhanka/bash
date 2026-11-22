@@ -62,17 +62,20 @@ In scope for L1d:
     (`fuel = 0, fuel_credit = 0`) so the fiber returns `Step::OutOfFuel` at the slice boundary and the driver
     drains the buffer before resuming — **zero dropped hits or events**, and both buffers stay intact across
     `Fiber::finish` and `Fiber::cancel` until drained by `take_coverage` / `take_trace`!
-- **Command-context observability API (`kernel/src/cmd/mod.rs`) and ABI lowering (`kernel/src/glue/adapt.rs`):**
+- **Command-context observability API (`kernel/src/cmd/mod.rs`) and ABI lowering (`kernel/src/glue/adapt.rs`, `kernel/src/glue/rt.rs`):**
   - Export `TraceValue`, `TraceDetail`, `TraceEvent`, and `FindTraceStats` / `TraceSpan` helpers on `CmdCtx`
     (`coverage_enabled`, `hit_coverage`, `trace_enabled`, `emit_trace`, `should_yield`) so L4 (at exit) and
     command lots L9a-2 (`find`), L13 (`sed`), L14a (`awk`), and L15a-1 (`jq`) emit trace events and coverage
     hits without editing `fiber.rs` or `adapt.rs`.
-  - Implement `GuestFiber::take_trace(max: u32) -> Vec<T::TraceEvent>` in `adapt.rs` with `rt::prepare_lowering`
-    headroom accounting and single-event `reserve_scope` fallback.
+  - Implement `GuestFiber::take_trace(max: u32) -> Vec<T::TraceEvent>` in `adapt.rs` (widening `LOWERING` in
+    `kernel/src/glue/rt.rs` to `TRACE_BUF_CAP + 1` = `257` slots) with per-event `rt::prepare_lowering`
+    headroom accounting (`(events.len(), 32, 8)` plus one `(ev.details.len(), 24, 8)` per event with non-empty
+    details) and single-event `reserve_scope` fallback.
 - **Host driver, facade, and `./browser` filter (`host/core/driver.js`, `host/core/facade.js`, `host/index.js`, `host/browser.js`):**
-  - Answer `host-req::trace-clock` synchronously in `driver.js` `serve()` (`monotonicNs = BigInt(Math.round(now() * 1e6))`,
-    with optional `B.hooks?.traceClockNs?.()` override for deterministic S11 tests) so `execSync` works when
-    `trace` and/or `coverage` are enabled!
+  - Answer `host-req::trace-clock` synchronously in `driver.js` `serve()` **before** `B.hooks?.onHostCall?.(req)`
+    (`monotonicNs = BigInt(Math.round(now() * 1e6))`, with optional `B.hooks?.traceClockNs?.()` override for
+    deterministic S11 tests) so `trace: true` never emits internal clock plumbing to capability hooks (S2) and
+    `execSync` works when `trace` and/or `coverage` are enabled!
   - Extend `drain(x)` in `driver.js` to drain `takeCoverage` (mapping `u16` IDs via an instance-cached
     `coverageFeatures()` array) and `takeTrace` (lifting `details` into null-prototype objects per S10), running
     on every `out-of-fuel`, before `serve()` on every `host-call`, on `cancel()`, and in `finish()` before
@@ -80,10 +83,11 @@ In scope for L1d:
   - Pass `{ browser: true }` from `host/browser.js` (and `{ browser: false }` from `host/index.js`) into
     `createFacade`, filtering kernel-emitted `"cmd:flag:"` hits in `drain(x)` on the browser entry only (EVOL
     Annex D.7, Annex J R2.3).
-  - Fix `logger` ordering in `host/core/facade.js`: emit `logger.info("exec", { command })` **before** running
-    the fiber, then `debug("stdout", { output })` (if non-empty), `info("stderr", { output })` (if non-empty),
-    and `info("exit", { exitCode })` **after** completion, on `exec`, `execSync`, and nested `#runChild`
-    (`ctx.exec` / `ctx.origCommand`), skipping all four calls when `command.trim() === ""` (EVOL Annex D.1).
+  - Fix uniform `logger` ordering in `host/core/facade.js` across `exec`, `execSync`, and `#runChild` (passing
+    `B.logger` context into `#runChild`, where logging is currently absent): emit `logger.info("exec", { command })`
+    **before** running `execLoop`, then `debug("stdout", { output })` (if non-empty), `info("stderr", { output })`
+    (if non-empty), and `info("exit", { exitCode })` **after** `execLoop` finishes (excluding internal `o.bypass`
+    `ctx.origCommand` delegations and skipping all four calls when `command.trim() === ""`, EVOL Annex D.1).
 - **Test commands and parity wiring (`kernel/src/fiber/testcmd.rs`, `harness/parity/sentropic-adapter.mjs`):**
   - Add `__cov` and `__trace` in `testcmd.rs` (`cfg(feature = "test-commands")`) to exercise multi-slice buffer
     backpressure (`> 10 000` hits, `> 1 000` trace events), `trace-clock` duration computation, and `find`
@@ -100,9 +104,10 @@ Out of scope:
 ```
 kernel/src/shell.rs
 kernel/src/fiber.rs
-kernel/src/fiber/vm.rs         (route built `hit` / builtin coverage push through bounded `Fiber::hit_coverage`)
+kernel/src/fiber/vm.rs         (route built `hit` / builtin coverage push through bounded `Fiber::hit_coverage_id`)
 kernel/src/cmd/mod.rs
 kernel/src/glue/adapt.rs
+kernel/src/glue/rt.rs          (widen `LOWERING` to `TRACE_BUF_CAP + 1` = `257` slots for per-event `take_trace` lowering)
 kernel/src/fiber/testcmd.rs    (update `T_CLOCK` match; add `__cov` and `__trace` under test-commands)
 host/core/driver.js
 host/core/facade.js
@@ -196,15 +201,17 @@ impl Fiber {
         self.coverage.len() >= COVERAGE_BUF_CAP || self.trace.len() >= TRACE_BUF_CAP
     }
 
-    /// Appends `id` when `shell.coverage` is true; if `coverage.len() >= COVERAGE_BUF_CAP`, zeroes
-    /// `fuel` and `fuel_credit` so the current slice returns `Step::OutOfFuel` for draining.
+    /// Appends `id` when `shell.coverage` is true; whenever `coverage.len() >= COVERAGE_BUF_CAP`
+    /// (`4_096`), zeroes **both** `self.fuel` and `self.fuel_credit` so the next `take_fuel()` or
+    /// `tick()` checkpoint yields `Step::OutOfFuel` cleanly between VM opcodes for draining.
     pub(crate) fn hit_coverage_id(&mut self, id: u16) -> Result<(), Fail>;
 
     /// Looks up `coverage_id(feature)` and delegates to `hit_coverage_id`.
     pub(crate) fn hit_coverage(&mut self, feature: &str) -> Result<(), Fail>;
 
-    /// Appends `event` when `shell.trace` is true; if `trace.len() >= TRACE_BUF_CAP`, zeroes
-    /// `fuel` and `fuel_credit` so the current slice returns `Step::OutOfFuel` for draining.
+    /// Appends `event` when `shell.trace` is true; whenever `trace.len() >= TRACE_BUF_CAP` (`256`),
+    /// zeroes **both** `self.fuel` and `self.fuel_credit` so the next `take_fuel()` or `tick()`
+    /// checkpoint yields `Step::OutOfFuel` cleanly for draining.
     pub(crate) fn push_trace(&mut self, event: TraceEvent) -> Result<(), Fail>;
 
     /// Formats and pushes the two `find` trace events (`summary` then `searchPath`) for `raw_search_path`
@@ -225,7 +232,7 @@ And on `CmdCtx<'_>` in `kernel/src/cmd/mod.rs`:
 impl CmdCtx<'_> {
     pub fn live_budget(&self) -> &Budget { &self.fiber.live }
     pub fn should_yield(&self) -> bool {
-        !self.fiber.tick() || self.fiber.should_yield_observability()
+        self.fiber.should_yield_observability() || !self.fiber.tick()
     }
     pub fn coverage_enabled(&self) -> bool { self.fiber.coverage_enabled() }
     pub fn hit_coverage(&mut self, feature: &str) -> Result<(), Fail> {
@@ -270,29 +277,37 @@ const { Bash, InMemoryFs } = createFacade(loader, { browser: true });
 
 ### 5.1 `logger` contract and nested `ctx.exec` ordering (EVOL Annex D.1, verified on `just-bash@3.6.0`)
 
-1. **Blank-script suppression:**
-   - Before starting an execution (`bash.exec`, `bash.execSync`, or nested `#runChild` from `ctx.exec` /
-     `ctx.origCommand`), test `commandLine.trim() === ""` (standard JavaScript `String.prototype.trim()`).
-   - When `commandLine.trim() === ""` (empty `""` or whitespace-only `"   \n\t\u00a0"`), **zero** calls are
-     made to `logger.info` or `logger.debug`.
+1. **Blank-script and `ctx.origCommand` suppression:**
+   - Before starting an execution (`bash.exec`, `bash.execSync`, or nested `#runChild` in `host/core/facade.js`),
+     compute `const shouldLog = Boolean(B.logger) && !o.bypass && commandLine.trim() !== ""` (using standard JS
+     `String.prototype.trim()`).
+   - When `commandLine.trim() === ""` (empty `""` or whitespace-only `"   \n\t\u00a0"`), or when `o.bypass` is
+     set (`ctx.origCommand`, which delegates directly to the shadowed built-in without running a shell `exec` in
+     `just-bash@3.6.0`), **zero** calls are made to `logger.info` or `logger.debug`.
    - A comment-only script such as `"# comment\n"` has `commandLine.trim() !== ""` and **does** log `"exec"`
      and `"exit"` (`{ exitCode: 0 }`).
-2. **Exact call sequence for every non-blank execution (`logger` configured):**
-   1. **Before** running `execLoop`: `logger.info("exec", { command: commandLine })` (with the raw un-normalized
-      `commandLine` string as passed to `exec` / `execSync` / `ctx.exec`).
-   2. Run `execLoop` to obtain `result` (`{ stdout, stderr, exitCode, ... }`, with `stdout` and `stderr`
-      decoded to JS strings exactly as returned to the caller).
-   3. If `result.stdout !== ""` (non-empty string): `logger.debug("stdout", { output: result.stdout })`.
-   4. If `result.stderr !== ""` (non-empty string): `logger.info("stderr", { output: result.stderr })`.
-   5. Always: `logger.info("exit", { exitCode: result.exitCode })`.
-3. **Interleaving with custom commands and `ctx.exec`:**
+2. **Uniform pre/post call sequence across `exec`, `execSync`, and `#runChild` (`host/core/facade.js`):**
+   - Split `#log` in `host/core/facade.js` into `#logStart(B, commandLine, o)` and `#logEnd(B, commandLine, o, result)`
+     (or wrap `execLoop` uniformly in `exec`, `execSync`, and `#runChild`, passing `B` with `B.logger` into
+     `#runChild`, which currently omits logging on `main`):
+     1. **Before** running `execLoop`: if `shouldLog`, call `B.logger.info("exec", { command: commandLine })`
+        (with the raw un-normalized `commandLine` string as passed to `exec` / `execSync` / `ctx.exec`).
+     2. Run `execLoop` (`await runAsync(...)` in `exec` and `#runChild`; `runSync(...)` in `execSync`) to obtain
+        `result` (`{ stdout, stderr, exitCode, ... }`, with `stdout` and `stderr` decoded to JS strings as
+        returned to the caller).
+     3. If `shouldLog && result.stdout !== ""` (non-empty string): `B.logger.debug("stdout", { output: result.stdout })`.
+     4. If `shouldLog && result.stderr !== ""` (non-empty string): `B.logger.info("stderr", { output: result.stderr })`.
+     5. If `shouldLog`: `B.logger.info("exit", { exitCode: result.exitCode })`.
+3. **Interleaving with custom commands, `ctx.exec`, and limit results:**
    - Because step 1 runs **before** `execLoop` and steps 3-5 run **after** `execLoop` finishes, a custom command
      invoked during the script observes the parent's `info("exec", ...)` already logged; if the custom command
-     calls `await ctx.exec(subCmd)`, the child logs its full `info("exec")` -> `debug("stdout")` ->
-     `info("stderr")` -> `info("exit")` sequence **before** `ctx.exec` resolves back to the custom command, and
-     the parent logs its `stdout`/`stderr`/`exit` after the outer `execLoop` finishes (matching `just-bash@3.6.0`).
-   - This sequence also holds on syntax errors (`exitCode: 2`), unknown commands (`exitCode: 127`), execution
-     limits including `maxSourceBytes` and `maxCommandCount` (`exitCode: 126`), and abort/deadline (`exitCode: 124`).
+     calls `await ctx.exec(subCmd)` (or `ctx.execWithInheritedStdin`), `#runChild` logs the child's full
+     `info("exec")` -> `debug("stdout")` -> `info("stderr")` -> `info("exit")` sequence **before** `ctx.exec`
+     resolves back to the custom command, and the parent logs its `stdout`/`stderr`/`exit` after the outer
+     `execLoop` finishes (matching `just-bash@3.6.0`).
+   - Per EVOL D1, D14, Annex D.1, and Annex D.2, this exact sequence also holds on syntax errors (`exitCode: 2`),
+     unknown commands (`exitCode: 127`), execution limits including `maxSourceBytes` and `maxCommandCount`
+     (`exitCode: 126`, returning a result rather than throwing), and abort/deadline (`exitCode: 124`).
 
 ### 5.2 Bounded `coverage` and `trace` buffers, drain order, and ABI lowering (EVOL Annex A)
 
@@ -301,12 +316,18 @@ const { Bash, InMemoryFs } = createFacade(loader, { browser: true });
      always returns `[]`.
    - When `Shell.trace == false`, `push_trace` and `emit_find_trace` are `O(1)` no-ops, `trace_clock_req()`
      returns `None` (zero `trace-clock` host calls are ever emitted!), and `takeTrace` always returns `[]`.
-2. **Bounded per-fiber buffers and `OutOfFuel` backpressure:**
+2. **Bounded per-fiber buffers and `OutOfFuel` backpressure between VM opcodes:**
    - Both `Fiber.coverage` (`KVec<u16>`) and `Fiber.trace` (`KVec<TraceEvent>`) allocate from `&self.live` (so
      an adversarial custom/kernel trace flood cannot breach `maxLiveBytes`).
-   - When `hit_coverage_id` pushes an ID and `self.coverage.len() >= COVERAGE_BUF_CAP` (`4_096`), or `push_trace`
-     pushes an event and `self.trace.len() >= TRACE_BUF_CAP` (`256`), immediately set `self.fuel.set(0)` and
-     `self.fuel_credit.set(0)`.
+   - Route every coverage push in `kernel/src/fiber/vm.rs` (both `self.hit(...)` and the builtin-ID
+     `self.coverage.try_push(id as u16)` in `Fiber::dispatch`) through `self.hit_coverage_id(id)`.
+   - Whenever `hit_coverage_id` pushes an ID and `self.coverage.len() >= COVERAGE_BUF_CAP` (`4_096`), or
+     `push_trace` pushes an event and `self.trace.len() >= TRACE_BUF_CAP` (`256`), immediately set **both**
+     `self.fuel.set(0)` **and** `self.fuel_credit.set(0)`. Because `Fiber::tick()` decrements `fuel_credit` and
+     falls back to `Fiber::take_fuel()` when `fuel_credit == 0` (which otherwise grants `16` credits per fuel
+     unit), zeroing **both** `fuel` and `fuel_credit` guarantees that the very next `take_fuel()` or `tick()`
+     checkpoint in `vm.rs` / `expand.rs` / `CmdCtx::should_yield()` returns `false`, parking the active VM or
+     command frame cleanly between VM opcodes and yielding `Step::OutOfFuel` without dropping any hit or event!
    - Additionally, at the top of `Fiber::advance`, if `self.coverage.len() >= COVERAGE_BUF_CAP * 2` or
      `self.trace.len() >= TRACE_BUF_CAP * 2` (for example if a raw WIT caller invokes `fiber.run(fuel)`
      repeatedly without draining), return `Step::OutOfFuel` immediately without advancing the VM until the
@@ -314,14 +335,21 @@ const { Bash, InMemoryFs } = createFacade(loader, { browser: true });
    - `Fiber::finish` and `Fiber::cancel` **must not** clear `self.coverage` or `self.trace`: all buffered items
      remain readable via `take_coverage` and `take_trace` after `Step::Done` and after `cancel` until consumed
      or until the `Fiber` resource is disposed.
-3. **`GuestFiber::take_trace(max: u32)` in `kernel/src/glue/adapt.rs`:**
+3. **`GuestFiber::take_trace(max: u32)` in `kernel/src/glue/adapt.rs` (and `kernel/src/glue/rt.rs`):**
+   - In `kernel/src/glue/rt.rs`, widen `LOWERING` (and the local `blocks` array in `prepare_lowering`) from `3`
+     to `TRACE_BUF_CAP + 1` (`257` slots: `[const { None }; 257]`).
    - Clamp `limit = (max as usize).min(TRACE_BUF_CAP)`. Take up to `limit` front events from `Fiber`.
    - Convert each `TraceEvent` to `T::TraceEvent { category: copy_text(&e.category)?, name: copy_text(&e.name)?, duration_ms: e.duration_ms, details }` where each `TraceDetail` maps `TraceValue::Number(n)` -> `T::TraceValue::Number(n)` and `TraceValue::Text(b)` -> `T::TraceValue::Text(copy(&b)?)`.
-   - Account canonical-ABI lowering tables via `rt::prepare_lowering`: `(events.len(), 32, 8)` plus
-     `(total_details, 24, 8)` (each lowered `trace-event` is 32 bytes aligned 8; each lowered `trace-detail` is
-     24 bytes aligned 8). If allocation or `prepare_lowering` fails at the full `limit`, retry with `limit = 1`
-     inside `mem::reserve_scope` (mirroring `take_output` in `adapt.rs`), and call `f.consume_trace(out.len())`
-     only for the events actually lowered!
+   - **Per-event `rt::prepare_lowering` accounting:** In `kernel/src/bindings/kernel.rs`
+     (`_export_method_fiber_take_trace_cabi`), `wit-bindgen` allocates the outer `Vec<TraceEvent>` via one
+     `Cleanup::new` call of `(events.len(), 32, 8)` and then allocates **each** `TraceEvent.details` list via
+     its own exact-layout `Cleanup::new` lookup of `(ev.details.len(), 24, 8)` (`size == 0` bypasses `LOWERING`).
+     Therefore, build a stack slice `specs` containing `(events.len(), 32, 8)` (when `!events.is_empty()`)
+     **plus one `(ev.details.len(), 24, 8)` tuple per event with `!ev.details.is_empty()`**, and pass
+     `&specs[..spec_count]` to a single `rt::prepare_lowering` call (**never** coalesce into `(total_details, 24, 8)`!).
+     If allocation or `prepare_lowering` fails at the full `limit`, retry with `limit = 1` inside
+     `mem::reserve_scope` (mirroring `take_output` in `adapt.rs`), and call `f.consume_trace(out.len())` only
+     for the events actually lowered!
 4. **Driver drain order (`host/core/driver.js`):**
    - Cache `inst.coverageFeatures ??= inst.call(() => inst.engine.coverageFeatures())` on the `Instance` (or a
      `WeakMap<Instance, string[]>`).
@@ -344,13 +372,15 @@ const { Bash, InMemoryFs } = createFacade(loader, { browser: true });
 
 ### 5.3 `trace-clock`, S11 non-observability, and `find` trace schema (EVOL Annex D.6, S11)
 
-1. **`trace-clock` execution and S11 guarantee:**
-   - `HostReq::TraceClock` is answered synchronously in `driver.js` `serve(x, pc)`:
-     - Read `const ns = x.B.hooks?.traceClockNs ? BigInt(x.B.hooks.traceClockNs()) : BigInt(Math.round(now() * 1e6));`
-     - Return `{ outcome: { tag: "clock", val: { wallMs: 0n, monotonicNs: ns } } }` (no `yield`, no grant check).
-   - Note `B.hooks?.onHostCall?.(req)` in `driver.js`: keep calling `onHostCall` on capability requests, **or**
-     note that S2 recording-driver tests run with `trace: false` (default) where zero `trace-clock` requests are
-     emitted; when `trace: true` and `real-clock` is **not** granted, `trace-clock` is answered with `{ wallMs: 0n, monotonicNs }` while `HostReq::Clock` remains denied inside the kernel!
+1. **`trace-clock` execution, S2 hook isolation, and S11 guarantee:**
+   - In `host/core/driver.js` `serve(x, pc)`, dispatch `req.tag === "trace-clock"` **before**
+     `B.hooks?.onHostCall?.(req)`:
+     - Read `const ns = B.hooks?.traceClockNs ? BigInt(B.hooks.traceClockNs()) : BigInt(Math.round(now() * 1e6));`
+     - Return `{ outcome: { tag: "clock", val: { wallMs: 0n, monotonicNs: ns } } }` immediately (no `yield`, no
+       grant check, and **never** invoking `B.hooks?.onHostCall?.(req)`).
+   - Handling `trace-clock` prior to `onHostCall` ensures that enabling `trace: true` on an ungranted shell
+     never leaks internal observability plumbing to capability-recording hooks or fails invariant S2, while
+     `HostReq::Clock` remains denied inside the kernel when `real-clock` is not granted!
    - Inside the kernel, `monotonic_ns` from a `TraceClock` outcome is stored **only** in the command/test trace
      frame to compute `TraceEvent.duration_ms` and phase `*TimeMs` values. It is **never** written to
      `Shell::virt_ms`, `$SECONDS`, `$EPOCHSECONDS`, `$EPOCHREALTIME`, `printf %(...)T`, `time`, stdout, stderr,
@@ -476,12 +506,13 @@ All gates run in `make check` (`cargo test` + `node tools/run-tests.mjs`):
 5. **Browser `cmd:flag:*` filter gate (`test/l1d-browser.test.mjs`).**
    - Import `Bash as BrowserBash` from `../host/browser.js` (after `await BrowserBash.precompile(wasmBytes)`):
      run `echo -n -e hi` with `coverage` enabled and assert `["bash:cmd:SimpleCommand", "bash:expansion:word_glob", "bash:expansion:word_glob", "bash:expansion:word_glob", "bash:builtin:echo"]` (zero `cmd:flag:*` hits, all `bash:*` hits intact), while `Bash` from `../host/index.js` on the identical script includes `"cmd:flag:echo:-n"` and `"cmd:flag:echo:-e"`.
-6. **S11 `trace-clock` non-observability, `execSync`, and `exec-oneshot` rejection gate (`test/l1d-security.test.mjs`).**
-   - **S11:** Run the same multi-command script (`__clock; __trace span alpha; echo $PWD`) twice with `trace`
-     enabled and `real-clock` **not** granted, injecting two distinct `traceClockNs` sequences via `[INTERNAL]`
-     (`0n, 2_000_000n` -> `durationMs == 2` vs `100_000_000_000n, 100_055_500_000n` -> `durationMs == 55.5`):
-     assert `durationMs` equals `2` and `55.5` respectively while `stdout` (`"0\nalpha\n/home/user\n"`),
-     `stderr`, `exitCode`, and `env` are **byte-for-byte identical**, and zero `clock` host calls occur!
+6. **S2/S11 `trace-clock` non-observability, `execSync`, and `exec-oneshot` rejection gate (`test/l1d-security.test.mjs`).**
+   - **S2 + S11:** Run the same multi-command script (`__clock; __trace span alpha; echo $PWD`) twice with `trace`
+     enabled, `real-clock` **not** granted, and an `onHostCall` recording hook attached via `[INTERNAL]`,
+     injecting two distinct `traceClockNs` sequences (`0n, 2_000_000n` -> `durationMs == 2` vs
+     `100_000_000_000n, 100_055_500_000n` -> `durationMs == 55.5`): assert `durationMs` equals `2` and `55.5`
+     respectively while `stdout` (`"0\nalpha\n/home/user\n"`), `stderr`, `exitCode`, and `env` are
+     **byte-for-byte identical**, and `onHostCall` records **0** capability host calls!
    - **`execSync`:** After `await Bash.precompile()`, run `bash.execSync("echo -n sync", { ... })` on a `Bash`
      configured with `logger`, `trace`, and `coverage` — succeeds synchronously and delivers all three streams.
    - **`exec-oneshot`:** Call `engine.execOneshot` directly with `config.trace = true` (`coverage = false`) and
@@ -492,8 +523,9 @@ All gates run in `make check` (`cargo test` + `node tools/run-tests.mjs`):
 Record in `BRANCH.md` and the PR description:
 
 1. **Buffer caps and ABI lowering footprint:** confirm `COVERAGE_BUF_CAP` (`4_096`), `TRACE_BUF_CAP` (`256`),
-   `rt::prepare_lowering` sizes in `take_trace`, and raw + gzip deltas on `dist/js/kernel/kernel.core.wasm` and
-   packed JS host bundles (checking EVOL Annex H JS host caps).
+   `LOWERING` `257`-slot capacity in `glue/rt.rs` + per-event `rt::prepare_lowering` sizes in `take_trace`, and
+   raw + gzip deltas on `dist/js/kernel/kernel.core.wasm` and packed JS host bundles (checking EVOL Annex H JS
+   host caps).
 2. **Drain ordering proof:** summarize test evidence for all four drain trigger points (`out-of-fuel`,
    pre-`host-call`, `cancel`, and `done`) and nested `ctx.exec` logger + coverage interleaving.
 3. **Downstream `CmdCtx` readiness:** confirm `CmdCtx::{hit_coverage, trace_enabled, trace_clock_req, emit_trace, emit_find_trace, should_yield}` signatures for L4 (exit), L9a-2 (`find`), L13 (`sed`), L14a (`awk`), and
