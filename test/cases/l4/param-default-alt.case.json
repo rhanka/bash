@@ -1,0 +1,12 @@
+{
+  "id": "l4/param-default-alt",
+  "steps": [
+    {
+      "script": "u=''; echo \"${unset:-d1}|${unset-d2}|${u:-d3}|${u-d4}|${unset:+a1}|${u:+a2}|${u+a3}\""
+    }
+  ],
+  "tags": [
+    "param"
+  ],
+  "title": "Parameter default and alternative operators :-, -, :+, +"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-keys-and-prefix",
+  "steps": [
+    {
+      "script": "IFS=:; P_B=1; P_A=2; declare -a P_ARR=(9); a=([2]=u [7]=v); declare -A m=([z]=1 [a]=2); printf '<%s>' \"${!a[@]}\" \"${!a[*]}\" \"${!m[@]}\" ${!P_*} \"${!P_*}\" \"${!P_@}\"; echo"
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays"
+  ],
+  "title": "Array keys ${!arr[@/*]} and variable name prefix ${!prefix*/@}"
+}

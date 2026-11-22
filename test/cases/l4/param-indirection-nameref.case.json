@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-indirection-nameref",
+  "steps": [
+    {
+      "script": "t=hello; r=t; empty=''; declare -n nr=t; a=(x y); ra='a[@]'; printf '<%s>' \"${!r}\" \"${!unset_r:+alt}\" \"${!empty}\" \"${!nr}\" \"$nr\" \"${!ra}\"; echo; echo \"${!unset_r}\"; echo after:$?"
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays"
+  ],
+  "title": "Parameter indirection, nameref, indirect array, and recoverable unset indirection"
+}

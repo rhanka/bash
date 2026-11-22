@@ -1,0 +1,13 @@
+{
+  "id": "l4/assign-builtin-and-empty-cmd",
+  "steps": [
+    {
+      "script": "v='a b'; export E1=$v; e=export; $e E2=$v 2>/dev/null; echo \"[$E1]\"; x=''; $x echo shifted"
+    }
+  ],
+  "tags": [
+    "split",
+    "assign"
+  ],
+  "title": "Literal assignment builtin non-splitting versus dynamic command and empty word shift"
+}

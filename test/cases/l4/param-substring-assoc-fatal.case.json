@@ -1,0 +1,14 @@
+{
+  "id": "l4/param-substring-assoc-fatal",
+  "steps": [
+    {
+      "script": "declare -A A=([a]=1); echo \"${A[@]:0:1}\"; echo unreachable"
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays",
+    "errors"
+  ],
+  "title": "Slicing an associative array is a fatal bad substitution"
+}

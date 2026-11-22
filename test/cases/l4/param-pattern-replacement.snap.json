@@ -1,0 +1,33 @@
+{
+  "case": "l4/param-pattern-replacement",
+  "caseHash": "12e397dc0cec9d0a2b02635065c59fb917ad367394399eb722b5db14718ff027",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "s": "aba_aba"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "<Xba_aba><XbX_XbX><STARTa_aba><aba_aEND><PRE_aba_aba><aba_aba_SUF><ALL><cot><bot>\n"
+    }
+  ]
+}

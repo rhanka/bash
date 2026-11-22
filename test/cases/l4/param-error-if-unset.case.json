@@ -1,0 +1,16 @@
+{
+  "id": "l4/param-error-if-unset",
+  "steps": [
+    {
+      "script": "${u?}; echo unreachable"
+    },
+    {
+      "script": "u=''; ${u:?custom boom}; echo unreachable"
+    }
+  ],
+  "tags": [
+    "param",
+    "errors"
+  ],
+  "title": "Parameter error-if-unset ? and :? abort with exact messages"
+}

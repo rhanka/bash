@@ -1,0 +1,12 @@
+{
+  "id": "l4/ifs-splitting-matrix",
+  "steps": [
+    {
+      "script": "x='  a  b  '; y=':a::b:'; printf '<%s>' $x -$x- \"\" \"$unset\" $unset; IFS=:; printf '<%s>' $y; IFS=''; printf '<%s>' $y; echo"
+    }
+  ],
+  "tags": [
+    "split"
+  ],
+  "title": "IFS word splitting across whitespace, non-whitespace, empty IFS, and quote elision"
+}

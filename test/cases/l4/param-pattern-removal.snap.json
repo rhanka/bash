@@ -1,0 +1,34 @@
+{
+  "case": "l4/param-pattern-removal",
+  "caseHash": "a61016a990b59afada372b181fc7f3b4f35888cd47e3783bf95ee9a950dc8df7",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "extglob:globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "p": "/a/b/c.tar.gz",
+        "x": "aaabbb"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "<a/b/c.tar.gz><c.tar.gz></a/b/c.tar></a/b/c><foo><bar><bbb>\n"
+    }
+  ]
+}

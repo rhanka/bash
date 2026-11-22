@@ -1,0 +1,20 @@
+{
+  "id": "l4/nounset-rules",
+  "steps": [
+    {
+      "script": "set -u; set --; a=(); echo \"$#|$@|$*|${a[@]}|${#a[@]}|${u:-ok}\""
+    },
+    {
+      "script": "set -u; echo \"$missing\"; echo unreachable"
+    },
+    {
+      "script": "set -u; set --; echo \"$1\"; echo unreachable"
+    }
+  ],
+  "tags": [
+    "options",
+    "param",
+    "errors"
+  ],
+  "title": "Nounset exemptions versus fatal unbound scalar and positional parameters"
+}

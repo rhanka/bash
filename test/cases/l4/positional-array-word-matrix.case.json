@@ -1,0 +1,13 @@
+{
+  "id": "l4/positional-array-word-matrix",
+  "steps": [
+    {
+      "script": "set -- 'a b' '' 'c d'; IFS=:; printf '<%s>' \"$@\" \"$*\" \"p$@s\" $@ $*; echo"
+    }
+  ],
+  "tags": [
+    "split",
+    "param"
+  ],
+  "title": "Quoted and unquoted $@ and $* word splitting under custom IFS"
+}

@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-pattern-replacement",
+  "steps": [
+    {
+      "script": "s='aba_aba'; a=(cat bat); printf '<%s>' \"${s/a/X}\" \"${s//a/X}\" \"${s/#ab/START}\" \"${s/%ba/END}\" \"${s/#/PRE_}\" \"${s/%/_SUF}\" \"${s//*/ALL}\" \"${a[@]/a/o}\"; echo"
+    }
+  ],
+  "tags": [
+    "param",
+    "glob"
+  ],
+  "title": "Parameter pattern replacement /, //, /#, /% including empty anchors and arrays"
+}

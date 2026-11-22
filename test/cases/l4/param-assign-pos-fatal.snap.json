@@ -1,0 +1,31 @@
+{
+  "case": "l4/param-assign-pos-fatal",
+  "caseHash": "588ed4ec559440263031bc159debc7a38145f7dc321b4452d39975c957914a0e",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 1,
+      "stderr": "bash: $1: cannot assign in this way\n",
+      "stdout": ""
+    }
+  ]
+}
