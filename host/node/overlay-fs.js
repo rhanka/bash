@@ -79,13 +79,6 @@ export class OverlayFs {
     return resolvePath(this.#mount, suffix.replace(/^\//, ""));
   }
 
-  #suffixOf(raw) {
-    if (raw === this.#mount) return "/";
-    if (this.#mount === "/") return raw;
-    if (raw.startsWith(this.#mount + "/")) return raw.slice(this.#mount.length);
-    return null;
-  }
-
   #lookup(virtual, op, path, leaf, run, hops = 0, strict = false) {
     // `..` is resolved against the scanned prefix (never lexically pre-collapsed)
     // so an intermediate symlink is still checked; the raw `..`-preserving path
@@ -94,6 +87,7 @@ export class OverlayFs {
     // targets, mirroring the host adapter's `mv` escape gate.
     const raw = virtual.split("/").filter((part) => part !== "" && part !== ".");
     const resolved = [];
+    let edge = 0;
     let blockedScan = false;
     for (let i = 0; i < raw.length; i++) {
       const part = raw[i];
@@ -120,10 +114,14 @@ export class OverlayFs {
         } else if (!blockedScan && !final && node.kind !== "directory") throw errno("ENOTDIR", op, path);
       }
       resolved.push(part);
+      if (prefix === this.#mount) edge = i + 1;
     }
     const v = `/${resolved.join("/")}`;
     if (blockedScan) return run({ blocked: true, virtual: v });
-    const suffix = beneath(this.#mount, v) ? this.#suffixOf(virtual) : null;
+    // The host suffix restarts where the walk last enters the mount, with any
+    // `..` kept, so `HostPaths.use` still resolves each crossing symlink-aware
+    // instead of skipping it the way a lexically collapsed path would.
+    const suffix = beneath(this.#mount, v) ? `/${raw.slice(edge).join("/")}` : null;
     const memory = this.#entries.get(v);
     const own = memory && { memory, info: this.#memoryStat(memory), virtual: v };
     if ((own && own.memory.kind !== "directory") || suffix === null || this.#hidden(v)) {
