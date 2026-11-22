@@ -13,15 +13,23 @@ use crate::num::{
     fmt_f64_exp, fmt_f64_fixed, fmt_f64_js, fmt_f64_prec, parse_arith_literal,
     parse_f64_prefix, parse_f64_strict, parse_printf_int, ArithNumError, FloatFmtError,
 };
+use crate::glob::{
+    check_globstar_segments, replace_glob, split_globignore, strip_prefix, strip_suffix,
+    CompiledGlob, GlobError, GlobOptions, GlobReplaceMode,
+};
+use crate::regex::{
+    BreDialect, CompileLimits, CompiledRegex, EmptyAdvance, MatchError, RegexError, RegexFlags,
+    RegexMode, ReplaceStyle,
+};
 use crate::shell::{G_ENTROPY, G_HOST_FS, G_NETWORK, G_REAL_CLOCK, G_REAL_SLEEP};
 use crate::util::parse_u64;
 
 /// The names of the test-only commands, matched by index so that they exist as data in this build only.
-const CMDS: [&[u8]; 27] = [
+const CMDS: [&[u8]; 29] = [
     b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write",
     b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap",
     b"__fsalloc", b"__work", b"__walk", b"__fsbatch",
-    b"__num", b"__printf", b"__strftime", b"__hash", b"__base64", b"__cov", b"__trace",
+    b"__num", b"__printf", b"__strftime", b"__hash", b"__base64", b"__cov", b"__trace", b"__regex", b"__glob",
 ];
 const C_OUT: usize = 0;
 const C_ERR: usize = 1;
@@ -50,6 +58,8 @@ const C_HASH: usize = 23;
 const C_BASE64: usize = 24;
 const C_COV: usize = 25;
 const C_TRACE: usize = 26;
+const C_REGEX: usize = 27;
+const C_GLOB: usize = 28;
 
 const T_HOSTFS: u8 = 1;
 const T_LAZY: u8 = 2;
@@ -617,6 +627,8 @@ impl Fiber {
                     _ => self.t_bad(name),
                 }
             }
+            C_REGEX => self.exec_regex(name, args),
+            C_GLOB => self.exec_glob(name, args),
             _ => return None,
         };
         Some(flow)
@@ -809,6 +821,339 @@ impl Fiber {
                         self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
                     }
                     None => self.emit_exit(1, Chan::Stdout, b"none\n"),
+    fn exec_regex(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let (Some(&mode_arg), Some(&flags_arg), Some(&pattern)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return self.t_bad(name);
+        };
+        let replacement = args.get(3).copied();
+        let mode = match mode_arg {
+            b"bre-grep" => RegexMode::Basic(BreDialect::Grep),
+            b"bre-sed" => RegexMode::Basic(BreDialect::Sed),
+            b"bre-expr" => RegexMode::Basic(BreDialect::Expr),
+            b"ere" => RegexMode::Extended,
+            b"fixed" => RegexMode::Fixed,
+            b"perl" => RegexMode::Perl,
+            _ => return self.t_bad(name),
+        };
+        let mut flags = RegexFlags::default();
+        let mut only_matching = false;
+        let mut invert = false;
+        let mut count_only = false;
+        let mut line_numbers = false;
+        let mut global_replace = false;
+        let mut detail_err = false;
+        if flags_arg != b"-" {
+            for &ch in flags_arg {
+                match ch {
+                    b'i' => flags.ignore_case = true,
+                    b'm' => flags.multiline = true,
+                    b's' => flags.dot_all = true,
+                    b'w' => flags.whole_word = true,
+                    b'x' => flags.line_regexp = true,
+                    b'b' => flags.allow_backrefs = true,
+                    b'o' => only_matching = true,
+                    b'v' => invert = true,
+                    b'c' => count_only = true,
+                    b'n' => line_numbers = true,
+                    b'g' => global_replace = true,
+                    b'D' => detail_err = true,
+                    _ => return self.t_bad(name),
+                }
+            }
+        }
+        let mut compiled = match CompiledRegex::compile(
+            pattern,
+            mode,
+            flags,
+            CompileLimits::default(),
+            &self.live,
+        ) {
+            Ok(c) => c,
+            Err(RegexError::Mem(e)) => return Flow::Fail(Fail::Mem(e)),
+            Err(err) => {
+                self.last_exit = 2;
+                let r = if detail_err {
+                    self.say(Chan::Stderr, |s| write!(s, "__regex: {err:?}\n"))
+                } else {
+                    self.write_out(Chan::Stderr, b"grep: invalid regular expression: ")
+                        .and_then(|()| self.write_out(Chan::Stderr, pattern))
+                        .and_then(|()| self.write_out(Chan::Stderr, b"\n"))
+                };
+                return self.t_ok(r);
+            }
+        };
+
+        // Drain stdin into a contiguous buffer under `live`.
+        let stdin_chunks = core::mem::replace(&mut self.stdin, KChunks::new_in(&self.live));
+        let mut input = match KBytes::with_capacity_in(stdin_chunks.len() as usize, &self.live) {
+            Ok(v) => v,
+            Err(e) => return Flow::Fail(Fail::Mem(e)),
+        };
+        for chunk in stdin_chunks.chunks() {
+            if let Err(e) = input.try_extend_from_slice(chunk) {
+                return Flow::Fail(Fail::Mem(e));
+            }
+        }
+
+        let mut out = KBytes::new_in(&self.live);
+        let mut matched_lines = 0usize;
+        let mut line_no = 0usize;
+        let mut pos = 0usize;
+        let data = input.as_slice();
+        while pos < data.len() {
+            let nl = data[pos..].iter().position(|&b| b == b'\n');
+            let (line, next_pos) = match nl {
+                Some(rel) => (&data[pos..pos + rel], pos + rel + 1),
+                None => (&data[pos..], data.len()),
+            };
+            pos = next_pos;
+            line_no += 1;
+
+            if let Some(rep) = replacement {
+                let nth = if global_replace { None } else { Some(1) };
+                let res = compiled.replace_all(
+                    line,
+                    rep,
+                    ReplaceStyle::Sed,
+                    nth,
+                    EmptyAdvance::PosixSed,
+                    &self.live,
+                    &mut |u| self.charge_work(u).map_err(|_| ()),
+                );
+                let (replaced, _) = match res {
+                    Ok(v) => v,
+                    Err(MatchError::Mem(e)) => return Flow::Fail(Fail::Mem(e)),
+                    Err(MatchError::FuelExhausted | MatchError::BacktrackLimitExceeded) => {
+                        return Flow::Fail(Fail::Work);
+                    }
+                };
+                if let Err(e) = out
+                    .try_extend_from_slice(replaced.as_slice())
+                    .and_then(|()| out.try_push(b'\n'))
+                {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+            } else if only_matching && !invert && !count_only {
+                let spans = match compiled.find_all(
+                    line,
+                    EmptyAdvance::Standard,
+                    &self.live,
+                    &mut |u| self.charge_work(u).map_err(|_| ()),
+                ) {
+                    Ok(s) => s,
+                    Err(MatchError::Mem(e)) => return Flow::Fail(Fail::Mem(e)),
+                    Err(MatchError::FuelExhausted | MatchError::BacktrackLimitExceeded) => {
+                        return Flow::Fail(Fail::Work);
+                    }
+                };
+                for sp in spans.as_slice() {
+                    if sp.end > sp.start {
+                        matched_lines += 1;
+                        if line_numbers {
+                            if let Err(e) = push_usize_prefix(&mut out, line_no) {
+                                return Flow::Fail(Fail::Mem(e));
+                            }
+                        }
+                        if let Err(e) = out
+                            .try_extend_from_slice(&line[sp.start..sp.end])
+                            .and_then(|()| out.try_push(b'\n'))
+                        {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                    }
+                }
+            } else {
+                let hit = match compiled.is_match(line, &self.live, &mut |u| {
+                    self.charge_work(u).map_err(|_| ())
+                }) {
+                    Ok(h) => h,
+                    Err(MatchError::Mem(e)) => return Flow::Fail(Fail::Mem(e)),
+                    Err(MatchError::FuelExhausted | MatchError::BacktrackLimitExceeded) => {
+                        return Flow::Fail(Fail::Work);
+                    }
+                };
+                if hit ^ invert {
+                    matched_lines += 1;
+                    if !count_only {
+                        if line_numbers {
+                            if let Err(e) = push_usize_prefix(&mut out, line_no) {
+                                return Flow::Fail(Fail::Mem(e));
+                            }
+                        }
+                        if let Err(e) = out
+                            .try_extend_from_slice(line)
+                            .and_then(|()| out.try_push(b'\n'))
+                        {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                    }
+                }
+            }
+        }
+
+        if replacement.is_some() {
+            self.last_exit = 0;
+            let r = self.write_out(Chan::Stdout, out.as_slice());
+            self.t_ok(r)
+        } else if count_only {
+            self.last_exit = if matched_lines > 0 { 0 } else { 1 };
+            let r = self.say(Chan::Stdout, |s| write!(s, "{matched_lines}\n"));
+            self.t_ok(r)
+        } else {
+            self.last_exit = if matched_lines > 0 { 0 } else { 1 };
+            let r = self.write_out(Chan::Stdout, out.as_slice());
+            self.t_ok(r)
+        }
+    }
+
+    fn exec_glob(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let (Some(&op), Some(&flags_arg), Some(&pattern)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return self.t_bad(name);
+        };
+        let arg1 = args.get(3).copied().unwrap_or(b"");
+        let arg2 = args.get(4).copied().unwrap_or(b"");
+        let mut opts = GlobOptions::default();
+        if flags_arg != b"-" {
+            for &ch in flags_arg {
+                match ch {
+                    b'e' => opts.extglob = true,
+                    b'i' => opts.nocase = true,
+                    b'p' => opts.pathname = true,
+                    b'd' => opts.dotglob = true,
+                    _ => return self.t_bad(name),
+                }
+            }
+        }
+
+        let handle_err = |f: &mut Fiber, err: GlobError| -> Flow {
+            match err {
+                GlobError::TooManyGlobstars { max } => {
+                    f.finish_early(
+                        126,
+                        Status::LimitExceeded,
+                        Some("maxGlobOperations"),
+                        Some(format_args!(
+                            "bash: Glob pattern has too many ** segments (max {max})\n"
+                        )),
+                    );
+                    Flow::Yield
+                }
+                GlobError::ExtglobDepthExceeded { .. } => {
+                    f.last_exit = 2;
+                    let r = f.write_out(Chan::Stderr, b"__glob: ExtglobDepthExceeded\n");
+                    f.t_ok(r)
+                }
+                GlobError::InvalidCharacterRange => {
+                    f.last_exit = 2;
+                    let r = f.write_out(Chan::Stderr, b"__glob: InvalidCharacterRange\n");
+                    f.t_ok(r)
+                }
+                GlobError::FuelExhausted => Flow::Fail(Fail::Work),
+                GlobError::Mem(e) => Flow::Fail(Fail::Mem(e)),
+            }
+        };
+
+        match op {
+            b"globstar-check" => match check_globstar_segments(pattern) {
+                Ok(n) => {
+                    self.last_exit = 0;
+                    let r = self.say(Chan::Stdout, |s| write!(s, "{n}\n"));
+                    self.t_ok(r)
+                }
+                Err(e) => handle_err(self, e),
+            },
+            b"globignore" => match split_globignore(pattern, &self.live) {
+                Ok(items) => {
+                    let mut out = KBytes::new_in(&self.live);
+                    for item in items.as_slice() {
+                        if let Err(e) = out
+                            .try_extend_from_slice(item)
+                            .and_then(|()| out.try_push(b'\n'))
+                        {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                    }
+                    self.last_exit = 0;
+                    let r = self.write_out(Chan::Stdout, out.as_slice());
+                    self.t_ok(r)
+                }
+                Err(e) => Flow::Fail(Fail::Mem(e)),
+            },
+            b"match" => {
+                let compiled = match CompiledGlob::compile(pattern, opts, &self.live) {
+                    Ok(c) => c,
+                    Err(e) => return handle_err(self, e),
+                };
+                match compiled.is_match(arg1, &self.live, &mut |u| {
+                    self.charge_work(u).map_err(|_| ())
+                }) {
+                    Ok(m) => {
+                        self.last_exit = 0;
+                        let r = self.write_out(Chan::Stdout, if m { b"match\n" } else { b"no\n" });
+                        self.t_ok(r)
+                    }
+                    Err(e) => handle_err(self, e),
+                }
+            }
+            b"strip-prefix" | b"strip-prefix-greedy" => {
+                let greedy = op == b"strip-prefix-greedy";
+                match strip_prefix(arg1, pattern, greedy, opts, &self.live, &mut |u| {
+                    self.charge_work(u).map_err(|_| ())
+                }) {
+                    Ok(end) => {
+                        let slice = match end {
+                            Some(e) => &arg1[e..],
+                            None => arg1,
+                        };
+                        self.last_exit = 0;
+                        let r = self
+                            .write_out(Chan::Stdout, slice)
+                            .and_then(|()| self.write_out(Chan::Stdout, b"\n"));
+                        self.t_ok(r)
+                    }
+                    Err(e) => handle_err(self, e),
+                }
+            }
+            b"strip-suffix" | b"strip-suffix-greedy" => {
+                let greedy = op == b"strip-suffix-greedy";
+                match strip_suffix(arg1, pattern, greedy, opts, &self.live, &mut |u| {
+                    self.charge_work(u).map_err(|_| ())
+                }) {
+                    Ok(start) => {
+                        let slice = match start {
+                            Some(s) => &arg1[..s],
+                            None => arg1,
+                        };
+                        self.last_exit = 0;
+                        let r = self
+                            .write_out(Chan::Stdout, slice)
+                            .and_then(|()| self.write_out(Chan::Stdout, b"\n"));
+                        self.t_ok(r)
+                    }
+                    Err(e) => handle_err(self, e),
+                }
+            }
+            b"replace" | b"replace-all" => {
+                let mode = if op == b"replace-all" {
+                    GlobReplaceMode::All
+                } else {
+                    GlobReplaceMode::First
+                };
+                match replace_glob(arg1, pattern, arg2, mode, opts, &self.live, &mut |u| {
+                    self.charge_work(u).map_err(|_| ())
+                }) {
+                    Ok(res) => {
+                        self.last_exit = 0;
+                        let r = self
+                            .write_out(Chan::Stdout, res.as_slice())
+                            .and_then(|()| self.write_out(Chan::Stdout, b"\n"));
+                        self.t_ok(r)
+                    }
+                    Err(e) => handle_err(self, e),
                 }
             }
             _ => self.t_bad(name),
@@ -1332,4 +1677,20 @@ impl Fiber {
         self.fs_test_path = KBytes::new_in(&self.scratch);
         Ok(None)
     }
+}
+
+fn push_usize_prefix(out: &mut KBytes, n: usize) -> MemResult<()> {
+    let mut buf = [0u8; 24];
+    let mut i = buf.len();
+    let mut v = n;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.try_extend_from_slice(&buf[i..])?;
+    out.try_push(b':')
 }
