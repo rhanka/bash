@@ -1,0 +1,27 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/sha1sum-vectors",
+  "steps": [
+    {
+      "script": "sha1sum",
+      "stdin": ""
+    },
+    {
+      "script": "sha1sum",
+      "stdin": "abc"
+    },
+    {
+      "script": "sha1sum",
+      "stdin": "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    },
+    {
+      "script": "sha1sum",
+      "stdin": {
+        "base64": "AP8BAg=="
+      }
+    }
+  ],
+  "title": "sha1sum standard and binary vectors"
+}

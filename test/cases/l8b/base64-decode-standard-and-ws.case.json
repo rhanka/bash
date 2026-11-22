@@ -1,0 +1,19 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/base64-decode-standard-and-ws",
+  "steps": [
+    {
+      "script": "base64 -d",
+      "stdin": "aGVs\r\n  bG8=\n"
+    },
+    {
+      "script": "base64 --decode",
+      "stdin": {
+        "base64": "dGVzdA=="
+      }
+    }
+  ],
+  "title": "base64 decoding with whitespace and --decode"
+}

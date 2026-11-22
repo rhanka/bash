@@ -1,0 +1,27 @@
+{
+  "env": {
+    "TZ": "UTC"
+  },
+  "id": "l8b/sha256sum-vectors",
+  "steps": [
+    {
+      "script": "sha256sum",
+      "stdin": ""
+    },
+    {
+      "script": "sha256sum",
+      "stdin": "abc"
+    },
+    {
+      "script": "sha256sum",
+      "stdin": "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    },
+    {
+      "script": "sha256sum",
+      "stdin": {
+        "base64": "AP8BAg=="
+      }
+    }
+  ],
+  "title": "sha256sum standard and binary vectors"
+}
