@@ -1,0 +1,12 @@
+{
+  "id": "l4/param-transforms",
+  "steps": [
+    {
+      "script": "x=\"a'b\"; c=$'hi\\x07\\x1b\\n'; y='line1\\nline2'; p='u:\\u|h:\\h|s:\\s|\\$'; export ex=42; declare -il iv=7; a=(one \"a'b\"); printf '<%s>' \"${x@Q}\" \"${c@Q}\" \"${y@E}\" \"${p@P}\" \"${x@A}\" \"${ex@a}\" \"${iv@a}\" \"${x@u}\" \"${x@U}\" \"${x@L}\" \"${a[@]@Q}\" \"${a[*]@Q}\" \"${a[@]@a}\" \"${a[@]@E}\" \"${a[@]@A}\"; echo"
+    }
+  ],
+  "tags": [
+    "param"
+  ],
+  "title": "Parameter @Q, @E, @P, @A, @a, @u, @U, @L transformations on scalars and arrays"
+}

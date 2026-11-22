@@ -1,0 +1,12 @@
+{
+  "id": "l4/cmd-subst-isolation-and-pid",
+  "steps": [
+    {
+      "script": "v=outer; out=$(v=inner; cd /tmp; echo \"$v:$(pwd)\"); echo \"$out|$v|$(pwd)\"; [ \"$$\" != \"$(echo $BASHPID)\" ] && echo diff_pid"
+    }
+  ],
+  "tags": [
+    "subst"
+  ],
+  "title": "Command substitution env/cwd isolation and BASHPID increment"
+}

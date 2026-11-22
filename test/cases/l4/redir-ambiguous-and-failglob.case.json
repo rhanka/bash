@@ -1,0 +1,18 @@
+{
+  "files": {
+    "/r/f1": "",
+    "/r/f2": ""
+  },
+  "id": "l4/redir-ambiguous-and-failglob",
+  "steps": [
+    {
+      "script": "x='a b'; echo hi > $x; echo s1:$?; echo hi > /r/f*; echo s2:$?; shopt -s failglob; echo hi > /r/nope*; echo s3:$?"
+    }
+  ],
+  "tags": [
+    "glob",
+    "redir",
+    "errors"
+  ],
+  "title": "Ambiguous redirect and failglob on file redirection targets"
+}

@@ -1,0 +1,18 @@
+{
+  "cwd": "/w",
+  "files": {
+    "/w/C.TXT": "",
+    "/w/a.txt": "",
+    "/w/b.md": ""
+  },
+  "id": "l4/glob-extglob-nocaseglob",
+  "steps": [
+    {
+      "script": "shopt -s extglob; echo !(*.md) @(a|b).*; shopt -s nocaseglob; echo *.txt"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globbing with extglob and nocaseglob"
+}

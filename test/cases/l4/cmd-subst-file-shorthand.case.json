@@ -1,0 +1,16 @@
+{
+  "files": {
+    "/data.txt": "hello\nworld\n\n"
+  },
+  "id": "l4/cmd-subst-file-shorthand",
+  "steps": [
+    {
+      "script": "echo \"[$(</data.txt)]\"; x=$(</no_such_file); echo \"missing:$?:[$x]\""
+    }
+  ],
+  "tags": [
+    "subst",
+    "fs"
+  ],
+  "title": "Command substitution $(<file) file-read shorthand and silent missing-file exit 1"
+}

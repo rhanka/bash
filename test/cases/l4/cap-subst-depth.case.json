@@ -1,0 +1,18 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxSubstitutionDepth": 4
+    }
+  },
+  "id": "l4/cap-subst-depth",
+  "steps": [
+    {
+      "script": "f() { echo $(f); }; f"
+    }
+  ],
+  "tags": [
+    "limits",
+    "subst"
+  ],
+  "title": "Command substitution nesting depth limit enforcement"
+}

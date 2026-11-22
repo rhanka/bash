@@ -1,0 +1,12 @@
+{
+  "id": "l4/param-substring-scalar-pos",
+  "steps": [
+    {
+      "script": "s='abcdef'; set -- p1 p2 p3 p4; printf '<%s>' \"${s:1:3}\" \"${s: -3:2}\" \"${s:1:-1}\" \"${s:4:-4}\" \"${@:2:2}\" \"${@:0:2}\" \"${*: -2:1}\"; echo; echo after:$?"
+    }
+  ],
+  "tags": [
+    "param"
+  ],
+  "title": "Scalar and positional substring slicing including negative offsets and lengths"
+}

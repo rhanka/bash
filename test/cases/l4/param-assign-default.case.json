@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-assign-default",
+  "steps": [
+    {
+      "script": "u=''; echo \"${a:=one}|$a|${u:=two}|$u|${u=three}|$u\"; arr=(); echo \"${arr[2]:=z}|${arr[2]}\""
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays"
+  ],
+  "title": "Parameter assign-default := and = on scalars and array elements"
+}

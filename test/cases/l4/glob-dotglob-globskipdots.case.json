@@ -1,0 +1,17 @@
+{
+  "cwd": "/w",
+  "files": {
+    "/w/.a": "",
+    "/w/b": ""
+  },
+  "id": "l4/glob-dotglob-globskipdots",
+  "steps": [
+    {
+      "script": "echo *; echo .*; shopt -s dotglob; echo *; shopt -u globskipdots; echo .*"
+    }
+  ],
+  "tags": [
+    "glob"
+  ],
+  "title": "Pathname globbing with dotglob and globskipdots"
+}

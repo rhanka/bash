@@ -1,0 +1,21 @@
+{
+  "engine": {
+    "executionLimits": {
+      "maxArrayElements": 3,
+      "maxStringLength": 8
+    }
+  },
+  "id": "l4/cap-string-and-array",
+  "steps": [
+    {
+      "script": "x=12345; echo \"$x$x\""
+    },
+    {
+      "script": "a=(1 2 3 4)"
+    }
+  ],
+  "tags": [
+    "limits"
+  ],
+  "title": "String length and array element limit enforcement"
+}

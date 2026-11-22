@@ -1,0 +1,33 @@
+{
+  "case": "l4/div-arith-divmod-assign-zero",
+  "caseHash": "3237152caf68f44a9fc0af1db6b97b8a9e19c63b4e99a7a099e650a620c06825",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "x": "0"
+      },
+      "exitCode": 0,
+      "stderr": "bash: x: command not found\n",
+      "stdout": "c1:127:12\nc2:1:0\n0\ne1:0:0\n0\ne2:0:0\n"
+    }
+  ]
+}

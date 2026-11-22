@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-length-unicode-arrays",
+  "steps": [
+    {
+      "script": "s='hé🎉'; a=([1]=x [9]=y); declare -A m=([a]=1 [b]=2); set -- p q r; echo \"${#s}|${#a[@]}|${#m[*]}|${#@}|${#unset}\""
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays"
+  ],
+  "title": "Parameter length on Unicode scalars, sparse/assoc arrays, and positionals"
+}

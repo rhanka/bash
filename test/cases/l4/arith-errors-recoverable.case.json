@@ -1,0 +1,13 @@
+{
+  "id": "l4/arith-errors-recoverable",
+  "steps": [
+    {
+      "script": "$((08)); echo e1:$?; $((1/0)); echo e2:$?; $((2**-1)); echo e3:$?; $((1 + )); echo e4:$?; $((1[2])); echo e5:$?; a=b; b=a; $((a)); echo e6:$?"
+    }
+  ],
+  "tags": [
+    "arith",
+    "errors"
+  ],
+  "title": "Recoverable arithmetic errors preserve script execution"
+}

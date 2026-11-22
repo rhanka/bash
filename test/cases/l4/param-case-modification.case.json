@@ -1,0 +1,16 @@
+{
+  "id": "l4/param-case-modification",
+  "steps": [
+    {
+      "script": "s='hElLo WoRlD'; echo \"${s^}|${s^^}|${s,}|${s,,}|${s^^[hlw]}|${s,,[EO]}\""
+    },
+    {
+      "script": "echo \"${#s-bad}\""
+    }
+  ],
+  "tags": [
+    "param",
+    "errors"
+  ],
+  "title": "Parameter case modification ^, ^^, ,, ,, and parse-time bad substitution"
+}

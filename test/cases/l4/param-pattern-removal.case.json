@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-pattern-removal",
+  "steps": [
+    {
+      "script": "p='/a/b/c.tar.gz'; a=(foo.txt bar.txt); shopt -s extglob; x='aaabbb'; printf '<%s>' \"${p#*/}\" \"${p##*/}\" \"${p%.*}\" \"${p%%.*}\" \"${a[@]%.txt}\" \"${x##+(a)}\"; echo"
+    }
+  ],
+  "tags": [
+    "param",
+    "glob"
+  ],
+  "title": "Parameter pattern removal #, ##, %, %% on scalars, arrays, and extglob"
+}

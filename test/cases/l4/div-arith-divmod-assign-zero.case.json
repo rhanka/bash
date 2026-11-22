@@ -1,0 +1,14 @@
+{
+  "divergence": "V13",
+  "id": "l4/div-arith-divmod-assign-zero",
+  "steps": [
+    {
+      "script": "x=12; (( x /= 0 )); echo c1:$?:$x; (( x %= 0 )); echo c2:$?:$x; echo $(( x /= 0 )); echo e1:$?:$x; echo $(( x %= 0 )); echo e2:$?:$x"
+    }
+  ],
+  "tags": [
+    "arith",
+    "divergence"
+  ],
+  "title": "Compound arithmetic /= 0 and %= 0 divergence (V13)"
+}

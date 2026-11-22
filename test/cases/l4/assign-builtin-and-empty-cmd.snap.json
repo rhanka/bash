@@ -1,0 +1,38 @@
+{
+  "case": "l4/assign-builtin-and-empty-cmd",
+  "caseHash": "6f4b20e4e54d7bda989db505e62065912b0541efdf5d74efacb59de8d898bafe",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "E1": "a b",
+        "E2": "a",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "b": "",
+        "e": "export",
+        "v": "a b",
+        "x": ""
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "[a b]\nshifted\n"
+    }
+  ]
+}

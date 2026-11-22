@@ -1,0 +1,12 @@
+{
+  "id": "l4/arith-bases-and-clamp",
+  "steps": [
+    {
+      "script": "echo $((0xff)) $((077)) $((2#101101)) $((36#zz)) $((64#@_)) $((9007199254740991)) $((9007199254740992)) $((99999999999999999999)) $((0x20000000000000))"
+    }
+  ],
+  "tags": [
+    "arith"
+  ],
+  "title": "Arithmetic bases 2..64 and MAX_SAFE_INT clamping"
+}

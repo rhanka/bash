@@ -1,0 +1,12 @@
+{
+  "id": "l4/cmd-subst-basics",
+  "steps": [
+    {
+      "script": "x=$(printf 'a\\nb\\n\\n'); echo \"[$x]\"; y=$(false); echo yf:$?; $(exit 37); echo e37:$?; echo $(echo sub; exit 9) after:$?"
+    }
+  ],
+  "tags": [
+    "subst"
+  ],
+  "title": "Command substitution newline stripping, exit containment, and status propagation"
+}

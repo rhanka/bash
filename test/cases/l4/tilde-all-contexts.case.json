@@ -1,0 +1,19 @@
+{
+  "capture": {
+    "coverage": true
+  },
+  "env": {
+    "HOME": "/home/u"
+  },
+  "id": "l4/tilde-all-contexts",
+  "steps": [
+    {
+      "script": "p=~/a:~/b:~root/c; echo ~ ~/dir ~root ~root/x ~unknown \"$p\" \"~\" {~,~/sub}"
+    }
+  ],
+  "tags": [
+    "tilde",
+    "coverage"
+  ],
+  "title": "Tilde expansion across command args, colon assignment RHS, post-brace, and quotes"
+}

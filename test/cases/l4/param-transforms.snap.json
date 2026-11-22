@@ -1,0 +1,38 @@
+{
+  "case": "l4/param-transforms",
+  "caseHash": "d7632762ab69b96cc853f1ada48daa36b19e8c7b95763353435f1c4e9d8a9c50",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments",
+        "c": "hi\u0007\u001b\n",
+        "ex": "42",
+        "iv": "7",
+        "p": "u:\\u|h:\\h|s:\\s|\\$",
+        "x": "a'b",
+        "y": "line1\\nline2"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "<$'a\\'b'><$'hi\\007\\033\\n'><line1\nline2><u:user|h:localhost|s:bash|$><x=$'a\\'b'><x><i><A'b><A'B><a'b><'one'><$'a\\'b'><'one' $'a\\'b'><a><a><one><a'b><one><a'b>\n"
+    }
+  ]
+}

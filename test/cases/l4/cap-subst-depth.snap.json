@@ -1,0 +1,31 @@
+{
+  "case": "l4/cap-subst-depth",
+  "caseHash": "cd877b33ec7538b5ce1aada78a53bc1a4c7db06bdbbb0c33f8d8e6bfccfc2ff8",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 126,
+      "stderr": "bash: Command substitution nesting limit exceeded (4)\n",
+      "stdout": ""
+    }
+  ]
+}

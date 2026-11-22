@@ -1,0 +1,12 @@
+{
+  "id": "l4/brace-sequences-padding",
+  "steps": [
+    {
+      "script": "echo {1..5} {5..1..2} {01..04} {-01..-03} {-01..03} {a..e} {e..a..2}; echo {z..A}; echo after:$?"
+    }
+  ],
+  "tags": [
+    "brace"
+  ],
+  "title": "Numeric and char brace sequences, zero-padding, and invalid cross-case error"
+}

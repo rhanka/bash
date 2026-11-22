@@ -1,0 +1,12 @@
+{
+  "id": "l4/array-assign-indexed-assoc",
+  "steps": [
+    {
+      "script": "a=(one two [5]=five); a+=(six); declare -A m=([k1]=v1 ['k 2']={a,b}); m[k3]=v3; echo \"${a[0]}|${a[1]}|${a[5]}|${a[6]}|${m[k1]}|${m['k 2']}|${m[k3]}\""
+    }
+  ],
+  "tags": [
+    "arrays"
+  ],
+  "title": "Indexed, sparse, append, and associative array assignments with brace suppression"
+}

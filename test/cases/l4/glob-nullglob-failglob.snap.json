@@ -1,0 +1,32 @@
+{
+  "case": "l4/glob-nullglob-failglob",
+  "caseHash": "3084738f7dd3000ae5868e06a064ea350d8ea6c39d3250b1284b135577d48637",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {},
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "failglob:globskipdots:nullglob",
+        "HOME": "/",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/w",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/w",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "bash: no match: *.nomatch\n",
+      "stdout": "*.nomatch\npre post\nafter:1\n"
+    }
+  ]
+}

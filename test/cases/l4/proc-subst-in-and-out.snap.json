@@ -1,0 +1,40 @@
+{
+  "case": "l4/proc-subst-in-and-out",
+  "caseHash": "78d148abfedb3fc184be6bd3f996698aa607d50907a5e011528e7212ae3d3efe",
+  "engine": {
+    "name": "just-bash",
+    "version": "3.6.0"
+  },
+  "fs": {
+    "/captured.txt": {
+      "content": {
+        "base64": "cGlwZV9tZQo="
+      },
+      "kind": "file",
+      "mode": 420
+    }
+  },
+  "status": "recorded",
+  "steps": [
+    {
+      "env": {
+        "?": "0",
+        "BASHOPTS": "globskipdots",
+        "HOME": "/home/user",
+        "HOSTNAME": "localhost",
+        "HOSTTYPE": "x86_64",
+        "IFS": " \t\n",
+        "MACHTYPE": "x86_64-pc-linux-gnu",
+        "OLDPWD": "/home/user",
+        "OPTIND": "1",
+        "OSTYPE": "linux-gnu",
+        "PATH": "/usr/bin:/bin",
+        "PWD": "/home/user",
+        "SHELLOPTS": "braceexpand:hashall:interactive-comments"
+      },
+      "exitCode": 0,
+      "stderr": "",
+      "stdout": "from_proc\ntwo\nstatus:0\npipe_me\n"
+    }
+  ]
+}

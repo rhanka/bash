@@ -1,0 +1,12 @@
+{
+  "id": "l4/brace-lists-and-nested",
+  "steps": [
+    {
+      "script": "i=0; echo pre{a,{b,c}}post {x,y}$((++i))"
+    }
+  ],
+  "tags": [
+    "brace"
+  ],
+  "title": "Nested comma brace lists and per-branch side-effect evaluation"
+}

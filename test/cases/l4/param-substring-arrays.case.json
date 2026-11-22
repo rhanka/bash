@@ -1,0 +1,14 @@
+{
+  "id": "l4/param-substring-arrays",
+  "steps": [
+    {
+      "script": "a=([0]=zero [2]=two [5]=five [8]=eight); printf '<%s>' \"${a[@]:2:2}\" \"${a[*]: -4:2}\"; echo; echo \"${a[@]:1:-1}\"; echo after:$?"
+    }
+  ],
+  "tags": [
+    "param",
+    "arrays",
+    "errors"
+  ],
+  "title": "Sparse indexed array slicing and recoverable negative length error"
+}

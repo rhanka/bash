@@ -1,0 +1,12 @@
+{
+  "id": "l4/arith-precedence-shortcircuit",
+  "steps": [
+    {
+      "script": "x=1; echo $(( 0 && (x=9) )) $x $(( 1 || (x=8) )) $x $(( 1 ? 10 : (x=7) )) $x $(( (a=2, b=a+3, b*4) )) $a $b"
+    }
+  ],
+  "tags": [
+    "arith"
+  ],
+  "title": "Arithmetic short-circuit &&, ||, ?:, comma, and assignment"
+}

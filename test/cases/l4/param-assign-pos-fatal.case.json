@@ -1,0 +1,13 @@
+{
+  "id": "l4/param-assign-pos-fatal",
+  "steps": [
+    {
+      "script": "set --; echo \"${1:=x}\"; echo unreachable"
+    }
+  ],
+  "tags": [
+    "param",
+    "errors"
+  ],
+  "title": "Assign-default on positional parameter is fatal"
+}
