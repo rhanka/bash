@@ -12,6 +12,7 @@
       "witDir": "wit",
       "world": "kernel",
       "wasmOpt": false,
+      "snapshot": true,
       "bindings": {
         "dir": "kernel/src/bindings",
         "witDir": "wit",
@@ -31,6 +32,7 @@
       "witDir": "wit",
       "world": "kernel",
       "wasmOpt": false,
+      "snapshot": true,
       "features": [
         "test-commands"
       ],

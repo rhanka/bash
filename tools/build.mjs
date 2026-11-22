@@ -97,14 +97,25 @@ async function buildEngineBinding(name, component, jsDir) {
       mkdirSync(join(target, ".."), { recursive: true });
       copyFileSync(file, target);
     }
-    const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
-    writeFileSync(join(jsDir, name + ".js"),
-      "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
-      "export function instantiate(getCoreModule, _imports, instantiateCore, options) {\n" +
-      "  return instantiateEngine(getCoreModule, instantiateCore, options, " + JSON.stringify(coreName) + ");\n}\n");
+    stageEngineBinding(jsDir, name, name === "kernel");
     console.log(`ABI oracle ${name} jco-transpile ${JCO_VERSION} Option D: 14 guarded probes, core SHA-256 ${hash}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Stages the first-party engine adapter (and, for the kernel, the command list). */
+function stageEngineBinding(jsDir, name, withCommands) {
+  mkdirSync(jsDir, { recursive: true });
+  const coreName = name + ".core.wasm";
+  const binding = relative(jsDir, join(repoRoot, "host/core/abi/binding.js")).split(sep).join("/");
+  writeFileSync(join(jsDir, name + ".js"),
+    "import { instantiateEngine } from " + JSON.stringify(binding) + ";\n\n" +
+    "export function instantiate(getCoreModule, _imports, instantiateCore, options) {\n" +
+    "  return instantiateEngine(getCoreModule, instantiateCore, options, " + JSON.stringify(coreName) + ");\n}\n");
+  if (withCommands) {
+    const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
+    writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");
   }
 }
 
@@ -139,18 +150,24 @@ async function main() {
   // A full build starts from an empty output (the cargo target cache is kept), so no stale file survives.
   if (only === "all") for (const f of readdirSync(out)) if (f !== "target") rmSync(join(out, f), { recursive: true, force: true });
   mkdirSync(join(out, "test"), { recursive: true });
+  const cores = {};
+  for (const c of names) {
+    cores[c] = buildCore(c, all[c]);
+  }
+  // The snapshot image is captured from the exact linked layout and registered as an internal
+  // export before final component embed/new (spec L2c section 4.7).
+  if (names.includes("kernel")) stageEngineBinding(join(out, "js", "kernel"), "kernel", true);
+  const { snapshotCore } = await import("./snapshot.mjs");
+  for (const c of names) {
+    if (all[c].snapshot) await snapshotCore(cores[c], c);
+  }
   for (const c of names) {
     const def = all[c];
-    const core = buildCore(c, def);
-    const comp = buildComponent(c, def, core);
+    const comp = buildComponent(c, def, cores[c]);
     const jsDir = join(outDirOf(def), "js", c);
     if (c === "kernel" || c === "kernel-test") await buildEngineBinding(c, comp, jsDir);
     else await transpileComponent(comp, jsDir);
-    if (c === "kernel") {
-      const commands = scanCommandFiles(join(repoRoot, "kernel", "src", "cmd"));
-      writeFileSync(join(jsDir, "commands.js"), "export const COMMAND_NAMES = Object.freeze(" + JSON.stringify(commands) + ");\n");
-    }
-    report(core);
+    report(cores[c]);
     report(comp);
     for (const p of walk(jsDir)) report(p);
   }

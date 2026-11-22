@@ -34,6 +34,7 @@ export class Instance {
     this.waiters = new Set();
     const { engine, _util } = instantiate(coreModules(mainModule, impl?.shims), {}, undefined, {
       onTrap: () => this.poison(),
+      inspect: hooks?.inspect,
     });
     this.engine = engine;
     this.util = _util;

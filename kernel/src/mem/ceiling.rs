@@ -70,6 +70,13 @@ pub fn usage() -> Usage {
     Usage { used: USED.load(Relaxed), ceiling: CEILING.load(Relaxed), high_water: HIGH_WATER.load(Relaxed) }
 }
 
+/// True before any allocation, configuration or ceiling change: the state a restore preflight requires.
+/// Read-only: it reports the private configuration and usage state without changing it.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn is_pristine() -> bool {
+    !CONFIGURED.load(Relaxed) && USED.load(Relaxed) == 0 && HIGH_WATER.load(Relaxed) == 0
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn current_ceiling() -> u64 {
     CEILING.load(Relaxed)
