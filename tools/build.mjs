@@ -258,6 +258,14 @@ async function stageJcoPackage(bundlePackage) {
     externals: new Map([[adapterTo, "./jco/jco-adapter.js"]]),
     urls: { browser: CORE_URLS.browser, load: CORE_URLS.load },
   });
+  // The Option D loader never restores: drop the default-binding claim so the predicate
+  // cannot select the snapshot path even if the adapter ever exposed a restore entry.
+  for (const file of [join(jcoJs, "browser.js"), join(jcoJs, "node", "load.js")]) {
+    const { readFileSync: read, writeFileSync: write } = await import("node:fs");
+    const code = read(file, "utf8");
+    if (!code.includes("defaultBinding:!0")) throw new Error("jco loader lacks the defaultBinding claim to drop in " + file);
+    write(file, code.replaceAll("defaultBinding:!0", "defaultBinding:!1"));
+  }
   for (const p of walk(dist)) report(p);
   for (const p of walk(join(pkg, "types"))) report(p);
   console.log(`bundle jco: ${result.modules} modules in ${relative(repoRoot, result.shared)}`);

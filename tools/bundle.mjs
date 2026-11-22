@@ -75,6 +75,9 @@ function splitCode(src) {
         else if (src[j] === "]") cls = false;
         j++;
       }
+      // Include the closing `/` (when present) and its flags so the literal stays
+      // one non-code segment; otherwise the closer is re-read as division.
+      if (j < n && src[j] === "/") j++;
       while (j < n && /[a-z]/i.test(src[j])) j++;
       push(false, src.slice(i, j));
       i = j;
@@ -206,11 +209,216 @@ function declaredExports(rec) {
   return names;
 }
 
-// Bundles the shared modules into separately scoped wrappers: every module keeps its own
-// top-level bindings, so colliding declarations across modules cannot clash and no identifier
-// is ever rewritten (shorthands, strings and regexes stay untouched). Imports become wrapper
-// parameters fed from earlier wrappers; `externals` stay module-level imports closed over by
-// the wrappers. Returns { parts, index } where index maps a module file to its wrapper const.
+// Flattens the shared modules into one top-level scope (alpha-renaming collisions) before
+// minification, so oxc-minify sees cross-module names for mangling and DCE instead of 15
+// IIFE closures. Imports from earlier shared modules become direct references; `externals`
+// stay module-level imports. Returns { code, mapping, header } where mapping maps
+// `moduleId::exportName` to its flattened top-level name.
+function prevNonSpace(text, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    const c = text[i];
+    if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") return { char: c, index: i };
+  }
+  return { char: "", index: -1 };
+}
+
+function nextNonSpace(text, idx) {
+  for (let i = idx; i < text.length; i++) {
+    const c = text[i];
+    if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") return { char: c, index: i };
+  }
+  return { char: "", index: -1 };
+}
+
+function isSpreadPreceding(text, idx) {
+  let i = idx - 1;
+  while (i >= 0 && (text[i] === " " || text[i] === "\t" || text[i] === "\n" || text[i] === "\r")) i--;
+  return i >= 2 && text[i] === "." && text[i - 1] === "." && text[i - 2] === ".";
+}
+
+// Top-level declaration names at brace depth 0 (code only, strings/comments excluded).
+function topDeclNames(src) {
+  const names = [];
+  let depth = 0;
+  const segs = splitCode(src);
+  const decl = /(?:^|[;}\n])\s*(?:export\s+)?(?:async\s+)?(?:function\*?|class|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+  for (const seg of segs) {
+    if (!seg.code) continue;
+    const text = seg.text;
+    let m;
+    decl.lastIndex = 0;
+    // Collect matches with their depth by scanning braces up to each match.
+    let pos = 0;
+    let d = depth;
+    const events = [];
+    while ((m = decl.exec(text)) !== null) events.push({ index: m.index, name: m[1], length: m[0].length });
+    // Walk text tracking depth to assign each event its depth at match start.
+    let e = 0;
+    let cur = 0;
+    for (let i = 0; i < text.length && e < events.length; i++) {
+      while (e < events.length && events[e].index === i) {
+        if (d === 0) names.push(events[e].name);
+        e++;
+      }
+      const c = text[i];
+      if (c === "{") d++;
+      else if (c === "}") d = Math.max(0, d - 1);
+      void cur;
+    }
+    // Update depth for the next segment by counting braces in this segment.
+    for (const c of text) {
+      if (c === "{") depth++;
+      else if (c === "}") depth = Math.max(0, depth - 1);
+    }
+    void pos;
+  }
+  return names;
+}
+
+// Replaces identifier `oldName` with `newName` in code only, preserving member properties
+// (`obj.old`), property definitions (`{ old: ... }`) and shorthand (`{ old }` -> `{ old: new }`).
+function replaceIdent(body, oldName, newName) {
+  if (oldName === newName) return body;
+  const word = new RegExp("\\b" + oldName.replace(/[$]/g, "\\$&") + "\\b", "g");
+  return splitCode(body).map((seg) => {
+    if (!seg.code) return seg.text;
+    let text = seg.text;
+    // Expand shorthands first: `{ old }`, `{ old,`, `, old,`, `, old }` -> `{ old: new ... }`.
+    text = text.replace(new RegExp("([{,]\\s*)\\b" + oldName.replace(/[$]/g, "\\$&") + "\\b(\\s*[,}])", "g"),
+      (_, a, b) => a + oldName + ": " + newName + b);
+    // General replacement with property/member guards.
+    let out = "";
+    let last = 0;
+    word.lastIndex = 0;
+    let m;
+    while ((m = word.exec(text)) !== null) {
+      const start = m.index;
+      const end = start + oldName.length;
+      const prev = prevNonSpace(text, start);
+      if (prev.char === "." && !isSpreadPreceding(text, start)) continue;
+      const prev2 = prevNonSpace(text, start);
+      const nxt = nextNonSpace(text, end);
+      if ((prev2.char === "{" || prev2.char === ",") && nxt.char === ":") continue;
+      out += text.slice(last, start) + newName;
+      last = end;
+    }
+    out += text.slice(last);
+    return out;
+  }).join("");
+}
+
+function hasDecl(body, word) {
+  // True when `word` is declared (not merely a property or method name) in the body:
+  // a shadowing binding that would capture a direct import replacement. Over-approximating
+  // with `(`/`,` triggers is safe (an extra alias), under-approximating is not.
+  const esc = word.replace(/[$]/g, "\\$&");
+  const re = new RegExp("(?:const|let|var|function|class|catch|\\(|,)\\s*" + esc + "\\b", "g");
+  for (const seg of splitCode(body)) {
+    if (!seg.code) continue;
+    if (re.test(seg.text)) return true;
+  }
+  return false;
+}
+
+function hasWord(body, word) {
+  return hasDecl(body, word);
+}
+
+function flattenShared(modules, sharedIds, root, externals = new Map()) {
+  const order = [...sharedIds];
+  const set = new Set(sharedIds);
+  const used = new Set();
+  const mapping = new Map();
+  const bodies = [];
+  const keptHeader = [];
+  const seenHeaders = new Set();
+  for (const id of order) {
+    const rec = modules.get(id);
+    const allLocals = rec.imports.flatMap((imp) => imp.names.map((x) => x.local));
+    for (const imp of rec.imports) {
+      if (imp.namespace) throw new Error(rec.file + ": namespace imports are entry-only");
+      if (externals.has(imp.target)) {
+        const stmt = "import { " + imp.names.map(({ imported, local }) =>
+          imported === local ? local : imported + " as " + local).join(", ") +
+          " } from " + JSON.stringify(externals.get(imp.target)) + ";";
+        if (!seenHeaders.has(stmt)) {
+          seenHeaders.add(stmt);
+          keptHeader.push(stmt);
+        }
+      }
+      if (!imp.namespace && !externals.has(imp.target) && !set.has(imp.target)) {
+        throw new Error(rec.file + ": import escapes the shared set " + imp.target);
+      }
+    }
+    for (const imp of rec.imports) {
+      if (imp.namespace || externals.has(imp.target)) continue;
+      const provider = modules.get(imp.target);
+      for (const { imported } of imp.names) {
+        if (!declaredExports(provider).includes(imported)) {
+          throw new Error(rec.file + ": no export " + imported);
+        }
+      }
+    }
+    // Top-level renames first so provider names stay stable.
+    const topNames = topDeclNames(rec.src);
+    const rename = new Map();
+    for (const name of topNames) {
+      if (allLocals.includes(name)) {
+        throw new Error(rec.file + ": import shadows a declaration: " + name);
+      }
+      if (used.has(name)) {
+        let n = 1;
+        let candidate = name + "$" + n;
+        while (used.has(candidate)) {
+          n++;
+          candidate = name + "$" + n;
+        }
+        rename.set(name, candidate);
+        used.add(candidate);
+      } else {
+        used.add(name);
+      }
+    }
+    let body = stripExportKeyword(stripImportLines(rec.src)).trim();
+    for (const [oldName, newName] of rename) body = replaceIdent(body, oldName, newName);
+    // Imports become direct references. When the provider name already occurs as a shadowing
+    // nested binding, rename that nested binding first so the replacement cannot be captured.
+    for (const imp of rec.imports) {
+      if (imp.namespace || externals.has(imp.target)) continue;
+      for (const { imported, local } of imp.names) {
+        const flat = mapping.get(imp.target + "::" + imported);
+        if (!flat) throw new Error(rec.file + ": provider not yet flattened for " + imported);
+        if (local === flat) continue;
+        if (hasWord(body, flat)) {
+          let n = 1;
+          let candidate = flat + "$" + n;
+          while (used.has(candidate)) {
+            n++;
+            candidate = flat + "$" + n;
+          }
+          body = replaceIdent(body, flat, candidate);
+          used.add(candidate);
+        }
+        body = replaceIdent(body, local, flat);
+      }
+    }
+    for (const { local } of rec.imports.flatMap((imp) => imp.names)) {
+      if (externals.has(rec.imports.find((imp) => imp.names.some((x) => x.local === local))?.target)) {
+        used.add(local);
+      }
+    }
+    if (/\bimport\.meta\b/.test(stripStrings(body))) {
+      throw new Error(rec.file + ": import.meta cannot be bundled");
+    }
+    for (const name of declaredExports(rec)) {
+      if (allLocals.includes(name)) throw new Error(rec.file + ": import shadows an export: " + name);
+      mapping.set(id + "::" + name, rename.get(name) ?? name);
+    }
+    bodies.push("// " + relative(root, id) + "\n" + body);
+  }
+  return { code: bodies.join("\n\n"), mapping, header: keptHeader };
+}
+
 function bundleShared(modules, sharedIds, root, externals = new Map()) {
   const order = [...sharedIds];
   const index = new Map(order.map((id, i) => [id, i]));
@@ -259,9 +467,13 @@ function stripStrings(src) {
 
 // Rewrites one entry file: shared imports point at the shared chunk, namespace imports expand,
 // core URLs point at the shipped layout. Returns { code, needed } where needed maps each shared
-// public name to its wrapper reference (for the final export statement).
-function rewriteEntry(entryFile, outEntry, sharedFile, modules, sharedIds, index, root, urls) {
-  const ref = (target, name) => "__mod" + index.get(target) + "." + name;
+// public name to its flattened reference (for the final export statement).
+function rewriteEntry(entryFile, outEntry, sharedFile, modules, sharedIds, mapping, root, urls) {
+  const ref = (target, name) => {
+    const flat = mapping.get(target + "::" + name);
+    if (!flat) throw new Error(entryFile + ": no flattened export " + name);
+    return flat;
+  };
   const rec = modules.get(entryFile);
   const needed = new Map(); // public name -> local name in the entry
   const lines = [];
@@ -359,23 +571,24 @@ export async function bundlePackage({
     if (!sharedIds.has(id)) throw new Error("entry-private module outside the node loader: " + relative(root, id));
   }
   const ordered = topoOrder(modules, browserEntry).filter((id) => sharedIds.has(id));
-  const { parts, index, header } = bundleShared(modules, ordered, root, externals);
+  const { code, mapping, header } = flattenShared(modules, ordered, root, externals);
   const rewritten = new Map();
   const needed = new Map();
   for (const [entry, out, entryUrls] of [
     [indexEntry, outIndex, urls.index ?? []], [browserEntry, outBrowser, urls.browser ?? []],
     [loadEntry, outLoad, urls.load ?? []],
   ]) {
-    const r = rewriteEntry(entry, out, outShared, modules, sharedIds, index, root, entryUrls);
+    const r = rewriteEntry(entry, out, outShared, modules, sharedIds, mapping, root, entryUrls);
     rewritten.set(entry, r);
     for (const [name, ref] of r.needed) {
       if (needed.has(name) && needed.get(name) !== ref) throw new Error("shared export conflict: " + name);
       needed.set(name, ref);
     }
   }
-  const exported = [...needed].map(([name, ref]) => "export const " + name + " = " + ref + ";");
+  const exported = "export { " + [...needed].map(([name, ref]) =>
+    ref === name ? name : ref + " as " + name).join(", ") + " };";
   const sharedCode = header.join("\n") + (header.length ? "\n" : "") +
-    parts.join("\n\n") + "\n\n" + exported.join("\n") + "\n";
+    code + "\n\n" + exported + "\n";
   mkdirSync(dirname(outShared), { recursive: true });
   writeFileSync(outShared, await minifyFile(relative(root, outShared), sharedCode));
   for (const [entry, out] of [[indexEntry, outIndex], [browserEntry, outBrowser], [loadEntry, outLoad]]) {
