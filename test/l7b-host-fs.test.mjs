@@ -646,3 +646,18 @@ test("finding 10: recursive cp follows contained links when allowed", () => fixt
   const strict = new ReadWriteFs({ root });
   await assert.rejects(strict.cp("/a", "/a3", { recursive: true }), { code: "EIO" });
 }));
+
+test("overlay '..' resolves the host suffix from the mount boundary of the walk", () => fixture(async (root) => {
+  // The mount point itself is the host root: `/home/user/project/X` is `<root>/X`.
+  fs.writeFileSync(join(root, "sentinel.txt"), "S");
+  const overlay = new OverlayFs({ root, mountPoint: "/home/user/project" });
+  // A `..` beside the mount: the uncollapsed text is not under the mount, so
+  // the old suffix was null (spurious ENOENT).
+  assert.equal(await overlay.readFile("/home/user/other/../project/sentinel.txt"), "S");
+  assert.equal(await overlay.realpath("/home/user/other/../project/sentinel.txt"), "/home/user/project/sentinel.txt");
+  // A `..` at the mount re-enters it: the suffix restarts at the boundary, so
+  // the old `/..`-prefixed suffix (which clamped at the root and missed the
+  // file) is never handed to the host.
+  assert.equal(await overlay.readFile("/home/user/project/../project/sentinel.txt"), "S");
+  assert.equal(await overlay.realpath("/home/user/project/../project/sentinel.txt"), "/home/user/project/sentinel.txt");
+}));
