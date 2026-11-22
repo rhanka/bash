@@ -186,8 +186,8 @@ fn parse_word_impl(
         0
     };
     let mut lit_start = i;
-    let mut can_have_rbrace = true;
-    let mut can_have_rparen = true;
+    let mut brace_scan = BraceScan::new(ctx.budget);
+    let mut paren_scan = ParenScan::new(ctx.budget);
     let mut can_have_rbracket = true;
 
     while i < raw.len() {
@@ -245,9 +245,9 @@ fn parse_word_impl(
                 i = next_i;
                 lit_start = i;
             }
-            b'{' if allow_brace && can_have_rbrace => {
+            b'{' if allow_brace => {
                 if let Some((part, next_i)) =
-                    try_parse_brace(raw, i, err_pos, ctx, &mut can_have_rbrace)?
+                    try_parse_brace(raw, i, err_pos, ctx, &mut brace_scan)?
                 {
                     flush_lit(raw, lit_start, i, &mut parts, ctx)?;
                     parts.try_push(part)?;
@@ -261,7 +261,7 @@ fn parse_word_impl(
                 if let Some((part, next_i)) = parse_word_glob(
                     raw,
                     i,
-                    &mut can_have_rparen,
+                    &mut paren_scan,
                     &mut can_have_rbracket,
                     ctx,
                 )? {
@@ -363,24 +363,79 @@ fn parse_word_proc_subst(
     Ok((WordPart::ProcessSubst { body, output }, next_i))
 }
 
+struct BraceScan {
+    analyzed: bool,
+    valid_opens: KVec<u32>,
+    cursor: usize,
+}
+
+impl BraceScan {
+    fn new(budget: &crate::mem::Budget) -> Self {
+        Self {
+            analyzed: false,
+            valid_opens: KVec::new_in(budget),
+            cursor: 0,
+        }
+    }
+
+    fn is_valid_open(&mut self, open_idx: usize) -> bool {
+        while self.cursor < self.valid_opens.len()
+            && (self.valid_opens[self.cursor] as usize) < open_idx
+        {
+            self.cursor += 1;
+        }
+        self.valid_opens.get(self.cursor) == Some(&(open_idx as u32))
+    }
+}
+
+struct ParenScan {
+    analyzed: bool,
+    unmatched_opens: KVec<u32>,
+    cursor: usize,
+}
+
+impl ParenScan {
+    fn new(budget: &crate::mem::Budget) -> Self {
+        Self {
+            analyzed: false,
+            unmatched_opens: KVec::new_in(budget),
+            cursor: 0,
+        }
+    }
+
+    fn is_unmatched(&mut self, open: usize) -> bool {
+        while self.cursor < self.unmatched_opens.len()
+            && (self.unmatched_opens[self.cursor] as usize) < open
+        {
+            self.cursor += 1;
+        }
+        self.unmatched_opens.get(self.cursor) == Some(&(open as u32))
+    }
+}
+
 #[inline(never)]
 fn parse_word_glob(
     raw: &[u8],
     i: usize,
-    can_have_rparen: &mut bool,
+    paren_scan: &mut ParenScan,
     can_have_rbracket: &mut bool,
     ctx: &mut ParseCtx<'_, '_>,
 ) -> Result<Option<(WordPart, usize)>, Error> {
     let b = raw[i];
     if matches!(b, b'@' | b'*' | b'+' | b'?' | b'!') && raw.get(i + 1) == Some(&b'(') {
-        let matched = if *can_have_rparen {
-            let found = find_matching_paren(raw, i + 1);
-            if found.is_none() && !raw[i + 2..].contains(&b')') {
-                *can_have_rparen = false;
+        let open = i + 1;
+        let matched = if paren_scan.analyzed {
+            if paren_scan.is_unmatched(open) {
+                None
+            } else {
+                find_matching_paren(raw, open)
+            }
+        } else {
+            let found = find_matching_paren(raw, open);
+            if found.is_none() {
+                analyze_unmatched_parens(raw, open, paren_scan)?;
             }
             found
-        } else {
-            None
         };
         if let Some(end) = matched {
             let pattern = ctx.ast.push_bytes(&raw[i..=end])?;
@@ -404,6 +459,30 @@ fn parse_word_glob(
         *can_have_rbracket = false;
     }
     Ok(None)
+}
+
+fn analyze_unmatched_parens(
+    raw: &[u8],
+    from: usize,
+    scan: &mut ParenScan,
+) -> Result<(), Error> {
+    scan.analyzed = true;
+    let mut j = from;
+    while j < raw.len() {
+        match raw[j] {
+            b'\\' if j + 1 < raw.len() => j += 2,
+            b'(' => {
+                scan.unmatched_opens.try_push(j as u32)?;
+                j += 1;
+            }
+            b')' => {
+                scan.unmatched_opens.pop();
+                j += 1;
+            }
+            _ => j += 1,
+        }
+    }
+    Ok(())
 }
 
 fn flush_lit(
@@ -1156,14 +1235,16 @@ fn try_parse_brace(
     open_idx: usize,
     err_pos: Pos,
     ctx: &mut ParseCtx<'_, '_>,
-    can_have_rbrace: &mut bool,
+    scan: &mut BraceScan,
 ) -> Result<Option<(WordPart, usize)>, Error> {
+    if scan.analyzed && !scan.is_valid_open(open_idx) {
+        return Ok(None);
+    }
     // Find matching `}` respecting quotes, escapes, `${...}`, and nested `{...}`.
     let mut i = open_idx + 1;
     let mut depth = 1u32;
     let mut in_sq = false;
     let mut in_dq = false;
-    let mut saw_rbrace = false;
     let mut commas = KVec::new_in(ctx.budget);
 
     while i < raw.len() && depth > 0 {
@@ -1201,6 +1282,9 @@ fn try_parse_brace(
             }
             b'$' if raw.get(i + 1) == Some(&b'{') => {
                 let Some((_, end)) = scan_braced_inner(raw, i + 1) else {
+                    if !scan.analyzed {
+                        analyze_valid_braces(raw, open_idx + 1, ctx, scan)?;
+                    }
                     return Ok(None);
                 };
                 i = end;
@@ -1210,7 +1294,6 @@ fn try_parse_brace(
                 i += 1;
             }
             b'}' => {
-                saw_rbrace = true;
                 depth -= 1;
                 if depth == 0 {
                     break;
@@ -1225,8 +1308,8 @@ fn try_parse_brace(
         }
     }
     if depth != 0 {
-        if !saw_rbrace {
-            *can_have_rbrace = false;
+        if !scan.analyzed {
+            analyze_valid_braces(raw, open_idx + 1, ctx, scan)?;
         }
         return Ok(None);
     }
@@ -1248,7 +1331,151 @@ fn try_parse_brace(
         )));
     }
 
+    if !scan.analyzed {
+        analyze_valid_braces(raw, open_idx + 1, ctx, scan)?;
+    }
     Ok(None)
+}
+
+/// Single O(N) stack pass recording every `{` index in `raw[start_from..]` that forms a valid
+/// brace expansion (comma list or range), invoked at most once per word after a failed `{` scan.
+fn analyze_valid_braces(
+    raw: &[u8],
+    start_from: usize,
+    ctx: &mut ParseCtx<'_, '_>,
+    scan: &mut BraceScan,
+) -> Result<(), Error> {
+    const FLAG_COMMA: u32 = 1 << 31;
+    const FLAG_RANGE_OK: u32 = 1 << 30;
+    const IDX_MASK: u32 = !(FLAG_COMMA | FLAG_RANGE_OK);
+
+    scan.analyzed = true;
+    let mut stack: KVec<u32> = KVec::new_in(ctx.budget);
+    let mut i = start_from;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    while i < raw.len() {
+        let b = raw[i];
+        if in_sq {
+            if b == b'\'' {
+                in_sq = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dq {
+            if b == b'\\' && i + 1 < raw.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_dq = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\\' if i + 1 < raw.len() => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                i += 2;
+            }
+            b'$' if raw.get(i + 1) == Some(&b'\'') => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                i = skip_ansic(raw, i);
+            }
+            b'\'' => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                in_sq = true;
+                i += 1;
+            }
+            b'"' => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                in_dq = true;
+                i += 1;
+            }
+            b'$' if raw.get(i + 1) == Some(&b'{') => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                let Some((_, end)) = scan_braced_inner(raw, i + 1) else {
+                    break;
+                };
+                i = end;
+            }
+            b'{' => {
+                if let Some(top) = stack.last_mut() {
+                    *top &= !FLAG_RANGE_OK;
+                }
+                stack.try_push((i as u32) | FLAG_RANGE_OK)?;
+                i += 1;
+            }
+            b',' => {
+                if let Some(top) = stack.last_mut() {
+                    *top = (*top | FLAG_COMMA) & !FLAG_RANGE_OK;
+                }
+                i += 1;
+            }
+            b'}' => {
+                if let Some(entry) = stack.pop() {
+                    let open = (entry & IDX_MASK) as usize;
+                    let has_comma = (entry & FLAG_COMMA) != 0;
+                    let can_be_range = (entry & FLAG_RANGE_OK) != 0;
+                    if has_comma || (can_be_range && is_valid_brace_range(&raw[open + 1..i])) {
+                        scan.valid_opens.try_push(open as u32)?;
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                if !matches!(
+                    b,
+                    b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'+' | b'-'
+                ) {
+                    if let Some(top) = stack.last_mut() {
+                        *top &= !FLAG_RANGE_OK;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    scan.valid_opens.as_mut_slice().sort_unstable();
+    Ok(())
+}
+
+fn is_valid_brace_range(inner: &[u8]) -> bool {
+    let Some(first_dd) = find_double_dot(inner, 0) else {
+        return false;
+    };
+    let part1 = &inner[..first_dd];
+    let rest = &inner[first_dd + 2..];
+    let (part2, part3) = match find_double_dot(rest, 0) {
+        Some(second_dd) => (&rest[..second_dd], Some(&rest[second_dd + 2..])),
+        None => (rest, None),
+    };
+    if part1.is_empty() || part2.is_empty() {
+        return false;
+    }
+    if let Some(s) = part3 {
+        if parse_signed_i64(s).is_none() {
+            return false;
+        }
+    }
+    if parse_signed_i64(part1).is_some() && parse_signed_i64(part2).is_some() {
+        return true;
+    }
+    part1.len() == 1
+        && part2.len() == 1
+        && part1[0].is_ascii_alphabetic()
+        && part2[0].is_ascii_alphabetic()
 }
 
 #[inline(never)]

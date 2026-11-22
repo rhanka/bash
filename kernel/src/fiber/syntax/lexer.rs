@@ -235,6 +235,11 @@ pub fn lex<'a>(
         expect_cmd: true,
         after_fn_name: false,
         depth: 0,
+        rparen_stats: None,
+        rparens_seen: 0,
+        dparen_fail_until: 0,
+        rbracket_stats: None,
+        rbrackets_seen: 0,
     };
     lx.run()?;
     let total_tokens = lx.count + 1; // include synthetic EOF token per spec §6.1.2
@@ -279,6 +284,11 @@ struct Lexer<'a, 'w> {
     expect_cmd: bool,
     after_fn_name: bool,
     depth: u32,
+    rparen_stats: Option<(usize, Option<usize>)>,
+    rparens_seen: usize,
+    dparen_fail_until: usize,
+    rbracket_stats: Option<(usize, Option<usize>)>,
+    rbrackets_seen: usize,
 }
 
 impl<'a, 'w> Lexer<'a, 'w> {
@@ -325,6 +335,11 @@ impl<'a, 'w> Lexer<'a, 'w> {
             return Some(b);
         }
         if b < 0x80 {
+            if b == b')' {
+                self.rparens_seen += 1;
+            } else if b == b']' {
+                self.rbrackets_seen += 1;
+            }
             self.at += 1;
             self.col += 1;
             return Some(b);
@@ -551,7 +566,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 let is_dparen = if self.last_kind == Some(TokenKind::For) {
                     true
                 } else if !self.dparen_active && self.cond_depth == 0 && self.can_start_dparen() {
-                    self.is_arithmetic_dparen(self.at)
+                    self.is_arithmetic_dparen(self.at)?
                 } else {
                     false
                 };
@@ -690,38 +705,161 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 || matches!(self.last_kind, None | Some(TokenKind::RParen)))
     }
 
+    fn rparen_stats(&mut self) -> (usize, Option<usize>) {
+        if let Some(stats) = self.rparen_stats {
+            return stats;
+        }
+        let mut total = 0usize;
+        let mut last_dparen = None;
+        let bytes = self.src;
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b')' {
+                total += 1;
+                if bytes.get(idx + 1) == Some(&b')') {
+                    last_dparen = Some(idx);
+                }
+            }
+        }
+        let stats = (total, last_dparen);
+        self.rparen_stats = Some(stats);
+        stats
+    }
+
+    fn rbracket_stats(&mut self) -> (usize, Option<usize>) {
+        if let Some(stats) = self.rbracket_stats {
+            return stats;
+        }
+        let mut total = 0usize;
+        let mut last_assign = None;
+        let bytes = self.src;
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b']' {
+                total += 1;
+                if matches!(
+                    bytes.get(idx + 1..),
+                    Some([b'=', ..]) | Some([b'+', b'=', ..])
+                ) {
+                    last_assign = Some(idx);
+                }
+            }
+        }
+        let stats = (total, last_assign);
+        self.rbracket_stats = Some(stats);
+        stats
+    }
+
+    /// Advances `dparen_fail_until` past the first `skip_parens` opening `(` in `start..prefix_end`.
+    fn mark_dparen_prefix_fail(&mut self, start: usize, prefix_end: usize, skip_parens: usize) {
+        if skip_parens == 0 {
+            return;
+        }
+        let mut seen = 0usize;
+        for idx in start..prefix_end {
+            if self.src[idx] == b'(' {
+                seen += 1;
+                if seen == skip_parens {
+                    self.dparen_fail_until = self.dparen_fail_until.max(idx + 1);
+                    return;
+                }
+            }
+        }
+        self.dparen_fail_until = self.dparen_fail_until.max(prefix_end);
+    }
+
     /// Lookahead from `start` pointing at `((` to decide `DPAREN_START` vs two `LPAREN`s.
-    fn is_arithmetic_dparen(&self, start: usize) -> bool {
+    /// Bounded via lazy `)` / `))` stats, `DEPTH_CAP` bailout, prefix memoization, and work charging.
+    fn is_arithmetic_dparen(&mut self, start: usize) -> Result<bool, Error> {
+        if start < self.dparen_fail_until {
+            return Ok(false);
+        }
+        let (total_rparens, last_dparen) = self.rparen_stats();
+        let Some(last_close) = last_dparen else {
+            return Ok(false);
+        };
+        if start + 2 > last_close {
+            return Ok(false);
+        }
+        let mut rem_rparens = total_rparens.saturating_sub(self.rparens_seen);
+        if rem_rparens < 2 {
+            return Ok(false);
+        }
+
+        // Consume any leading prefix of `(` and whitespace once; every `((` inside this prefix
+        // sees the exact same suffix with depth shifted by its offset.
         let mut i = start + 2;
         let mut depth: i32 = 2;
+        while i < self.src.len() {
+            match self.src[i] {
+                b'(' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b' ' | b'\t' | b'\r' | b'\n' => {
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        let prefix_end = i;
+        let max_valid_depth = (DEPTH_CAP as i32) + 2;
+        let depth_limit = (max_valid_depth as usize).min(rem_rparens);
+        if (depth as usize) > depth_limit {
+            let skip = (depth as usize).saturating_sub(depth_limit);
+            self.mark_dparen_prefix_fail(start, prefix_end, skip);
+            return Ok(false);
+        }
+
+        let mut min_depth_after_prefix = depth;
         let mut in_sq = false;
         let mut in_dq = false;
         let mut prev_was_word = false;
         let mut had_space_after_word = false;
-        let mut has_command_like = false;
+        let mut next_charge_at = i + 64;
 
         while i < self.src.len() {
+            if i >= next_charge_at {
+                let chunks = (i - next_charge_at) / 32 + 1;
+                for _ in 0..chunks {
+                    self.charge()?;
+                }
+                next_charge_at += chunks * 32;
+            }
+            if i > last_close || (depth as usize) > rem_rparens {
+                let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                self.mark_dparen_prefix_fail(start, prefix_end, skip);
+                return Ok(false);
+            }
             let b = self.src[i];
             if in_sq {
                 if b == b'\'' {
                     in_sq = false;
+                } else if b == b')' {
+                    rem_rparens = rem_rparens.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             if in_dq {
                 if b == b'\\' && i + 1 < self.src.len() {
+                    if self.src[i + 1] == b')' {
+                        rem_rparens = rem_rparens.saturating_sub(1);
+                    }
                     i += 2;
                     continue;
                 }
                 if b == b'"' {
                     in_dq = false;
+                } else if b == b')' {
+                    rem_rparens = rem_rparens.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             match b {
                 b'\\' if i + 1 < self.src.len() => {
+                    if self.src[i + 1] == b')' {
+                        rem_rparens = rem_rparens.saturating_sub(1);
+                    }
                     i += 2;
                     continue;
                 }
@@ -737,8 +875,14 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     i += 1;
                     while i < self.src.len() && self.src[i] != b'`' {
                         if self.src[i] == b'\\' && i + 1 < self.src.len() {
+                            if self.src[i + 1] == b')' {
+                                rem_rparens = rem_rparens.saturating_sub(1);
+                            }
                             i += 2;
                         } else {
+                            if self.src[i] == b')' {
+                                rem_rparens = rem_rparens.saturating_sub(1);
+                            }
                             i += 1;
                         }
                     }
@@ -753,9 +897,21 @@ impl<'a, 'w> Lexer<'a, 'w> {
                     let mut p = 1u32;
                     while i < self.src.len() && p > 0 {
                         match self.src[i] {
-                            b'\\' if i + 1 < self.src.len() => i += 2,
-                            b'(' => { p += 1; i += 1; }
-                            b')' => { p -= 1; i += 1; }
+                            b'\\' if i + 1 < self.src.len() => {
+                                if self.src[i + 1] == b')' {
+                                    rem_rparens = rem_rparens.saturating_sub(1);
+                                }
+                                i += 2;
+                            }
+                            b'(' => {
+                                p += 1;
+                                i += 1;
+                            }
+                            b')' => {
+                                p -= 1;
+                                rem_rparens = rem_rparens.saturating_sub(1);
+                                i += 1;
+                            }
                             _ => i += 1,
                         }
                     }
@@ -764,20 +920,25 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 }
                 b'(' => {
                     depth += 1;
+                    if depth > max_valid_depth || (depth as usize) > rem_rparens {
+                        let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                        self.mark_dparen_prefix_fail(start, prefix_end, skip);
+                        return Ok(false);
+                    }
                     prev_was_word = false;
                     had_space_after_word = false;
                     i += 1;
                 }
                 b')' => {
                     if depth == 2 {
-                        // Adjacent `))` closes arithmetic command unless the body looks like a command (`echo deep`).
-                        if self.src.get(i + 1) == Some(&b')') {
-                            return !has_command_like;
-                        }
-                        // Depth dropped from 2 -> 1 at a single `)` -> nested subshells!
-                        return false;
+                        // Adjacent `))` closes arithmetic command (command-like already returned early).
+                        return Ok(self.src.get(i + 1) == Some(&b')'));
                     }
                     depth -= 1;
+                    if depth < min_depth_after_prefix {
+                        min_depth_after_prefix = depth;
+                    }
+                    rem_rparens = rem_rparens.saturating_sub(1);
                     prev_was_word = false;
                     had_space_after_word = false;
                     i += 1;
@@ -790,11 +951,16 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 }
                 b';' => {
                     // Semicolon inside `((...))` (not after `for`) indicates command list in subshell.
-                    return false;
+                    let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                    self.mark_dparen_prefix_fail(start, prefix_end, skip);
+                    return Ok(false);
                 }
                 _ if ident_byte(b) => {
                     if prev_was_word && had_space_after_word {
-                        has_command_like = true;
+                        // Body looks like a command (`echo deep`): can never be arithmetic.
+                        let skip = (min_depth_after_prefix - 2).max(0) as usize;
+                        self.mark_dparen_prefix_fail(start, prefix_end, skip);
+                        return Ok(false);
                     }
                     while i < self.src.len() && ident_byte(self.src[i]) {
                         i += 1;
@@ -810,7 +976,9 @@ impl<'a, 'w> Lexer<'a, 'w> {
             }
         }
         // Unclosed `((` -> treat as nested subshells `( (` so parser reports Expected RPAREN.
-        false
+        let skip = (min_depth_after_prefix - 2).max(0) as usize;
+        self.mark_dparen_prefix_fail(start, prefix_end, skip);
+        Ok(false)
     }
 
     fn advance_n(&mut self, n: usize) {
@@ -826,7 +994,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
             let mut end = self.at;
             while let Some(&b) = self.src.get(end) {
                 if is_delimiter(b)
-                    || matches!(b, b'\\' | b'\'' | b'"' | b'$' | b'`' | b'[' | b'=' | b'{' | b'}')
+                    || matches!(b, b'\\' | b'\'' | b'"' | b'$' | b'`' | b'[' | b']' | b'=' | b'{' | b'}')
                     || b >= 0x80
                 {
                     break;
@@ -938,7 +1106,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 }
                 b'[' if !in_dparen && !quoted && identifier(&buf) => {
                     // Check if `[...]` is followed by `=` or `+=` (array subscript assignment).
-                    if self.peek_subscript_assign(self.at) {
+                    if self.peek_subscript_assign(self.at)? {
                         self.scan_balanced_brackets(&mut buf)?;
                     } else {
                         self.copy_one(&mut buf)?;
@@ -1204,36 +1372,56 @@ impl<'a, 'w> Lexer<'a, 'w> {
     }
 
     /// Disambiguate `$(( ... ))` from `$( ( ... ) )` starting at the first `(`.
-    fn is_arith_subst(&self, start: usize) -> bool {
+    fn is_arith_subst(&mut self, start: usize) -> bool {
         if self.depth >= DEPTH_CAP {
             return false;
+        }
+        let (total_rparens, _) = self.rparen_stats();
+        let mut rem_rparens = total_rparens.saturating_sub(self.rparens_seen);
+        if rem_rparens == 0 {
+            return true;
         }
         let mut i = start + 2;
         let mut depth: i32 = 2;
         let mut in_sq = false;
         let mut in_dq = false;
         while i < self.src.len() {
+            if (depth as usize).saturating_sub(1) > rem_rparens {
+                return true;
+            }
             let b = self.src[i];
             if in_sq {
                 if b == b'\'' {
                     in_sq = false;
+                } else if b == b')' {
+                    rem_rparens = rem_rparens.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             if in_dq {
                 if b == b'\\' && i + 1 < self.src.len() {
+                    if self.src[i + 1] == b')' {
+                        rem_rparens = rem_rparens.saturating_sub(1);
+                    }
                     i += 2;
                     continue;
                 }
                 if b == b'"' {
                     in_dq = false;
+                } else if b == b')' {
+                    rem_rparens = rem_rparens.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             match b {
-                b'\\' if i + 1 < self.src.len() => i += 2,
+                b'\\' if i + 1 < self.src.len() => {
+                    if self.src[i + 1] == b')' {
+                        rem_rparens = rem_rparens.saturating_sub(1);
+                    }
+                    i += 2;
+                }
                 b'\'' => {
                     in_sq = true;
                     i += 1;
@@ -1251,6 +1439,7 @@ impl<'a, 'w> Lexer<'a, 'w> {
                         return self.src.get(i + 1) == Some(&b')');
                     }
                     depth -= 1;
+                    rem_rparens = rem_rparens.saturating_sub(1);
                     i += 1;
                 }
                 _ => i += 1,
@@ -1681,33 +1870,67 @@ impl<'a, 'w> Lexer<'a, 'w> {
         ))
     }
 
-    fn peek_subscript_assign(&self, start: usize) -> bool {
+    fn peek_subscript_assign(&mut self, start: usize) -> Result<bool, Error> {
+        let (total_rbrackets, last_assign) = self.rbracket_stats();
+        let Some(last_close) = last_assign else {
+            return Ok(false);
+        };
+        if start >= last_close {
+            return Ok(false);
+        }
+        let mut rem_rbrackets = total_rbrackets.saturating_sub(self.rbrackets_seen);
+        if rem_rbrackets == 0 {
+            return Ok(false);
+        }
         let mut i = start + 1;
         let mut depth: u32 = 1;
         let mut in_sq = false;
         let mut in_dq = false;
+        let mut next_charge_at = i + 64;
         while i < self.src.len() && depth > 0 {
+            if i >= next_charge_at {
+                let chunks = (i - next_charge_at) / 32 + 1;
+                for _ in 0..chunks {
+                    self.charge()?;
+                }
+                next_charge_at += chunks * 32;
+            }
+            if i > last_close || (depth as usize) > rem_rbrackets || depth > DEPTH_CAP + 2 {
+                return Ok(false);
+            }
             let b = self.src[i];
             if in_sq {
                 if b == b'\'' {
                     in_sq = false;
+                } else if b == b']' {
+                    rem_rbrackets = rem_rbrackets.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             if in_dq {
                 if b == b'\\' && i + 1 < self.src.len() {
+                    if self.src[i + 1] == b']' {
+                        rem_rbrackets = rem_rbrackets.saturating_sub(1);
+                    }
                     i += 2;
                     continue;
                 }
                 if b == b'"' {
                     in_dq = false;
+                } else if b == b']' {
+                    rem_rbrackets = rem_rbrackets.saturating_sub(1);
                 }
                 i += 1;
                 continue;
             }
             match b {
-                b'\\' if i + 1 < self.src.len() => i += 2,
+                b'\\' if i + 1 < self.src.len() => {
+                    if self.src[i + 1] == b']' {
+                        rem_rbrackets = rem_rbrackets.saturating_sub(1);
+                    }
+                    i += 2;
+                }
                 b'\'' => {
                     in_sq = true;
                     i += 1;
@@ -1722,19 +1945,20 @@ impl<'a, 'w> Lexer<'a, 'w> {
                 }
                 b']' => {
                     depth -= 1;
+                    rem_rbrackets = rem_rbrackets.saturating_sub(1);
                     i += 1;
                 }
-                b'\n' => return false,
+                b'\n' => return Ok(false),
                 _ => i += 1,
             }
         }
         if depth != 0 {
-            return false;
+            return Ok(false);
         }
-        matches!(
+        Ok(matches!(
             self.src.get(i..),
             Some([b'=', ..]) | Some([b'+', b'=', ..])
-        )
+        ))
     }
 
     fn scan_balanced_brackets(&mut self, buf: &mut KVec<u8>) -> Result<(), Error> {
