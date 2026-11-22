@@ -120,6 +120,13 @@ export interface IFileSystem {
 export type FileInit = FileContent | { content: FileContent; mode?: number; mtime?: Date | number } | (() => FileContent | Promise<FileContent>);
 export type InitialFiles = Record<string, FileInit>;
 
+/** Synchronous write options: an encoding string, or encoding plus file metadata. */
+export interface SyncWriteOptions {
+  encoding?: string | null;
+  mode?: number;
+  mtime?: Date | number;
+}
+
 /** An in-memory filesystem over the kernel's volume. */
 export declare class InMemoryFs implements IFileSystem {
   constructor(initialFiles?: InitialFiles);
@@ -146,8 +153,8 @@ export declare class InMemoryFs implements IFileSystem {
   readlink(path: string): Promise<string>;
   realpath(path: string): Promise<string>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
-  mkdirSync(path: string, options?: { recursive?: boolean }): void;
-  writeFileSync(path: string, content: FileContent, options?: WriteOptions): void;
+  mkdirSync(path: string, options?: { recursive?: boolean; mode?: number }): void;
+  writeFileSync(path: string, content: FileContent, options?: string | SyncWriteOptions): void;
   writeFileLazy(path: string, load: () => FileContent | Promise<FileContent>, options?: { mode?: number; mtime?: Date | number }): void;
 }
 
@@ -186,6 +193,8 @@ export interface BashOptions {
   env?: Record<string, string>;
   cwd?: string;
   fs?: IFileSystem;
+  /** Execution isolation for a shared kernel-backed volume: a private execution store (default) or one common store. */
+  isolation?: "separate" | "shared";
   executionLimits?: ExecutionLimits;
   executionLimitProfile?: ExecutionLimitProfile;
   maxCallDepth?: number;

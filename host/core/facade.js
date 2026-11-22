@@ -1,15 +1,16 @@
 import { COMMAND_NAMES } from "../../dist/js/kernel/commands.js";
 // The facade: `Bash`, `defineCommand` and the name helpers (spec 7.1-7.3), bound to a loader.
 import { decodeUtf8, unsafeBytesFromLatin1, utf8 } from "./bytes.js";
-import { anySignal, envToObject, execLoop, nullObject, runAsync, runSync } from "./driver.js";
+import { anySignal, envToObject, execLoop, markKernelVolume, nullObject, runAsync, runSync } from "./driver.js";
 import { AsyncCapabilityError, NotSupportedError } from "./errors.js";
-import { addFiles, createInMemoryFs, fsState } from "./fs.js";
+import { addFiles, createInMemoryFs, fsError, fsState } from "./fs.js";
+import { Holder } from "./holder.js";
 import { DEFAULT_PROFILE, PROFILE_NAMES, PROFILES, resolveLimits, stringLimit } from "./limits.js";
 import { dirname, resolvePath } from "./paths.js";
 import { INTERNAL } from "./instance.js";
 
 const OPTION_NAMES = new Set([
-  "files", "env", "cwd", "fs", "executionLimits", "executionLimitProfile", "maxCallDepth", "maxCommandCount", "maxLoopIterations",
+  "files", "env", "cwd", "fs", "isolation", "executionLimits", "executionLimitProfile", "maxCallDepth", "maxCommandCount", "maxLoopIterations",
   "fetch", "network", "python", "javascript", "commands", "sleep", "customCommands", "logger", "trace", "coverage", "defenseInDepth", "processInfo",
 ]);
 
@@ -148,6 +149,84 @@ function seedHostCommand(fs, name) {
   for (const dir of ["/bin", "/usr/bin"]) ignoreUnimplemented(() => fs.writeFileSync(`${dir}/${name}`, content));
 }
 
+/** Names the volume layout turns into stubs (the kernel `Shell::stub` guard). */
+function volumeStubNames(names) {
+  return names.filter((name) => name !== "" && !name.includes("/") && name !== "." && name !== "..");
+}
+
+/**
+ * Issues the L2 section 5.2 layout against a branded volume through the owning
+ * Vfs's internal `vfs.op`, bypassing the public FS methods (overrides included).
+ * Same bytes and order as `Shell::create`: system directories, default home/tmp,
+ * device and proc entries, the working directory, then command stubs in both
+ * `/bin` and `/usr/bin`. Runs synchronously on a ready store, or staged on the
+ * volume's single ordered queue before compilation.
+ */
+function seedVolumeLayout(vfs, inst, { defaultLayout, cwd, processInfo, commandNames }) {
+  const mkdir = (path) => {
+    const r = inst.call(() => vfs.op({ tag: "mkdir", val: { path: utf8(path), recursive: true, mode: 0o755 } }));
+    if (r.tag === "err") throw fsError(r.val.code, "mkdir", path);
+  };
+  const write = (path, contents) => {
+    const r = inst.call(() => vfs.op({
+      tag: "write-file",
+      val: { path: utf8(path), data: utf8(contents), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
+    }));
+    if (r.tag === "err") throw fsError(r.val.code, "open", path);
+  };
+  // Atomicity: stat every system directory before creating any, mirroring
+  // `Shell::layout` — a file collision fails before earlier directories exist.
+  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) {
+    const s = inst.call(() => vfs.op({ tag: "stat", val: utf8(dir) }));
+    if (s.tag === "ok" && s.val.val.kind === "file") throw fsError("exists", "mkdir", dir);
+  }
+  for (const dir of ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"]) mkdir(dir);
+  if (defaultLayout) {
+    mkdir("/home/user");
+    mkdir("/tmp");
+  }
+  mkdir("/dev/fd");
+  for (const name of ["null", "zero", "stdin", "stdout", "stderr"]) write(`/dev/${name}`, "");
+  mkdir("/proc/self/fd");
+  const { pid = 1, ppid = 0, uid = 1000, gid = 1000 } = processInfo ?? {};
+  write("/proc/version", "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n");
+  write("/proc/self/exe", "/bin/bash");
+  write("/proc/self/cmdline", "bash\0");
+  write("/proc/self/comm", "bash\n");
+  write("/proc/self/status", `Name:\tbash\nState:\tR (running)\nPid:\t${pid}\nPPid:\t${ppid}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\nGid:\t${gid}\t${gid}\t${gid}\t${gid}\n`);
+  for (const [fd, name] of ["stdin", "stdout", "stderr"].entries()) write(`/proc/self/fd/${fd}`, `/dev/${name}`);
+  try {
+    mkdir(cwd);
+  } catch {
+    /* the working directory is best-effort, as in `Shell::create` */
+  }
+  for (const name of volumeStubNames(commandNames)) {
+    try {
+      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+      for (const dir of ["/bin", "/usr/bin"]) write(`${dir}/${name}`, content);
+    } catch {
+      /* stub writes are best-effort, as in `Shell::create` */
+    }
+  }
+}
+
+/** Writes one registering command's stubs to a branded volume (best-effort). */
+function seedVolumeStubs(vfs, inst, names) {
+  for (const name of volumeStubNames(names)) {
+    try {
+      const content = `#!/bin/bash\n# Built-in command: ${name}\n`;
+      for (const dir of ["/bin", "/usr/bin"]) {
+        inst.call(() => vfs.op({
+          tag: "write-file",
+          val: { path: utf8(`${dir}/${name}`), data: utf8(content), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
+        }));
+      }
+    } catch {
+      /* stub writes are best-effort, as in `Shell::create` */
+    }
+  }
+}
+
 /**
  * Builds the facade classes for one loader.
  * @param {{ syncModule(): any, asyncModule(): Promise<any>, precompile(source?: unknown): Promise<void> }} loader
@@ -186,13 +265,20 @@ export function createFacade(loader) {
       const customs = options.customCommands ?? [];
       customs.forEach(checkCommand);
 
-      // The filesystem and its instance.
+      // The filesystem and its instance. A branded volume is an `InMemoryFs` with
+      // facade-private state; a prototype or a lookalike gives no synchronous
+      // kernel capability and stays on the host-adapter path.
       const given = options.fs;
-      const sharedFs = given instanceof InMemoryFs ? given : null;
-      const userFs = sharedFs ? null : (given ?? null);
+      const branded = given instanceof InMemoryFs && fsState(given) ? given : null;
+      const userFs = branded ? null : (given ?? null);
       if (given !== undefined && !isObject(given)) throw fail("fs must be an object");
-      const sharedHolder = sharedFs && fsState(sharedFs).holder;
-      const effective = hooks?.ceilingBytes ?? Math.max(sharedHolder?.ceiling ?? 0, PROFILES[profile].ceiling);
+      // Omitted/undefined means "separate"; any other value (including null) throws.
+      const isolation = options.isolation === undefined ? "separate" : options.isolation;
+      if (isolation !== "separate" && isolation !== "shared") throw fail('isolation must be "separate" or "shared"');
+      if (isolation === "shared" && given !== undefined && !branded) throw fail('isolation "shared" needs a kernel-backed InMemoryFs');
+      const separate = branded && isolation === "separate";
+      const volumeHolder = branded ? fsState(branded).holder : null;
+      const effective = hooks?.ceilingBytes ?? Math.max(isolation === "shared" && volumeHolder ? volumeHolder.ceiling : 0, PROFILES[profile].ceiling);
       const limits = resolveLimits(profile, overrides, effective);
       const hasFiles = options.files !== undefined;
       const defaultLayout = !options.cwd && !options.files;
@@ -202,7 +288,7 @@ export function createFacade(loader) {
       const envEntries = initialEnvEntries(initialCwd, home, userEnv);
       const commands = [...(options.commands ?? []), ...customs.map((c) => c.name)];
       const exported = new Set(["HOME", "PATH", "PWD", "OLDPWD", ...userEnv.map(([key]) => key)]);
-      if (hasFiles) {
+      if (hasFiles && !branded) {
         const paths = new Set(Object.keys(options.files).map((path) => resolvePath(initialCwd, path)));
         const systemDirs = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
         const conflict = systemDirs.find((path) => paths.has(path));
@@ -214,13 +300,34 @@ export function createFacade(loader) {
           envEntries.length * 20 + commands.length * 8 + Object.keys(overrides).length * 16);
       if (limit) throw new RangeError(`shell configuration: ${limit} exceeded`);
 
-      if (hooks?.ceilingBytes === undefined) sharedHolder?.raiseCeiling(effective);
-      const rootFs = sharedFs ?? new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength });
+      // A supplied volume keeps its contents: `files` only affects the default
+      // cwd/layout choice. A separate shell gets a fresh execution holder and a
+      // local root mounted over the volume; a shared shell joins the volume's holder.
+      let holder;
+      let rootFs;
+      let volumeFs = null;
+      if (separate) {
+        volumeFs = branded;
+        holder = new Holder(loader, hooks, hooks?.ceilingBytes ?? PROFILES[profile].ceiling);
+        rootFs = new InMemoryFs(undefined, {
+          hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength, holder,
+        });
+      } else if (branded) {
+        volumeFs = branded;
+        holder = volumeHolder;
+        rootFs = branded;
+      } else {
+        rootFs = new InMemoryFs(undefined, { hooks, profile, maxFileSystemBytes: limits.maxFileSystemBytes, maxStringLength: limits.maxStringLength });
+        holder = fsState(rootFs).holder;
+      }
+      if (hooks?.ceilingBytes === undefined && isolation === "shared") volumeHolder?.raiseCeiling(effective);
       const B = {
-        holder: fsState(rootFs).holder,
+        holder,
         rootFs,
+        volumeFs,
+        volumeHolder: separate ? volumeHolder : null,
         userFs,
-        mounts: new Map(userFs === null ? [] : [[1, userFs]]),
+        mounts: new Map(userFs === null ? (separate ? [[1, markKernelVolume(branded)]] : []) : [[1, userFs]]),
         limits,
         headroom,
         profile,
@@ -250,7 +357,7 @@ export function createFacade(loader) {
       };
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
-      if (hasFiles && userFs === null) addFiles(rootFs, options.files, B.initialCwd);
+      if (hasFiles && !branded && userFs === null) addFiles(rootFs, options.files, B.initialCwd);
       seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
       // A host mount at `/` shadows the kernel volume: `options.files` belong
       // in the host `fs`, never in the shadowed `rootFs`.
@@ -258,7 +365,7 @@ export function createFacade(loader) {
       for (const c of customs) this.#register(B, c, false);
       const shellConfig = {
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
-        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null },
+        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
         commands: options.commands?.slice(),
         customCommands: [...B.commands.keys()],
         env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: exported.has(n) })),
@@ -268,9 +375,17 @@ export function createFacade(loader) {
         trace: typeof options.trace === "function",
         coverage: !!options.coverage,
       };
+      if (branded) {
+        const st = fsState(branded);
+        const layout = {
+          defaultLayout, cwd: B.initialCwd, processInfo: options.processInfo,
+          commandNames: [...B.commandNames, ...customs.map((c) => c.name)],
+        };
+        st.holder.stage((volInst) => seedVolumeLayout(st.vfs, volInst, layout));
+      }
       B.holder.stage((inst) => {
         const { vfs } = fsState(rootFs);
-        if (userFs !== null) inst.call(() => vfs.mountHost(utf8("/"), 1));
+        if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
         B.shell = inst.call(() => inst.engine.Shell.create(vfs, shellConfig));
       });
     }
@@ -281,6 +396,10 @@ export function createFacade(loader) {
         const limit = stringLimit([c.name], B.limits.maxStringLength, B.headroom);
         if (limit) throw new RangeError(`command name: ${limit} exceeded`);
         seedHostCommand(B.userFs, c.name);
+        if (B.volumeFs) {
+          const st = fsState(B.volumeFs);
+          st.holder.stage((volInst) => seedVolumeStubs(st.vfs, volInst, [c.name]));
+        }
         B.holder.stage((inst) => {
           inst.call(() => B.shell.registerCommand(c.name));
         });
@@ -290,7 +409,7 @@ export function createFacade(loader) {
 
     get fs() {
       const B = STATE.get(this);
-      return B.userFs ?? B.rootFs;
+      return B.userFs ?? B.volumeFs ?? B.rootFs;
     }
 
     registerCommand(command) {
@@ -321,12 +440,14 @@ export function createFacade(loader) {
 
     async readFile(path) {
       const B = STATE.get(this);
+      B.holder.instance?.check();
       if (B.seeded) await B.seeded;
       return this.fs.readFile(resolvePath(B.initialCwd, path));
     }
 
     async writeFile(path, content) {
       const B = STATE.get(this);
+      B.holder.instance?.check();
       if (B.seeded) await B.seeded;
       return this.fs.writeFile(resolvePath(B.initialCwd, path), content);
     }
@@ -373,6 +494,9 @@ export function createFacade(loader) {
       if (B.seeded) await B.seeded;
       if (typeof commandLine !== "string") throw fail("the command line must be a string");
       const o = this.#normalize(B, options, false);
+      // A separate volume is laid out on its own holder: both stores are ready
+      // before the shell enters its driver.
+      if (B.volumeHolder) await B.volumeHolder.ensure();
       const inst = await B.holder.ensure();
       inst.check();
       const result = await runAsync(execLoop(B, commandLine, o));
@@ -385,7 +509,9 @@ export function createFacade(loader) {
       if (typeof commandLine !== "string") throw fail("the command line must be a string");
       B.holder.instance?.check();
       if (B.userFs || B.fetch || B.sleep || B.commands.size > 0 || B.network !== undefined) throw new AsyncCapabilityError();
-      if (!B.holder.instance) throw new AsyncCapabilityError("execSync needs the kernel module: call `await Bash.precompile()` first");
+      if (!B.holder.instance || (B.volumeHolder && !B.volumeHolder.instance)) {
+        throw new AsyncCapabilityError("execSync needs the kernel module: call `await Bash.precompile()` first");
+      }
       const o = this.#normalize(B, options, true);
       B.holder.instance.check();
       const result = runSync(execLoop(B, commandLine, o));
