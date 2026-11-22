@@ -1,7 +1,12 @@
 //! Glob and bash `extglob` parser, globstar counter, and `GLOBIGNORE` splitter.
+//!
+//! Produces a flat post-order node arena (`ParsedGlob::nodes`) with an explicit parse
+//! stack and an `O(N)` extglob parenthesis pre-pass so neither deeply nested extglobs
+//! nor unclosed `<op>(` sequences can trigger recursive stack overflow or exponential
+//! parser backtracking.
 
 use super::{GlobError, GlobOptions, MAX_GLOBSTAR_SEGMENTS};
-use crate::mem::{Budget, KBox, KVec, MemError};
+use crate::mem::{Budget, KVec, MemError};
 use crate::regex::{decode_scalar, posix_ranges};
 
 pub(crate) struct GlobClass {
@@ -9,23 +14,25 @@ pub(crate) struct GlobClass {
     pub ranges: KVec<(u32, u32)>,
 }
 
-pub(crate) enum GlobAst {
+pub(crate) enum GlobNode {
     Empty,
     Lit(u32),
     Question,
     Star,
     Class(u32),
-    Seq(KVec<GlobAst>),
-    Alt(KVec<GlobAst>),
+    Seq(KVec<u32>),
+    Alt(KVec<u32>),
     /// `@(p1|p2)` -> `Alt`; `?(...)` -> `Optional`; `*(...)` -> `StarOf`; `+(...)` -> `PlusOf`; `!(...)` -> `Not`.
-    Optional(KBox<GlobAst>),
-    StarOf(KBox<GlobAst>),
-    PlusOf(KBox<GlobAst>),
-    Not(KBox<GlobAst>),
+    Optional(u32),
+    StarOf(u32),
+    PlusOf(u32),
+    Not(u32),
 }
 
 pub(crate) struct ParsedGlob {
-    pub root: GlobAst,
+    pub nodes: KVec<GlobNode>,
+    pub node_has_not: KVec<bool>,
+    pub root: u32,
     pub classes: KVec<GlobClass>,
     pub has_not: bool,
 }
@@ -54,6 +61,7 @@ pub(crate) fn check_globstar_segments(path_pattern: &[u8]) -> Result<usize, Glob
 
 pub(crate) fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>, MemError> {
     let mut out = KVec::new_in(b);
+    let last_rbracket = raw.iter().rposition(|&c| c == b']');
     let mut start = 0usize;
     let mut i = 0usize;
     let mut in_bracket = false;
@@ -68,7 +76,7 @@ pub(crate) fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a
             }
             if c == b'[' {
                 // Only enter bracket mode if a closing `]` exists later.
-                if has_closing_bracket(raw, i) {
+                if find_closing_bracket(raw, i, last_rbracket).is_some() {
                     in_bracket = true;
                     bracket_first = true;
                     i += 1;
@@ -113,13 +121,19 @@ pub(crate) fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a
     Ok(out)
 }
 
+struct ParseFrame {
+    op: Option<u8>,
+    branches: KVec<u32>,
+    items: KVec<u32>,
+}
+
 struct GlobParser<'a> {
     pat: &'a [u8],
     pos: usize,
-    opts: GlobOptions,
-    depth: u32,
+    last_rbracket: Option<usize>,
+    nodes: KVec<GlobNode>,
+    node_has_not: KVec<bool>,
     classes: KVec<GlobClass>,
-    has_not: bool,
     b: &'a Budget,
 }
 
@@ -128,141 +142,227 @@ pub(crate) fn parse_glob(
     opts: GlobOptions,
     b: &Budget,
 ) -> Result<ParsedGlob, GlobError> {
+    let last_rbracket = pattern.iter().rposition(|&c| c == b']');
+    let valid_extglob = if opts.extglob {
+        compute_valid_extglobs(pattern, last_rbracket, b)?
+    } else {
+        KVec::new_in(b)
+    };
+
     let mut p = GlobParser {
         pat: pattern,
         pos: 0,
-        opts,
-        depth: 0,
+        last_rbracket,
+        nodes: KVec::new_in(b),
+        node_has_not: KVec::new_in(b),
         classes: KVec::new_in(b),
-        has_not: false,
         b,
     };
-    let root = p.parse_seq(false)?;
+
+    let mut frames: KVec<ParseFrame> = KVec::new_in(b);
+    frames.try_push(ParseFrame {
+        op: None,
+        branches: KVec::new_in(b),
+        items: KVec::new_in(b),
+    })?;
+
+    while p.pos < p.pat.len() {
+        let c = p.pat[p.pos];
+        let in_extglob = frames.len() > 1;
+
+        if in_extglob && c == b'|' {
+            p.pos += 1;
+            let top = frames.as_mut_slice().last_mut().unwrap();
+            let seq_items = core::mem::replace(&mut top.items, KVec::new_in(b));
+            let branch_id = p.finish_seq(seq_items)?;
+            frames.as_mut_slice().last_mut().unwrap().branches.try_push(branch_id)?;
+            continue;
+        }
+
+        if in_extglob && c == b')' {
+            p.pos += 1;
+            let mut frame = frames.pop().unwrap();
+            let last_branch = p.finish_seq(frame.items)?;
+            frame.branches.try_push(last_branch)?;
+            let inner = if frame.branches.len() == 1 {
+                frame.branches.pop().unwrap()
+            } else {
+                p.push_node(GlobNode::Alt(frame.branches))?
+            };
+            let node_id = match frame.op.unwrap_or(b'@') {
+                b'@' => inner,
+                b'?' => p.push_node(GlobNode::Optional(inner))?,
+                b'*' => p.push_node(GlobNode::StarOf(inner))?,
+                b'+' => p.push_node(GlobNode::PlusOf(inner))?,
+                b'!' => p.push_node(GlobNode::Not(inner))?,
+                _ => unreachable!(),
+            };
+            frames.as_mut_slice().last_mut().unwrap().items.try_push(node_id)?;
+            continue;
+        }
+
+        if opts.extglob && valid_extglob.as_slice()[p.pos] {
+            let cur_depth = (frames.len() - 1) as u32;
+            if cur_depth >= opts.max_extglob_depth {
+                return Err(GlobError::ExtglobDepthExceeded {
+                    max: opts.max_extglob_depth,
+                });
+            }
+            p.pos += 2; // consume `<op>(`
+            frames.try_push(ParseFrame {
+                op: Some(c),
+                branches: KVec::new_in(b),
+                items: KVec::new_in(b),
+            })?;
+            continue;
+        }
+
+        match c {
+            b'\\' => {
+                p.pos += 1;
+                let ch = if p.pos < p.pat.len() {
+                    let (ch, len) = decode_scalar(p.pat, p.pos);
+                    p.pos += len;
+                    ch
+                } else {
+                    b'\\' as u32
+                };
+                let id = p.push_node(GlobNode::Lit(ch))?;
+                frames.as_mut_slice().last_mut().unwrap().items.try_push(id)?;
+            }
+            b'*' => {
+                p.pos += 1;
+                // Collapse consecutive `*` into a single `Star`.
+                let prev_is_star = frames
+                    .as_slice()
+                    .last()
+                    .and_then(|f| f.items.as_slice().last().copied())
+                    .is_some_and(|id| matches!(p.nodes.as_slice()[id as usize], GlobNode::Star));
+                if !prev_is_star {
+                    let id = p.push_node(GlobNode::Star)?;
+                    frames.as_mut_slice().last_mut().unwrap().items.try_push(id)?;
+                }
+            }
+            b'?' => {
+                p.pos += 1;
+                let id = p.push_node(GlobNode::Question)?;
+                frames.as_mut_slice().last_mut().unwrap().items.try_push(id)?;
+            }
+            b'[' => {
+                let id = if let Some(cid) = p.try_bracket()? {
+                    p.push_node(GlobNode::Class(cid))?
+                } else {
+                    p.pos += 1;
+                    p.push_node(GlobNode::Lit(b'[' as u32))?
+                };
+                frames.as_mut_slice().last_mut().unwrap().items.try_push(id)?;
+            }
+            _ => {
+                let (ch, len) = decode_scalar(p.pat, p.pos);
+                p.pos += len;
+                let id = p.push_node(GlobNode::Lit(ch))?;
+                frames.as_mut_slice().last_mut().unwrap().items.try_push(id)?;
+            }
+        }
+    }
+
+    let root_frame = frames.pop().unwrap();
+    let root = p.finish_seq(root_frame.items)?;
+    let has_not = p.node_has_not.as_slice()[root as usize];
     Ok(ParsedGlob {
+        nodes: p.nodes,
+        node_has_not: p.node_has_not,
         root,
         classes: p.classes,
-        has_not: p.has_not,
+        has_not,
     })
 }
 
+/// Linear-time pre-pass marking every `<op>(` position that has a matching `)` later
+/// in the pattern (respecting `\` escapes and `[...]` brackets). Eliminates exponential
+/// backtracking on unclosed extglob sequences like `!(!(!(...`.
+fn compute_valid_extglobs(
+    pat: &[u8],
+    last_rbracket: Option<usize>,
+    b: &Budget,
+) -> Result<KVec<bool>, GlobError> {
+    let mut valid = KVec::with_capacity_in(pat.len(), b)?;
+    for _ in 0..pat.len() {
+        valid.try_push(false)?;
+    }
+    let mut open_stack: KVec<usize> = KVec::new_in(b);
+    let mut i = 0usize;
+    while i < pat.len() {
+        let c = pat[i];
+        if c == b'\\' {
+            i += 1;
+            if i < pat.len() {
+                let (_, len) = decode_scalar(pat, i);
+                i += len;
+            }
+            continue;
+        }
+        if c == b'[' {
+            if let Some(close) = find_closing_bracket(pat, i, last_rbracket) {
+                i = close + 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, b'@' | b'*' | b'+' | b'?' | b'!') && pat.get(i + 1) == Some(&b'(') {
+            open_stack.try_push(i)?;
+            i += 2;
+            continue;
+        }
+        if c == b')' {
+            if let Some(open_pos) = open_stack.pop() {
+                valid.as_mut_slice()[open_pos] = true;
+            }
+            i += 1;
+            continue;
+        }
+        let (_, len) = decode_scalar(pat, i);
+        i += len;
+    }
+    Ok(valid)
+}
+
 impl<'a> GlobParser<'a> {
-    fn boxed(&self, ast: GlobAst) -> Result<KBox<GlobAst>, GlobError> {
-        KBox::try_new_in(ast, self.b).map_err(|(_, e)| GlobError::Mem(e))
+    fn push_node(&mut self, node: GlobNode) -> Result<u32, GlobError> {
+        let has_not = match &node {
+            GlobNode::Empty
+            | GlobNode::Lit(_)
+            | GlobNode::Question
+            | GlobNode::Star
+            | GlobNode::Class(_) => false,
+            GlobNode::Seq(ids) | GlobNode::Alt(ids) => ids
+                .as_slice()
+                .iter()
+                .any(|&id| self.node_has_not.as_slice()[id as usize]),
+            GlobNode::Optional(inner) | GlobNode::StarOf(inner) | GlobNode::PlusOf(inner) => {
+                self.node_has_not.as_slice()[*inner as usize]
+            }
+            GlobNode::Not(_) => true,
+        };
+        let id = self.nodes.len() as u32;
+        self.nodes.try_push(node)?;
+        self.node_has_not.try_push(has_not)?;
+        Ok(id)
     }
 
-    fn parse_seq(&mut self, in_extglob: bool) -> Result<GlobAst, GlobError> {
-        let mut items = KVec::new_in(self.b);
-        while self.pos < self.pat.len() {
-            let c = self.pat[self.pos];
-            if in_extglob && (c == b'|' || c == b')') {
-                break;
-            }
-            if self.opts.extglob
-                && matches!(c, b'@' | b'*' | b'+' | b'?' | b'!')
-                && self.pat.get(self.pos + 1) == Some(&b'(')
-            {
-                if let Some(node) = self.try_extglob(c)? {
-                    items.try_push(node)?;
-                    continue;
-                }
-            }
-            match c {
-                b'\\' => {
-                    self.pos += 1;
-                    if self.pos < self.pat.len() {
-                        let (ch, len) = decode_scalar(self.pat, self.pos);
-                        self.pos += len;
-                        items.try_push(GlobAst::Lit(ch))?;
-                    } else {
-                        items.try_push(GlobAst::Lit(b'\\' as u32))?;
-                    }
-                }
-                b'*' => {
-                    self.pos += 1;
-                    // Collapse consecutive `*` into a single `Star`.
-                    if !matches!(items.as_slice().last(), Some(GlobAst::Star)) {
-                        items.try_push(GlobAst::Star)?;
-                    }
-                }
-                b'?' => {
-                    self.pos += 1;
-                    items.try_push(GlobAst::Question)?;
-                }
-                b'[' => {
-                    if let Some(cls) = self.try_bracket()? {
-                        items.try_push(cls)?;
-                    } else {
-                        self.pos += 1;
-                        items.try_push(GlobAst::Lit(b'[' as u32))?;
-                    }
-                }
-                _ => {
-                    let (ch, len) = decode_scalar(self.pat, self.pos);
-                    self.pos += len;
-                    items.try_push(GlobAst::Lit(ch))?;
-                }
-            }
-        }
+    fn finish_seq(&mut self, mut items: KVec<u32>) -> Result<u32, GlobError> {
         if items.is_empty() {
-            Ok(GlobAst::Empty)
+            self.push_node(GlobNode::Empty)
         } else if items.len() == 1 {
-            Ok(items.pop().unwrap_or(GlobAst::Empty))
+            Ok(items.pop().unwrap())
         } else {
-            Ok(GlobAst::Seq(items))
+            self.push_node(GlobNode::Seq(items))
         }
     }
 
-    fn try_extglob(&mut self, op: u8) -> Result<Option<GlobAst>, GlobError> {
-        let save = self.pos;
-        if self.depth >= self.opts.max_extglob_depth {
-            return Err(GlobError::ExtglobDepthExceeded {
-                max: self.opts.max_extglob_depth,
-            });
-        }
-        self.pos += 2; // consume `<op>(`
-        self.depth += 1;
-        let mut branches = KVec::new_in(self.b);
-        loop {
-            let branch = self.parse_seq(true)?;
-            branches.try_push(branch)?;
-            match self.pat.get(self.pos).copied() {
-                Some(b'|') => {
-                    self.pos += 1;
-                }
-                Some(b')') => {
-                    self.pos += 1;
-                    break;
-                }
-                _ => {
-                    // No matching `)`: backtrack and treat `<op>` normally.
-                    self.depth -= 1;
-                    self.pos = save;
-                    return Ok(None);
-                }
-            }
-        }
-        self.depth -= 1;
-        let inner = if branches.len() == 1 {
-            branches.pop().unwrap_or(GlobAst::Empty)
-        } else {
-            GlobAst::Alt(branches)
-        };
-        let node = match op {
-            b'@' => inner,
-            b'?' => GlobAst::Optional(self.boxed(inner)?),
-            b'*' => GlobAst::StarOf(self.boxed(inner)?),
-            b'+' => GlobAst::PlusOf(self.boxed(inner)?),
-            b'!' => {
-                self.has_not = true;
-                GlobAst::Not(self.boxed(inner)?)
-            }
-            _ => unreachable!(),
-        };
-        Ok(Some(node))
-    }
-
-    fn try_bracket(&mut self) -> Result<Option<GlobAst>, GlobError> {
-        if !has_closing_bracket(self.pat, self.pos) {
+    fn try_bracket(&mut self) -> Result<Option<u32>, GlobError> {
+        if find_closing_bracket(self.pat, self.pos, self.last_rbracket).is_none() {
             return Ok(None);
         }
         let save = self.pos;
@@ -288,7 +388,7 @@ impl<'a> GlobParser<'a> {
                 }
                 let id = self.classes.len() as u32;
                 self.classes.try_push(GlobClass { neg, ranges })?;
-                return Ok(Some(GlobAst::Class(id)));
+                return Ok(Some(id));
             }
             first = false;
 
@@ -327,7 +427,7 @@ impl<'a> GlobParser<'a> {
             prev_single = Some(ch);
         }
 
-        // Unclosed bracket fallback (should not be hit due to `has_closing_bracket`).
+        // Unclosed bracket fallback (should not be hit due to `find_closing_bracket`).
         self.pos = save;
         Ok(None)
     }
@@ -356,13 +456,17 @@ fn find_colon_close(slice: &[u8]) -> Option<usize> {
     None
 }
 
-fn has_closing_bracket(pat: &[u8], open: usize) -> bool {
+fn find_closing_bracket(pat: &[u8], open: usize, last_rbracket: Option<usize>) -> Option<usize> {
+    let last = last_rbracket?;
+    if open + 1 >= last {
+        return None;
+    }
     let mut i = open + 1;
     if pat.get(i) == Some(&b'^') {
         i += 1;
     }
     let mut first = true;
-    while i < pat.len() {
+    while i <= last {
         let c = pat[i];
         if c == b'\\' && i + 1 < pat.len() {
             first = false;
@@ -377,10 +481,10 @@ fn has_closing_bracket(pat: &[u8], open: usize) -> bool {
             }
         }
         if c == b']' && !first {
-            return true;
+            return Some(i);
         }
         first = false;
         i += 1;
     }
-    false
+    None
 }

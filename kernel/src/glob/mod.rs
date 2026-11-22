@@ -61,6 +61,8 @@ pub struct CompiledGlob {
     pub(crate) parsed: parser::ParsedGlob,
     pub(crate) fwd: KVec<engine::GlobInst>,
     pub(crate) rev: KVec<engine::GlobInst>,
+    pub(crate) sub_nfa_insts: KVec<engine::GlobInst>,
+    pub(crate) sub_nfa_span: KVec<(u32, u32)>,
 }
 
 impl CompiledGlob {
@@ -70,12 +72,15 @@ impl CompiledGlob {
         b: &Budget,
     ) -> Result<Self, GlobError> {
         let parsed = parser::parse_glob(pattern, opts, b)?;
-        let (fwd, rev) = if parsed.has_not {
-            (KVec::new_in(b), KVec::new_in(b))
+        let (fwd, rev, sub_nfa_insts, sub_nfa_span) = if parsed.has_not {
+            let (insts, spans) = engine::compile_sub_nfas(&parsed, b)?;
+            (KVec::new_in(b), KVec::new_in(b), insts, spans)
         } else {
             (
-                engine::compile_nfa(&parsed.root, false, b)?,
-                engine::compile_nfa(&parsed.root, true, b)?,
+                engine::compile_nfa(parsed.nodes.as_slice(), parsed.root, false, b)?,
+                engine::compile_nfa(parsed.nodes.as_slice(), parsed.root, true, b)?,
+                KVec::new_in(b),
+                KVec::new_in(b),
             )
         };
         Ok(Self {
@@ -83,6 +88,8 @@ impl CompiledGlob {
             parsed,
             fwd,
             rev,
+            sub_nfa_insts,
+            sub_nfa_span,
         })
     }
 

@@ -521,3 +521,120 @@ fn glob_posix_all_14_classes() {
     assert!(glob_match(b"[[:word:]]", b"_", GlobOptions::default()));
     assert!(glob_match(b"[[:xdigit:]]", b"f", GlobOptions::default()));
 }
+
+/// Builds `Q_k` where `Q_0 = !(a)` and `Q_k = !(!(a)Q_{k-1})` (extglob depth = `2*k + 1` <= 100).
+fn build_nested_not_chain(k: usize, b: &Budget) -> KBytes {
+    let mut pat = KBytes::new_in(b);
+    for _ in 0..k {
+        pat.try_extend_from_slice(b"!(!(a)").unwrap();
+    }
+    pat.try_extend_from_slice(b"!(a)").unwrap();
+    for _ in 0..k {
+        pat.try_push(b')').unwrap();
+    }
+    pat
+}
+
+#[test]
+fn extglob_nested_not_chain_polynomial_no_blowup() {
+    let b = test_budget();
+    // k = 12 (depth 25 <= 100) on 40-byte subject: O(N^12) without memoization; fast polynomial with it.
+    let pat12 = build_nested_not_chain(12, &b);
+    let g12 = CompiledGlob::compile(pat12.as_slice(), ext(), &b).unwrap();
+    let mut subj = KBytes::new_in(&b);
+    for _ in 0..20 {
+        subj.try_extend_from_slice(b"ab").unwrap();
+    }
+    let mut used_work = 0u64;
+    let mut work = |u: u64| {
+        used_work += u;
+        if used_work > 200_000 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    };
+    // By induction: Q_{2m+1} = {"a"}, Q_{2m} = {"aa"} U {s : !s.ends_with('a')} for m >= 1.
+    assert!(g12.is_match(subj.as_slice(), &b, &mut work).unwrap());
+    assert!(!g12.is_match(b"a", &b, &mut work).unwrap());
+    assert!(g12.is_match(b"aa", &b, &mut work).unwrap());
+
+    let pat13 = build_nested_not_chain(13, &b);
+    let g13 = CompiledGlob::compile(pat13.as_slice(), ext(), &b).unwrap();
+    assert!(!g13.is_match(subj.as_slice(), &b, &mut work).unwrap());
+    assert!(g13.is_match(b"a", &b, &mut work).unwrap());
+
+    // k = 40 (depth 81 <= 100) on 12-byte subject: O(12^40) without memoization; < 5 ms with it.
+    let pat40 = build_nested_not_chain(40, &b);
+    let g40 = CompiledGlob::compile(pat40.as_slice(), ext(), &b).unwrap();
+    let mut used40 = 0u64;
+    let mut work40 = |u: u64| {
+        used40 += u;
+        if used40 > 50_000 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    };
+    assert!(g40.is_match(b"abababababab", &b, &mut work40).unwrap());
+    assert!(!g40.is_match(b"a", &b, &mut work40).unwrap());
+
+    // Verify strip_suffix and replace_glob reuse one memo table on nested `!(...)`.
+    let pat8 = build_nested_not_chain(8, &b);
+    let mut used_sr = 0u64;
+    let mut work_sr = |u: u64| {
+        used_sr += u;
+        if used_sr > 200_000 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    };
+    let _ = strip_suffix(b"abababababab", pat8.as_slice(), true, ext(), &b, &mut work_sr).unwrap();
+    let _ = replace_glob(
+        b"abababababab",
+        pat8.as_slice(),
+        b"X",
+        GlobReplaceMode::All,
+        ext(),
+        &b,
+        &mut work_sr,
+    )
+    .unwrap();
+}
+
+#[test]
+fn extglob_nested_plus_of_not_and_unclosed_linear() {
+    let b = test_budget();
+    // Depth-40 nested `+(+(...!(a)...))` on "" and "aa" would take 2^40 without memoization.
+    let mut pat = KBytes::new_in(&b);
+    for _ in 0..40 {
+        pat.try_extend_from_slice(b"+(").unwrap();
+    }
+    pat.try_extend_from_slice(b"!(a)").unwrap();
+    for _ in 0..40 {
+        pat.try_push(b')').unwrap();
+    }
+    let g = CompiledGlob::compile(pat.as_slice(), ext(), &b).unwrap();
+    let mut used = 0u64;
+    let mut work = |u: u64| {
+        used += u;
+        if used > 50_000 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    };
+    assert!(g.is_match(b"", &b, &mut work).unwrap());
+    assert!(g.is_match(b"aa", &b, &mut work).unwrap());
+    assert!(!g.is_match(b"a", &b, &mut work).unwrap());
+
+    // Unclosed `!(` repeated 40 times would take 2^40 in recursive backtracking parser.
+    let mut unclosed = KBytes::new_in(&b);
+    for _ in 0..40 {
+        unclosed.try_extend_from_slice(b"!(").unwrap();
+    }
+    let gu = CompiledGlob::compile(unclosed.as_slice(), ext(), &b).unwrap();
+    assert!(gu.is_match(unclosed.as_slice(), &b, &mut no_limit).unwrap());
+    assert!(!gu.is_match(b"x", &b, &mut no_limit).unwrap());
+}
