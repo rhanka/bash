@@ -6,11 +6,15 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod base64;
 pub mod cmd;
 pub mod fiber;
+pub mod format;
 pub mod fs;
+pub mod hash;
 pub mod limits;
 pub mod mem;
+pub mod num;
 pub mod shell;
 pub mod util;
 
