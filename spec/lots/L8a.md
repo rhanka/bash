@@ -8,8 +8,8 @@ decisions D1, D2, D6, D7, D12, D19-D21, D23; security invariants S3, S4, S9, S10
 and `spec/lots/L10a.md` (parity recorder and replay runner). Where this document and EVOL differ, stop and raise
 a spec issue.
 
-- **Size.** 8 points, Strong. **Builder.** Muse 1.3, xhigh (Codex Sol 6.2, xhigh from 27/11). **Review.**
-  Carbon, full review of every PR, dispatched on a green `make check`.
+- **Size.** 8 points, Strong. **Builder.** Sonnet 5.5; fallback Gemini 4 Argon. **Review.** Carbon, full
+  review of every PR, dispatched on a green `make check`.
 - **Branch.** `feat/l8a-regex-glob`, worktree `tmp/l8a-regex-glob`.
 - **Outcome.** Delivers two zero-dependency, `no_std`, budget-allocated kernel engines — `kernel::regex`
   (Thompson NFA / PikeVM with a byte-capped lazy DFA for uncaptured search, compile-time size/repetition/depth
@@ -65,8 +65,8 @@ In scope:
     advancement policies needed by downstream lots (`Standard` global scan, `PosixSed` post-non-empty skip, and
     `ShellExpansion` no-trailing-empty-after-non-empty).
 - `kernel::glob` (`kernel/src/glob/**`):
-  - Standalone linear-time glob and bash `extglob` compiler/matcher (`*`, `?`, `[...]` with `^` and `!`
-    negation, POSIX classes, bash `'...'` literal spans inside `[...]`, `\` escapes, and `@(p1|p2)`, `*(...)`,
+  - Standalone linear-time glob and bash `extglob` compiler/matcher (`*`, `?`, `[...]` with `^` negation
+    (`!` is a literal member in the reference), POSIX classes, `\` escapes, and `@(p1|p2)`, `*(...)`,
     `+(...)`, `?(...)`, `!(...)` including arbitrary suffixes such as `!(foo)bar` and nested `!(...)` without
     translating to regex negative lookahead!).
   - Pathname mode (`/` never matched by `*`, `?`, `[...]`, or extglob bodies) vs string mode (`[[ == ]]`,
@@ -138,7 +138,8 @@ pub enum BreDialect {
     /// `sed` BRE: `\(`, `\)`, `\{n,m\}` and GNU `\{,m\}`, plus `\+`, `\?`, `\|`, `\t`, `\n`, `\r`,
     /// and `^`/`$` literal unless at start/after `\(` or end/before `\)`.
     Sed,
-    /// `expr STRING : REGEXP`: implicitly anchored at start (`^`), BRE with `\(`, `\)`, `\{n,m\}`.
+    /// `expr STRING : REGEXP`: ERE operators (unescaped `(`, `)`, `{n,m}`; `\(` is a literal paren),
+    /// implicitly anchored at byte 0. The reference does not give `expr` BRE escapes.
     Expr,
 }
 
@@ -147,9 +148,12 @@ pub struct RegexFlags {
     pub ignore_case: bool,    // -i / (?i) / nocasematch
     pub multiline: bool,      // ^ and $ match line boundaries `\n`
     pub dot_all: bool,        // . matches `\n`
-    pub whole_word: bool,     // -w: wrap as `(?:^|\b)(?:<pat>)(?:\b|$)` word-char boundary check
-    pub line_regexp: bool,    // -x: match entire input / line (`^(?:<pat>)$`)
+    pub whole_word: bool,     // -w: match must be bounded by non-word bytes or input ends (word = [A-Za-z0-9_])
+    pub line_regexp: bool,    // -x: match must cover the whole input / line
     pub allow_backrefs: bool, // false -> SyntaxKind::BackrefUnsupported; true -> bounded backtracker
+    /// `sed` only (`sed` BRE `\{,m\}` and `sed -E` `{,m}`): a comma-first interval means `{0,m}`.
+    /// Everywhere else (`grep`, `awk`, `[[ =~ ]]`, `expr`) `{,m}` is literal text.
+    pub comma_first_interval: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -331,7 +335,7 @@ impl Default for GlobOptions {
             extglob: false,
             nocase: false,
             pathname: false,
-            dotglob: true,
+            dotglob: false, // bash default; only consulted when `pathname` is true
             max_extglob_depth: DEFAULT_MAX_EXTGLOB_DEPTH,
         }
     }
@@ -418,8 +422,11 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
 
 1. **Extended (`RegexMode::Extended`):**
    - Operators: `.` (any scalar/byte except `\n` unless `dot_all`), `^`, `$`, `*`, `+`, `?`, `{n}`, `{n,}`,
-     `{n,m}`, and GNU `{,m}` (equivalent to `{0,m}` outside brackets), `|` alternation (empty branches allowed:
-     `(|a)`, `(a|)`, `()`), `(...)` numbered capture groups (`1..`), `[...]` bracket expressions.
+     `{n,m}`, `|` alternation (empty branches allowed: `(|a)`, `(a|)`, `()`), `(...)` numbered capture groups
+     (`1..`), `[...]` bracket expressions. A `{` that does not form a valid interval is literal text
+     (`grep -E 'a{b'` matches `a{b`); this includes `{,m}` unless `comma_first_interval` is set (`sed -E`
+     only), while a well-formed but inverted interval (`a{2,1}`) is `SyntaxKind::InvalidRepeatRange` and a
+     leading quantifier (`*a` in ERE) is `SyntaxKind::DanglingQuantifier`.
    - Escapes outside `[...]`: `\` before any ERE metacharacter (`. ^ $ * + ? ( ) [ ] { } | \`) matches it
      literally; `\t` -> `0x09`, `\n` -> `0x0A`, `\r` -> `0x0D`, `\b` -> word boundary, `\B` -> non-word
      boundary, `\w` -> `[A-Za-z0-9_]`, `\W` -> `[^A-Za-z0-9_]`, `\s` -> `[ \t\n\r\f\v]`, `\S` -> negated `\s`,
@@ -440,8 +447,17 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
        (`{0,m}`) are active operators; `\t`, `\n`, `\r` match tab, LF, CR.
      - `^` is an anchor only at pattern start or immediately after `\(` (elsewhere literal `^`); `$` is an anchor
        only at pattern end or immediately before `\)` (elsewhere literal `$`).
-   - **`BreDialect::Expr`** (`expr str : pat`): implicitly anchored at byte `0` (`^`), `\(`, `\)`, `\{n,m\}`,
-     leading/post-`\(` literal `*`.
+   - **`BreDialect::Expr`** (`expr str : pat`): ERE operator set (unescaped `(...)` captures and `{n,m}`
+     intervals; `\(` and `\{` match literal `(` and `{`), implicitly anchored at byte `0`. Verified:
+     `expr abc : 'a(b)c'` prints `b`, `expr abc : 'a\(b\)c'` does not match, `expr aab : 'a{2}b'` prints `3`.
+   - In every `Basic` dialect the class escapes of the ERE list also apply outside brackets (`\t`, `\n`,
+     `\r`, `\b`, `\B`, `\w`, `\W`, `\s`, `\S`, `\d`, `\D`), in addition to each dialect's operator escapes.
+   - **Pattern backreferences per surface in the reference** (with `allow_backrefs: false` the engine
+     returns `BackrefUnsupported`; downstream lots map that one error to each surface's result): `grep`
+     (BRE, ERE and `-P`) and `expr` fail with exit `2` and an invalid-regex message; `sed` accepts the
+     pattern and never matches it (`s/\(a\)\1/X/` leaves `aa` unchanged, exit `0`); `awk` never matches;
+     `[[ lhs =~ (a)\1 ]]` returns status `1` with empty stderr. Replacement-side `\1`..`\9` and `&` in `sed`
+     are not pattern backreferences and work normally (`ReplaceStyle::Sed`).
 3. **Fixed (`RegexMode::Fixed`):**
    - Splits `pattern` on `\n` into literal needles. Empty pattern (`b""`) or any empty line inside `pattern`
      matches every line (`0..0`). With `line_regexp` (`-x`), needle must equal the full line; with `whole_word`
@@ -449,11 +465,13 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
      case-insensitive literal comparison.
 4. **Perl (`RegexMode::Perl`, `grep -P`):**
    - Everything in `Extended`, plus:
-     - Non-greedy quantifiers `*?`, `+?`, `??`, `{n,m}?`, `{n,}?`, `{,m}?` (in PikeVM, flip split priority so the
+     - Non-greedy quantifiers `*?`, `+?`, `??`, `{n,m}?`, `{n,}?` (in PikeVM, flip split priority so the
        exit branch has higher priority than the loop branch — still strictly linear time!).
      - `\Q...\E` literal quoting (an unclosed `\Q` quotes through the end of the pattern).
-     - `\xHH` (up to 2 hex digits), `\x{H...}` (1 to 6 hex digits, invalid > `0x10FFFF` -> `InvalidEscape`),
-       `\0` / `\NNN` octal, `\a` (`0x07`), `\e` (`0x1B`), `\f` (`0x0C`), `\v` (`0x0B`).
+     - `\xHH` (exactly 2 hex digits; `\x4` is `InvalidEscape`), `\x{H...}` (1 to 6 hex digits, invalid >
+       `0x10FFFF` -> `InvalidEscape`), `\0` / `\NNN` octal (`\101` matches `A`), `\f` (`0x0C`), `\v`
+       (`0x0B`). `\e` is a compile error in the reference (`InvalidEscape`); `\a` is outside the verified
+       subset and also returns `InvalidEscape` (recorded for the `grep` lot to snapshot before relying on it).
      - Inline flag groups `(?ims-ims)` (scoped to enclosing group) and `(?ims-ims:...)` non-capturing scoped
        groups, `(?:...)` non-capturing group, `(?P<name>...)` and `(?<name>...)` named capture groups (`name`
        matching `[A-Za-z_][A-Za-z0-9_]*`).
@@ -535,16 +553,22 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
    - `\c`: outside `'...'`, escapes `c` so it matches literally (`\*`, `\?`, `\[`, `\\`).
    - `[...]`:
      - If no closing `]` exists before the end of `pattern`, `[` matches a literal `[`!
-     - Negation: **both** `[^...]` and `[!...]` negate the bracket class (and never match `/` when
-       `opts.pathname == true`).
-     - Initial `]` right after `[`, `[^`, or `[!` is a literal `]`.
-     - Bash single-quoted span inside brackets (`['a-z']` or `[a'-'z]`): characters between `'` and `'` inside
-       `[...]` are literal members, never range operators!
-     - POSIX classes `[:name:]`: use the same 14-entry table as section 5.2, **except** an unknown `[:bogus:]`
-       inside a **glob** bracket contributes 0 characters without failing compilation (matching bash and
-       `just-bash@3.6.0` glob bracket behavior!), whereas a reversed range `[z-a]` returns
-       `Err(GlobError::InvalidCharacterRange)` (so pathname globbing fails to match, `[[ == ]]` returns exit `1`,
-       and `${var#...}` leaves `var` unchanged).
+     - Negation: only a leading `^` negates the bracket class. A leading `!` is an ordinary member: `[!a]`
+       matches `!` or `a` and does not match `b` (verified on `case` and `[[ == ]]`; this differs from GNU
+       bash, and D1 keeps the reference behavior). A negated class never matches `/` when
+       `opts.pathname == true`.
+     - Initial `]` right after `[` or `[^` is a literal `]`.
+     - `'` inside brackets is an ordinary member byte and quotes nothing: `['a-z']` is the set
+       `{', a..z}` (it matches `m`, not `-`), and `[a'-'z]` likewise still forms the range `a..z`.
+     - POSIX classes `[:name:]`: use the same 14-entry table as section 5.2. An unknown `[:bogus:]` inside a
+       glob bracket contributes 0 characters without failing compilation in this engine (`strip_prefix` on
+       `xb` with `[[:bogus:]x]` strips `x` in the reference). A reversed range `[z-a]` returns
+       `Err(GlobError::InvalidCharacterRange)`. Reference behavior for these two inputs is surface-dependent
+       and partly an internal error: `case` with `[[:bogus:]b]` or `[z-a]` throws out of `exec`, `[[ == ]]`
+       returns status `2` with a conditional-expression message, `${var#[z-a]}` throws, and pathname
+       expansion of `[z-a]` falls back to the literal word. Those surfaces are `upstream-defect` candidates
+       (EVOL Annex E.7), excluded from the section 7.3 parity cases; downstream lots map `GlobError` to a
+       shell result (never a throw) per their own snapshots.
 2. **Full `extglob` (`opts.extglob == true`):**
    - Operators `@(p1|p2|...)` (exactly 1), `*(p1|...)` (0 or more), `+(p1|...)` (1 or more), `?(p1|...)` (0 or 1),
      and `!(p1|...)` (any string — excluding `/` when `opts.pathname == true` — that does **not** match any
@@ -572,7 +596,7 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
      bounded bitset pass).
    - `replace_glob`: leftmost-longest greedy match (`First`, `All` with `EmptyAdvance::ShellExpansion` so
      `v=abc; ${v//*/X}` yields `X` and NOT `XX`!, `AnchorHead` matching from `0`, `AnchorTail` matching through
-     `subject.len()`).
+     `subject.len()`). On an empty subject every mode returns the empty string (no empty match is replaced).
 4. **Leading-dot rule (`opts.pathname && !opts.dotglob`) and `GLOBIGNORE`:**
    - When `opts.pathname && !opts.dotglob`, a subject starting with `.` matches only if the pattern itself starts
      with a literal `.` (or `@(.foo|...)` branch starting with literal `.`).
@@ -585,7 +609,11 @@ pub fn split_globignore<'a>(raw: &'a [u8], b: &Budget) -> Result<KVec<&'a [u8]>,
 ### 7.1 `kernel-test` commands (`kernel/src/fiber/testcmd.rs`)
 
 Add two test-only commands (compiled **only** under `cfg(feature = "test-commands")`, zero bytes in production
-`kernel.core.wasm`), charging fiber `tick()` via the `work` closure:
+`kernel.core.wasm`). Both dispatch from the built `Fiber::exec_test` in `testcmd.rs` (extend its `CMDS`
+table); their `work` closure charges the aggregate counter through `Fiber::charge_work(units)`, mapping
+`Err(Fail::Work)` to `MatchError::FuelExhausted` / `GlobError::FuelExhausted`. Fuel-slice `tick()` is not
+usable inside these synchronous test commands; long scans are bounded by `maxWorkUnits` instead, exactly as
+gate 5 asserts (`limitName: "maxWorkUnits"`, exit `126` through the normal `Fail::Work` finish).
 
 1. **`__regex <mode:bre-grep|bre-sed|bre-expr|ere|fixed|perl> <flags> <pattern> [replacement]`**
    - `<flags>`: `-` or any combination of `i` (`ignore_case`), `m` (`multiline`), `s` (`dot_all`), `w`
@@ -601,9 +629,14 @@ Add two test-only commands (compiled **only** under `cfg(feature = "test-command
        when `g` is set) and writes transformed output.
 2. **`__glob <op:match|strip-prefix|strip-prefix-greedy|strip-suffix|strip-suffix-greedy|replace|replace-all|globstar-check|globignore> <flags> <pattern> [arg1] [arg2]`**
    - `<flags>`: `-` or combination of `e` (`extglob`), `i` (`nocase`), `p` (`pathname`), `d` (`dotglob`).
-   - Executes the corresponding `kernel::glob` function, printing the result (`match\n` / `no\n` with exit `0`
-     on `match` op to mirror `case` probe, stripped/replaced string + `\n`, or `126` with
-     `bash: Glob pattern has too many ** segments (max 5)\n` on `TooManyGlobstars`).
+   - Executes the corresponding `kernel::glob` function. The `match` op prints `match\n` or `no\n` and
+     exits `0` in both cases (mirroring the `case ... echo match/no` probe, whose exit is `echo`'s). Strip
+     and replace ops print the resulting string + `\n` with exit `0` (`Ok(None)` prints the subject
+     unchanged). `TooManyGlobstars` on any op finishes with exit `126`, empty stdout, and
+     `bash: Glob pattern has too many ** segments (max 5)\n` on stderr (no `?` in `result.env`, matching the
+     reference limit finish). `ExtglobDepthExceeded` and `InvalidCharacterRange` print `__glob: <tag>\n` on
+     stderr with exit `2` (test-harness outcomes only; no oracle case uses them). `FuelExhausted` and `Mem`
+     finish as `Fail::Work` / `Fail::Mem` (exit `126`).
 
 ### 7.2 Test-only parity adapter (`harness/parity/l8a-adapter.mjs`)
 
@@ -611,12 +644,20 @@ Because L8a branches from `main` in W4 before `grep`, `shopt`, `case`, and `${va
 `test/parity/l8a.test.mjs` passes `harness/parity/l8a-adapter.mjs` to `defineParityTests`:
 - `create(init)` instantiates `Bash` on `kernel-test` (`import { T } from "../../test/kt.mjs"`, identical
   `files`/`env`/`cwd`/`profile` setup to `sentropic-adapter.mjs`).
-- `exec(step)` recognizes the three canonical step forms used in `test/cases/l8a/*.case.json`:
-  1. `grep [-E|-F|-P] [-i] [-w] [-x] [-o] [-v] [-c] [-n] -- '<pattern>'` -> invokes `__regex` with the mapped
-     mode, flags, `<pattern>`, and `step.stdin`.
-  2. `( [shopt -s ...;] case '<subj>' in <pat>) echo match ;; *) echo no ;; esac )` -> invokes
-     `__glob match <flags> '<pat>' '<subj>'`.
-  3. `( shopt -s globstar; echo <path-with-globstars> )` -> invokes `__glob globstar-check - '<path>'`.
+- `exec(step)` recognizes exactly the three canonical step forms used in `test/cases/l8a/*.case.json`; any
+  other step text fails the test (counted `notCovered`, never silently passed). Quoting helpers, used in
+  both directions: `unquote(s)` decodes one shell single-quoted token (strip the outer quotes, replace each
+  `'\''` sequence with `'`), and `quote(s)` encodes as `'` + `s` with every `'` replaced by `'\''` + `'`.
+  Patterns and subjects are always passed to `__regex`/`__glob` through `quote(...)` in the generated
+  script text, never through exec `env` (which would leak adapter variables into `result.env`):
+  1. `^grep( -[EFPiwxovcn]+)* -- ('(?:[^']|'\\'')*')$` -> mode from `-E`/`-F`/`-P` (absent = `bre-grep`),
+     flags from the remaining letters, pattern `unquote(group)`, stdin `step.stdin`; generated script
+     `__regex <mode> <flags|-> <quote(pattern)>`.
+  2. `^\( (shopt -s ([a-z ]+); )?case ('(?:[^']|'\\'')*') in (.*)\) echo match ;; \*\) echo no ;; esac \)$`
+     -> subject `unquote(group)`, pattern = group 4 up to the **last** `) echo match` (extglob patterns
+     contain their own `)` bytes); flags from the `shopt` names (`extglob` -> `e`, `nocasematch` -> `i`);
+     generated script `__glob match <flags|-> <quote(pattern)> <quote(subject)>`.
+  3. `^\( shopt -s globstar; echo (\S+) \)$` -> generated script `__glob globstar-check - <quote(path)>`.
 - Because every step in `test/cases/l8a/*.case.json` either runs `grep` or runs inside a `( ... )` subshell in
   `just-bash@3.6.0`, `result.env` (`?` + the 12 default variables, with `BASHOPTS` unmutated) and `fs` (`{}`)
   match `kernel-test` identically without special-casing `env` or `fs`! Once L4, L5, and L9a-1 merge,
@@ -630,8 +671,8 @@ Because L8a branches from `main` in W4 before `grep`, `shopt`, `case`, and `${va
 | 2 | `bre-groups-and-alt` | `grep -- 'a\(bc\)*d\|e'` and `grep -- '\(*abc\)'` + `grep -- '*abc'` (leading/post-`\(` `*` is literal) |
 | 3 | `bre-intervals` | `grep -- 'a\{2,3\}b'` vs `grep -- 'a\{,2\}b'` (comma-first is literal in `grep` BRE) |
 | 4 | `bre-plus-qmark-literal` | `grep -- 'a\+b'` and `grep -- 'a\?b'` (literal `a+b` / `a?b` in `just-bash@3.6.0` `grep` BRE) |
-| 5 | `ere-quantifiers-alt` | `grep -E -- '(ab)+c?d*{2,4}\|(xy\|)'` including empty alternation branch |
-| 6 | `ere-gnu-comma-interval` | `grep -Eo -- 'a{,2}b'` (`{,2}` = `{0,2}`) |
+| 5 | `ere-quantifiers-alt` | `grep -E -- '(ab)+c?d{2,4}\|(xy\|)'` including empty alternation branch |
+| 6 | `ere-comma-interval-literal` | `grep -E -- 'a{,2}b'` on `"a{,2}b\nab\naab\nb\n"` (comma-first interval is literal text outside `sed`; only the first line matches). The `sed` form is covered natively in gate 6, since the adapter has no `sed` step form |
 | 7 | `ere-anchors-and-escapes` | `grep -E -- '^\[a\.b\]\$$'` and `\t`, `\w`, `\W`, `\s`, `\S`, `\d`, `\D` |
 | 8 | `fixed-strings-multiline` | `grep -F -- 'a*b'` and multi-needle `-F`, `-Fi`, `-Fw`, `-Fx` |
 | 9 | `flags-i-w-x-v-c-n` | `grep -Eiw -- 'cat'`, `grep -Ex -- '[0-9]+'`, `grep -Evc -- '^#'`, `grep -En -- 'hit'` |
@@ -649,13 +690,20 @@ Because L8a branches from `main` in W4 before `grep`, `shopt`, `case`, and `${va
 | 21 | `err-invalid-syntax` | Steps: `grep -- '['`, `grep -E -- '(abc'`, `grep -E -- '[z-a]'`, `grep -E -- '[[:bogus:]a]'` (all `exit 2`) |
 | 22 | `unicode-ignore-case` | `grep -Ei -- 'café'` on `"CAFÉ\ncafé\ncafe\n"` and astral UTF-8 dot/negated-bracket matching |
 | 23 | `glob-wildcards-escapes` | `( case 'a*b?c' in 'a*b'?c) echo match ;; *) echo no ;; esac )` and `*`, `?`, `\?`, `\*` |
-| 24 | `glob-brackets-negation` | `( case 'b' in [!a]) echo match ;; *) echo no ;; esac )`, `[^a]`, `[]-]`, `[[:digit:]]`, `[[:bogus:]b]` (`match`!) |
+| 24 | `glob-brackets-negation` | Steps `( case '<s>' in <p>) echo match ;; *) echo no ;; esac )` for (`b`, `[^a]`) -> `match`, (`b`, `[!a]`) -> `no` (`!` is a literal member), (`!`, `[!a]`) -> `match`, (`]`, `[]-]`) -> `match`, (`7`, `[[:digit:]]`) -> `match` |
 | 25 | `glob-nocasematch` | `( shopt -s nocasematch; case 'HeLLo.TXT' in *.txt) echo match ;; *) echo no ;; esac )` |
 | 26 | `extglob-at-star` | `( shopt -s extglob; case 'abab' in @(a\|ab)) echo match ;; *) echo no ;; esac )` and `*(a\|b)` |
 | 27 | `extglob-plus-qmark` | `( shopt -s extglob; case 'aaab' in +(a)b) echo match ;; *) echo no ;; esac )` and `?(pre_)main` |
 | 28 | `extglob-nested` | `( shopt -s extglob; case 'foo_12_bar' in @(foo\|baz)_+([0-9])_?(bar\|qux)) echo match ;; *) echo no ;; esac )` |
-| 29 | `glob-revrange-nomatch` | `( case 'm' in [z-a]) echo match ;; *) echo no ;; esac )` (`no`, `exit 0`) |
+| 29 | `glob-bracket-quote-members` | `( case 'm' in ['a-z']) echo match ;; *) echo no ;; esac )` -> `match` and `( case '-' in ['a-z']) ... )` -> `no` (`'` quotes nothing inside brackets; the `a-z` range still forms) |
 | 30 | `glob-globstar-cap` | `( shopt -s globstar; echo /**/**/**/**/**/** )` (`exit 126`, `bash: Glob pattern has too many ** segments (max 5)\n`) |
+
+Reading the table: a `\|` sequence inside a quoted pattern is two script bytes (backslash, pipe) in BRE rows
+and one pipe byte (Markdown table escaping) in ERE, Perl, `case`, and extglob rows; Room 1 writes the case
+files accordingly. Deliberately absent from this list, because the reference throws an internal error out of
+`exec` on them (`upstream-defect`, EVOL Annex E.7): any `case` step whose pattern contains `!(...)`, an
+unknown POSIX class, or a reversed range. Our behavior for those inputs is defined by the native gates in
+section 8, not by snapshots.
 
 ## 8. Executable exit gates
 
@@ -699,9 +747,11 @@ All gates run in `make check` (`cargo test` + `node tools/run-tests.mjs`):
    - `strip_prefix` / `strip_suffix` linear-time check on `"a".repeat(50_000) + "b"` with `*a*` completing in
      `< 50 ms`.
    - `replace_glob` with `EmptyAdvance::ShellExpansion` (`v="abc"`, pattern `"*"`, replacement `"X"`, `All` ->
-     `"X"`, and `v=""` -> `"X"`).
-   - `BreDialect::Sed` (`\+`, `\?`, `\|`, `\{,2\}`, mid-pattern literal `^` and `$`, `ReplaceStyle::Sed` with `&`
-     and `\1`..`\9`, and `PosixSed` empty-match skip on `s/a*/X/g` over `"aba"` -> `"XbX"`!).
+     `"X"`, and `v=""` -> `""`, matching the reference: an empty subject produces no replacement).
+   - `BreDialect::Sed` and `comma_first_interval` (`\+`, `\?`, `\|`, `\{,2\}` in BRE and `{,2}` in `sed -E`
+     form, with the same `{,2}` staying literal when the flag is off, mid-pattern literal `^` and `$`,
+     `ReplaceStyle::Sed` with `&` and `\1`..`\9`, and `PosixSed` empty-match skip on `s/a*/X/g` over `"aba"`
+     -> `"XbX"`), plus `BreDialect::Expr` (`a(b)c` on `abc` anchored with capture `b`; `a\(b\)c` no match).
    - `Prefilter` extraction (`Exact` on `"hello.*"` and `Substring` on `".*needle.*"`).
 7. **Deterministic seeded regex/glob fuzz slice (`test/l8a-fuzz.test.mjs` + native `cargo test`).** Fixed seed
    `0x5345_4E54_4C38_415A` generating **>= 1 500** random BRE/ERE/Perl/Glob/Extglob patterns and UTF-8 + raw-byte
