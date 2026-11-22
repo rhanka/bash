@@ -1,12 +1,27 @@
 //! Test-only commands (spec 5.3). Compiled only with the `test-commands` feature, so the release kernel
 //! does not contain these names.
 use super::*;
+use crate::base64::{self, Base64DecodeMode, Base64Error, Base64Limits};
+use crate::format::{
+    format_printf, format_strftime, FormatLimitKind, PrintfOpts,
+};
 use crate::fs::{BatchOk, Code, Ok_, Op};
+use crate::hash::{Md5, Sha1, Sha256};
+use crate::limits::{I_ARRAY_ELEMENTS, I_OUTPUT_SIZE, I_STRING_LENGTH};
+use crate::num::{
+    fmt_f64_exp, fmt_f64_fixed, fmt_f64_js, fmt_f64_prec, parse_arith_literal,
+    parse_f64_prefix, parse_f64_strict, parse_printf_int, ArithNumError, FloatFmtError,
+};
 use crate::shell::{G_ENTROPY, G_HOST_FS, G_NETWORK, G_REAL_CLOCK, G_REAL_SLEEP};
 use crate::util::parse_u64;
 
 /// The names of the test-only commands, matched by index so that they exist as data in this build only.
-const CMDS: [&[u8]; 20] = [b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write", b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap", b"__fsalloc", b"__work", b"__walk", b"__fsbatch"];
+const CMDS: [&[u8]; 25] = [
+    b"__out", b"__err", b"__stdin", b"__alloc", b"__spin", b"__exit", b"__setenv", b"__write",
+    b"__cat", b"__hostfs", b"__lazy", b"__fetch", b"__sleep", b"__clock", b"__entropy", b"__trap",
+    b"__fsalloc", b"__work", b"__walk", b"__fsbatch",
+    b"__num", b"__printf", b"__strftime", b"__hash", b"__base64",
+];
 const C_OUT: usize = 0;
 const C_ERR: usize = 1;
 const C_STDIN: usize = 2;
@@ -27,6 +42,11 @@ const C_FSALLOC: usize = 16;
 const C_WORK: usize = 17;
 const C_WALK: usize = 18;
 const C_FSBATCH: usize = 19;
+const C_NUM: usize = 20;
+const C_PRINTF: usize = 21;
+const C_STRFTIME: usize = 22;
+const C_HASH: usize = 23;
+const C_BASE64: usize = 24;
 
 const T_HOSTFS: u8 = 1;
 const T_LAZY: u8 = 2;
@@ -351,9 +371,571 @@ impl Fiber {
                 #[cfg(not(target_arch = "wasm32"))]
                 panic!("__trap");
             }
+            C_NUM => self.exec_test_num(name, args),
+            C_PRINTF => self.exec_test_printf(name, args),
+            C_STRFTIME => self.exec_test_strftime(name, args),
+            C_HASH => self.exec_test_hash(name, args),
+            C_BASE64 => self.exec_test_base64(name, args),
             _ => return None,
         };
         Some(flow)
+    }
+
+    fn emit_exit(&mut self, exit: i32, chan: Chan, bytes: &[u8]) -> Flow {
+        self.last_exit = exit;
+        let r = self.write_out(chan, bytes);
+        self.t_ok(r)
+    }
+
+    fn limit_yield(&mut self, limit_name: &str, msg: core::fmt::Arguments<'_>) -> Flow {
+        self.finish_early(126, Status::LimitExceeded, Some(limit_name), Some(msg));
+        Flow::Yield
+    }
+
+    fn parse_num_arg(raw: &[u8], bits: bool) -> Option<f64> {
+        if bits && (raw.starts_with(b"0x") || raw.starts_with(b"0X")) {
+            let s = core::str::from_utf8(&raw[2..]).ok()?;
+            let u = u64::from_str_radix(s, 16).ok()?;
+            Some(f64::from_bits(u))
+        } else {
+            parse_f64_strict(raw)
+        }
+    }
+
+    fn parse_i64_signed(raw: &[u8]) -> Option<i64> {
+        let s = core::str::from_utf8(raw).ok()?;
+        s.parse::<i64>().ok()
+    }
+
+    fn exec_test_num(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let Some(op) = args.first().copied() else {
+            return self.t_bad(name);
+        };
+        let Some(arg1) = args.get(1).copied() else {
+            return self.t_bad(name);
+        };
+        match op {
+            b"js" => {
+                let is_bits = args.get(2).copied() == Some(b"bits".as_slice());
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                let mut s = KString::new_in(&self.scratch);
+                if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+            }
+            b"fixed" => {
+                let Some(prec_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(prec_u64) = parse_u64(prec_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(prec) = usize::try_from(prec_u64) else {
+                    return self.t_bad(name);
+                };
+                let is_bits = args.get(3).copied() == Some(b"bits".as_slice());
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_fixed(val, prec, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"exp" => {
+                let Some(prec_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(prec_u64) = parse_u64(prec_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(prec) = usize::try_from(prec_u64) else {
+                    return self.t_bad(name);
+                };
+                let flags = args.get(3).copied().unwrap_or(b"-");
+                let (is_bits, upper, two_digit) = if flags == b"bits" {
+                    (true, false, false)
+                } else {
+                    (
+                        flags.contains(&b'b'),
+                        flags.contains(&b'u'),
+                        flags.contains(&b'2'),
+                    )
+                };
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_exp(val, prec, upper, two_digit, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"prec" => {
+                let Some(sig_raw) = args.get(2).copied() else {
+                    return self.t_bad(name);
+                };
+                let Some(sig_u64) = parse_u64(sig_raw) else {
+                    return self.t_bad(name);
+                };
+                let Ok(sig) = usize::try_from(sig_u64) else {
+                    return self.t_bad(name);
+                };
+                let flags = args.get(3).copied().unwrap_or(b"-");
+                let (is_bits, upper, keep_zeros, two_digit) = if flags == b"bits" {
+                    (true, false, true, false)
+                } else {
+                    (
+                        flags.contains(&b'b'),
+                        flags.contains(&b'u'),
+                        flags.contains(&b'k'),
+                        flags.contains(&b'2'),
+                    )
+                };
+                let Some(val) = Self::parse_num_arg(arg1, is_bits) else {
+                    return self.t_bad(name);
+                };
+                match fmt_f64_prec(val, sig, upper, keep_zeros, two_digit, &self.scratch) {
+                    Ok(mut s) => {
+                        if let Err(e) = s.try_push('\n') {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    Err(FloatFmtError::PrecisionRange) => {
+                        self.emit_exit(2, Chan::Stderr, b"__num: precision range\n")
+                    }
+                    Err(FloatFmtError::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+                }
+            }
+            b"arith" => match parse_arith_literal(arg1) {
+                Ok(val) => {
+                    let mut s = KString::new_in(&self.scratch);
+                    if let Err(e) = fmt_f64_js(val, &mut s).and_then(|()| s.try_push('\n')) {
+                        return Flow::Fail(Fail::Mem(e));
+                    }
+                    self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                }
+                Err(ArithNumError::ValueTooGreatForBase) => {
+                    self.emit_exit(1, Chan::Stderr, b"bash: value too great for base\n")
+                }
+                Err(ArithNumError::InvalidNumber) => {
+                    self.emit_exit(1, Chan::Stderr, b"bash: invalid number\n")
+                }
+            },
+            b"printf-int" => {
+                let r = parse_printf_int(arg1);
+                let mut s = KString::new_in(&self.scratch);
+                if let Err(e) = fmt_f64_js(r.value, &mut s)
+                    .and_then(|()| s.try_push('|'))
+                    .and_then(|()| s.try_push(if r.invalid { '1' } else { '0' }))
+                    .and_then(|()| s.try_push('\n'))
+                {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+                self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+            }
+            b"f64-prefix" | b"f64-strict" => {
+                let parsed = if op == b"f64-prefix" {
+                    parse_f64_prefix(arg1)
+                } else {
+                    parse_f64_strict(arg1)
+                };
+                match parsed {
+                    Some(v) => {
+                        let mut s = KString::new_in(&self.scratch);
+                        if let Err(e) = fmt_f64_js(v, &mut s).and_then(|()| s.try_push('\n')) {
+                            return Flow::Fail(Fail::Mem(e));
+                        }
+                        self.emit_exit(0, Chan::Stdout, s.as_str().as_bytes())
+                    }
+                    None => self.emit_exit(1, Chan::Stdout, b"none\n"),
+                }
+            }
+            _ => self.t_bad(name),
+        }
+    }
+
+    fn format_limit_flow(&mut self, err: FormatLimitKind, work_err: Option<Fail>) -> Flow {
+        if let Some(fail) = work_err {
+            return Flow::Fail(fail);
+        }
+        match err {
+            FormatLimitKind::Mem(e) => Flow::Fail(Fail::Mem(e)),
+            FormatLimitKind::EscapedStringSize { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: escaped string size limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::Width { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: format width limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::Precision { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: format precision limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::AwkFloatPrecision => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: printf floating-point precision limit exceeded (100 digits)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::FormattedValueSize { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: formatted value size limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::OutputSize { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: printf: output size limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::StrftimeOutputSize { limit_bytes } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: strftime: output size limit exceeded ({limit_bytes} bytes)\n")),
+                );
+                Flow::Yield
+            }
+            FormatLimitKind::StrftimeIterations { max_ops } => {
+                self.finish_early(
+                    126,
+                    Status::LimitExceeded,
+                    Some("maxStringLength"),
+                    Some(format_args!("bash: strftime: iteration limit exceeded ({max_ops})\n")),
+                );
+                Flow::Yield
+            }
+        }
+    }
+
+    fn exec_test_printf(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let mut pos = 0usize;
+        let mut saw_dash_dash = false;
+        let mut tz_override: Option<&[u8]> = None;
+
+        while pos < args.len() {
+            if args[pos] == b"--" {
+                saw_dash_dash = true;
+                pos += 1;
+                break;
+            }
+            if args[pos] == b"--tz" {
+                if pos + 1 >= args.len() {
+                    return self.t_bad(name);
+                }
+                tz_override = Some(args[pos + 1]);
+                pos += 2;
+                continue;
+            }
+            break;
+        }
+
+        if pos >= args.len() {
+            return self.emit_exit(
+                if saw_dash_dash { 1 } else { 2 },
+                Chan::Stderr,
+                b"printf: usage: printf format [arguments]\n",
+            );
+        }
+
+        let fmt = args[pos];
+        let val_args = &args[pos + 1..];
+        let tz = tz_override.or_else(|| self.env.get(b"TZ").map(|e| e.value.as_slice()));
+        let max_output_bytes = (self.shell.lim.vals[I_STRING_LENGTH]
+            .min(self.shell.lim.vals[I_OUTPUT_SIZE])) as usize;
+        let now_sec = (self.shell.virt_ms.get() / 1000) as i64;
+        let opts = PrintfOpts {
+            tz,
+            now_sec,
+            start_sec: 0,
+            max_output_bytes,
+        };
+
+        let work_cell = &self.work;
+        let work_cap = self.shell.lim.vals[crate::limits::I_WORK_UNITS];
+        let mut work_err: Option<Fail> = None;
+        let mut charge = |units: u64| -> Result<(), ()> {
+            let Some(next) = work_cell.get().checked_add(units) else {
+                work_err = Some(Fail::Work);
+                return Err(());
+            };
+            if next > work_cap {
+                work_err = Some(Fail::Work);
+                return Err(());
+            }
+            work_cell.set(next);
+            Ok(())
+        };
+
+        let res = format_printf(fmt, val_args, &opts, &self.scratch, &mut charge);
+        match res {
+            Ok(out) => {
+                if let Err(f) = self.write_out(Chan::Stdout, out.bytes.as_slice()) {
+                    return Flow::Fail(f);
+                }
+                if out.had_error {
+                    if let Err(f) = self.write_out(Chan::Stderr, out.stderr.as_str().as_bytes()) {
+                        return Flow::Fail(f);
+                    }
+                }
+                self.last_exit = i32::from(out.had_error);
+                Flow::Next
+            }
+            Err(err) => self.format_limit_flow(err, work_err),
+        }
+    }
+
+    fn exec_test_strftime(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let (Some(sec_raw), Some(fmt)) = (args.first(), args.get(1)) else {
+            return self.t_bad(name);
+        };
+        let Some(epoch_sec) = Self::parse_i64_signed(sec_raw) else {
+            return self.t_bad(name);
+        };
+        let tz = args
+            .get(2)
+            .copied()
+            .or_else(|| self.env.get(b"TZ").map(|e| e.value.as_slice()));
+        let max_ops = (self.shell.lim.vals[6] as usize).max(1024);
+        let max_out = (self.shell.lim.vals[I_STRING_LENGTH]
+            .min(self.shell.lim.vals[I_OUTPUT_SIZE])) as usize;
+
+        let work_cell = &self.work;
+        let work_cap = self.shell.lim.vals[crate::limits::I_WORK_UNITS];
+        let mut work_err: Option<Fail> = None;
+        let mut charge = |units: u64| -> Result<(), ()> {
+            let Some(next) = work_cell.get().checked_add(units) else {
+                work_err = Some(Fail::Work);
+                return Err(());
+            };
+            if next > work_cap {
+                work_err = Some(Fail::Work);
+                return Err(());
+            }
+            work_cell.set(next);
+            Ok(())
+        };
+
+        match format_strftime(fmt, epoch_sec, tz, max_ops, max_out, &self.scratch, &mut charge) {
+            Ok(mut out) => {
+                if let Err(e) = out.try_push(b'\n') {
+                    return Flow::Fail(Fail::Mem(e));
+                }
+                self.emit_exit(0, Chan::Stdout, out.as_slice())
+            }
+            Err(err) => self.format_limit_flow(err, work_err),
+        }
+    }
+
+    fn exec_test_hash(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let Some(alg) = args.first().copied() else {
+            return self.t_bad(name);
+        };
+        let label = args.get(1).copied().unwrap_or(b"-");
+        let label_str = core::str::from_utf8(label).unwrap_or("-");
+
+        enum Hasher {
+            Md5(Md5),
+            Sha1(Sha1),
+            Sha256(Sha256),
+        }
+        let mut hasher = match alg {
+            b"md5" => Hasher::Md5(Md5::new()),
+            b"sha1" => Hasher::Sha1(Sha1::new()),
+            b"sha256" => Hasher::Sha256(Sha256::new()),
+            _ => return self.t_bad(name),
+        };
+
+        let mut fed = 0usize;
+        for chunk in self.stdin.chunks() {
+            match &mut hasher {
+                Hasher::Md5(h) => h.update(chunk),
+                Hasher::Sha1(h) => h.update(chunk),
+                Hasher::Sha256(h) => h.update(chunk),
+            }
+            fed += chunk.len();
+            if fed >= 4096 {
+                let units = (fed / 4096) as u64;
+                fed %= 4096;
+                if let Err(f) = self.charge_work(units) {
+                    return Flow::Fail(f);
+                }
+            }
+        }
+        if fed > 0 {
+            if let Err(f) = self.charge_work(1) {
+                return Flow::Fail(f);
+            }
+        }
+
+        let mut line = KString::new_in(&self.scratch);
+        let write_res = match hasher {
+            Hasher::Md5(h) => {
+                let hex = Md5::hex_lower(&h.finalize());
+                let hex_s = core::str::from_utf8(&hex).unwrap();
+                write!(line, "{hex_s}  {label_str}\n")
+            }
+            Hasher::Sha1(h) => {
+                let hex = Sha1::hex_lower(&h.finalize());
+                let hex_s = core::str::from_utf8(&hex).unwrap();
+                write!(line, "{hex_s}  {label_str}\n")
+            }
+            Hasher::Sha256(h) => {
+                let hex = Sha256::hex_lower(&h.finalize());
+                let hex_s = core::str::from_utf8(&hex).unwrap();
+                write!(line, "{hex_s}  {label_str}\n")
+            }
+        };
+        if write_res.is_err() {
+            if let Some(e) = line.take_fmt_error() {
+                return Flow::Fail(Fail::Mem(e));
+            }
+        }
+        self.emit_exit(0, Chan::Stdout, line.as_str().as_bytes())
+    }
+
+    fn exec_test_base64(&mut self, name: &[u8], args: &[&[u8]]) -> Flow {
+        let Some(mode) = args.first().copied() else {
+            return self.t_bad(name);
+        };
+        let total = usize::try_from(self.stdin.len()).unwrap_or(usize::MAX);
+        let mut input = match KBytes::with_capacity_in(total, &self.scratch) {
+            Ok(v) => v,
+            Err(e) => return Flow::Fail(Fail::Mem(e)),
+        };
+        for chunk in self.stdin.chunks() {
+            if let Err(e) = input.try_extend_from_slice(chunk) {
+                return Flow::Fail(Fail::Mem(e));
+            }
+        }
+
+        let limits = Base64Limits {
+            max_string_length: self.shell.lim.vals[I_STRING_LENGTH] as usize,
+            max_output_size: self.shell.lim.vals[I_OUTPUT_SIZE] as usize,
+            max_array_elements: self.shell.lim.vals[I_ARRAY_ELEMENTS] as usize,
+        };
+
+        let work_cell = &self.work;
+        let work_cap = self.shell.lim.vals[crate::limits::I_WORK_UNITS];
+        let mut charge = |units: u64| -> Result<(), ()> {
+            let Some(next) = work_cell.get().checked_add(units) else {
+                return Err(());
+            };
+            if next > work_cap {
+                return Err(());
+            }
+            work_cell.set(next);
+            Ok(())
+        };
+
+        let (res, chan) = match mode {
+            b"encode" => {
+                let wrap_cols = match args.get(1) {
+                    Some(raw) => match parse_u64(raw).and_then(|v| usize::try_from(v).ok()) {
+                        Some(w) => w,
+                        None => return self.t_bad(name),
+                    },
+                    None => 76,
+                };
+                (
+                    base64::encode(input.as_slice(), wrap_cols, limits, &self.scratch, &mut charge),
+                    Chan::Stdout,
+                )
+            }
+            b"decode" => (
+                base64::decode(
+                    input.as_slice(),
+                    Base64DecodeMode::Permissive,
+                    limits,
+                    &self.scratch,
+                    &mut charge,
+                ),
+                Chan::StdoutBytes,
+            ),
+            b"decode-strict" => (
+                base64::decode(
+                    input.as_slice(),
+                    Base64DecodeMode::Strict,
+                    limits,
+                    &self.scratch,
+                    &mut charge,
+                ),
+                Chan::StdoutBytes,
+            ),
+            _ => return self.t_bad(name),
+        };
+
+        match res {
+            Ok(out) => self.emit_exit(0, chan, out.as_slice()),
+            Err(Base64Error::InvalidInput) => {
+                self.emit_exit(1, Chan::Stderr, b"base64: invalid input\n")
+            }
+            Err(Base64Error::FuelExhausted) => Flow::Fail(Fail::Work),
+            Err(Base64Error::Mem(e)) => Flow::Fail(Fail::Mem(e)),
+            Err(Base64Error::WrappedLineLimit { limit }) => self.limit_yield(
+                "maxArrayElements",
+                format_args!("bash: base64: wrapped line limit exceeded ({limit})\n"),
+            ),
+            Err(Base64Error::EncodedSizeLimit { limit }) => self.limit_yield(
+                "maxStringLength",
+                format_args!("bash: base64: encoded size limit exceeded ({limit} bytes)\n"),
+            ),
+            Err(Base64Error::DecodedSizeLimit { limit }) => self.limit_yield(
+                "maxStringLength",
+                format_args!("bash: base64: decoded size limit exceeded ({limit} bytes)\n"),
+            ),
+            Err(Base64Error::OutputSizeLimit { limit }) => self.limit_yield(
+                "maxOutputSize",
+                format_args!("bash: base64: output size limit exceeded ({limit} bytes)\n"),
+            ),
+        }
     }
 
     fn fs_exit(&mut self, r: Result<(), Code>, path: &[u8]) -> Flow {
