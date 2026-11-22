@@ -2,7 +2,7 @@
 use super::expand::{Argument, Delimiters, Expander, Scalar, BYTE_CHUNK};
 use super::syntax::{assignment, Command, Link, PartKind, Pipe, Span};
 use super::*;
-use crate::cmd::{coverage_id, CommandSpec, COVERAGE_FEATURES};
+use crate::cmd::{CommandSpec, COVERAGE_FEATURES};
 use crate::fs::{BatchOp, Code, HostKind, HostStat, Kind};
 use crate::mem::KMap;
 use crate::util::OrderedNames;
@@ -446,12 +446,7 @@ impl Fiber {
     }
 
     fn hit(&mut self, feature: &str) -> Result<(), Fail> {
-        if self.shell.coverage {
-            if let Some(id) = coverage_id(feature) {
-                self.coverage.try_push(id)?;
-            }
-        }
-        Ok(())
+        self.hit_coverage(feature)
     }
 
     fn expander<'a>(&'a self, program: &'a Program) -> Expander<'a> {
@@ -647,7 +642,7 @@ impl Fiber {
                     .clone()
                     .find(|&id| &COVERAGE_FEATURES[id].as_bytes()[13..] == name)
                 {
-                    self.coverage.try_push(id as u16)?;
+                    self.hit_coverage_id(id as u16)?;
                 }
             }
             if let Some(term) = self.vm.functions.get(name).copied() {
@@ -657,6 +652,7 @@ impl Fiber {
                     return Err(Fail::CallDepth(bytes_in(func.as_bytes(), &self.live)?));
                 }
                 let args = self.finish_dispatch(args, last_arg)?;
+                self.hit("bash:cmd:Group")?;
                 self.vm.call_depth += 1;
                 let previous = core::mem::replace(&mut self.params, args);
                 self.vm.frames.try_push(Frame::FuncCall(previous))?;

@@ -40,7 +40,7 @@ const loader = {
   },
 };
 
-const { Bash, InMemoryFs } = createFacade(loader);
+const { Bash, InMemoryFs } = createFacade(loader, { browser: true });
 
 export { Bash, InMemoryFs, defineCommand, getCommandNames, getNetworkCommandNames, getPythonCommandNames, getJavaScriptCommandNames };
 export { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError };

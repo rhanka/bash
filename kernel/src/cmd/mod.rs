@@ -1,8 +1,9 @@
 //! Registered kernel commands and their resumable execution contract.
 use crate::fiber::{Chan, Fail, Fiber, HostReq, Outcome};
+pub use crate::fiber::{FindTraceStats, TraceDetail, TraceEvent, TraceValue};
 use crate::fs::Vfs;
 use crate::limits::Resolved;
-use crate::mem::{KBox, KBytes, KChunks, KVec};
+use crate::mem::{Budget, KBox, KBytes, KChunks, KVec};
 use crate::util::Env;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,36 @@ impl CmdCtx<'_> {
     }
     pub fn charge_work(&mut self, units: u64) -> Result<(), Fail> {
         self.fiber.charge_work(units)
+    }
+    pub fn live_budget(&self) -> &Budget {
+        &self.fiber.live
+    }
+    pub fn should_yield(&self) -> bool {
+        self.fiber.should_yield_observability() || !self.fiber.tick()
+    }
+    pub fn coverage_enabled(&self) -> bool {
+        self.fiber.coverage_enabled()
+    }
+    pub fn hit_coverage(&mut self, feature: &str) -> Result<(), Fail> {
+        self.fiber.hit_coverage(feature)
+    }
+    pub fn trace_enabled(&self) -> bool {
+        self.fiber.trace_enabled()
+    }
+    pub fn trace_clock_req(&self) -> Option<HostReq> {
+        self.fiber.trace_enabled().then_some(HostReq::TraceClock)
+    }
+    pub fn emit_trace(&mut self, event: TraceEvent) -> Result<(), Fail> {
+        self.fiber.push_trace(event)
+    }
+    pub fn emit_find_trace(
+        &mut self,
+        raw_search_path: &[u8],
+        start_ns: u64,
+        end_ns: u64,
+        stats: &FindTraceStats,
+    ) -> Result<(), Fail> {
+        self.fiber.emit_find_trace(raw_search_path, start_ns, end_ns, stats)
     }
 }
 

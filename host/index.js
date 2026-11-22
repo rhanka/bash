@@ -4,7 +4,7 @@ import { createFacade, defineCommand, getCommandNames, getJavaScriptCommandNames
 import { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError } from "./core/errors.js";
 import * as bytes from "./core/bytes.js";
 
-const { Bash, InMemoryFs } = createFacade(nodeLoader);
+const { Bash, InMemoryFs } = createFacade(nodeLoader, { browser: false });
 
 export { Bash, InMemoryFs, defineCommand, getCommandNames, getNetworkCommandNames, getPythonCommandNames, getJavaScriptCommandNames };
 export { AsyncCapabilityError, ExecutionAbortedError, KernelPoisonedError, NotSupportedError };

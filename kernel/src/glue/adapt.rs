@@ -345,6 +345,7 @@ fn create_shell(vfs: KRc<Vfs>, config: &T::ShellConfig) -> Result<Shell, T::Kern
         custom_commands: &custom, env: &env, cwd: config.cwd.as_deref(),
         default_layout: config.default_layout, commands: commands.as_deref(),
         process_info: config.process_info.as_ref().map(|p| ProcessInfo { pid: p.pid, ppid: p.ppid, uid: p.uid, gid: p.gid }),
+        trace: config.trace,
         coverage: config.coverage,
     };
     Shell::create(vfs, &cfg, mem::usage().ceiling).map_err(create_err)
@@ -536,6 +537,7 @@ fn req_out(r: &HostReq) -> Result<T::HostReq, MemError> {
         }),
         HostReq::Sleep(ms) => T::HostReq::Sleep(*ms),
         HostReq::Clock => T::HostReq::Clock,
+        HostReq::TraceClock => T::HostReq::TraceClock,
         HostReq::Entropy(n) => T::HostReq::Entropy(*n),
     })
 }
@@ -625,7 +627,7 @@ fn outcome_in(o: &T::HostOutcome) -> Outcome<'_> {
         T::HostOutcome::Data(d) => Outcome::Data(d),
         T::HostOutcome::CommandExit(n) => Outcome::CommandExit(*n),
         T::HostOutcome::Fetched(r) => Outcome::Fetched(r.status),
-        T::HostOutcome::Clock(c) => Outcome::Clock(c.wall_ms),
+        T::HostOutcome::Clock(c) => Outcome::Clock { wall_ms: c.wall_ms, monotonic_ns: c.monotonic_ns },
         T::HostOutcome::Completed => Outcome::Completed,
         T::HostOutcome::Denied => Outcome::Denied,
         T::HostOutcome::LimitExceeded(n) => Outcome::LimitExceeded(n),
@@ -725,8 +727,17 @@ impl E::GuestFiber for FiberRes {
     fn take_stderr(&self, max: u32) -> Vec<u8> {
         take_output(&mut self.0.borrow_mut(), true, max as usize)
     }
-    fn take_trace(&self, _max: u32) -> Vec<T::TraceEvent> {
-        Vec::new()
+    fn take_trace(&self, max: u32) -> Vec<T::TraceEvent> {
+        let mut f = self.0.borrow_mut();
+        let limit = (max as usize).min(fiber::TRACE_BUF_CAP);
+        if limit == 0 || f.trace_events(1).is_empty() {
+            return Vec::new();
+        }
+        let out = encode_trace(f.trace_events(limit))
+            .or_else(|_| mem::reserve_scope(|| encode_trace(f.trace_events(1))))
+            .unwrap_or_default();
+        f.consume_trace(out.len());
+        out
     }
 
     fn take_coverage(&self, max: u32) -> Vec<u16> {
@@ -735,6 +746,44 @@ impl E::GuestFiber for FiberRes {
         f.consume_coverage(hits.len());
         hits
     }
+}
+
+fn trace_detail_out(d: &fiber::TraceDetail) -> Result<T::TraceDetail, MemError> {
+    let value = match &d.value {
+        fiber::TraceValue::Number(n) => T::TraceValue::Number(*n),
+        fiber::TraceValue::Text(b) => T::TraceValue::Text(copy(b)?),
+    };
+    Ok(T::TraceDetail {
+        key: copy_text(&d.key)?,
+        value,
+    })
+}
+
+fn trace_event_out(e: &fiber::TraceEvent) -> Result<T::TraceEvent, MemError> {
+    Ok(T::TraceEvent {
+        category: copy_text(&e.category)?,
+        name: copy_text(&e.name)?,
+        duration_ms: e.duration_ms,
+        details: collect(e.details.iter(), trace_detail_out)?,
+    })
+}
+
+fn encode_trace(events: &[fiber::TraceEvent]) -> Result<Vec<T::TraceEvent>, MemError> {
+    let out = collect(events.iter(), trace_event_out)?;
+    if !out.is_empty() {
+        let mut specs = [(0usize, 0usize, 0usize); fiber::TRACE_BUF_CAP + 1];
+        let mut n = 0;
+        specs[n] = (out.len(), 32, 8);
+        n += 1;
+        for ev in &out {
+            if !ev.details.is_empty() {
+                specs[n] = (ev.details.len(), 24, 8);
+                n += 1;
+            }
+        }
+        rt::prepare_lowering(&specs[..n])?;
+    }
+    Ok(out)
 }
 
 fn take_output(f: &mut Fiber, stderr: bool, max: usize) -> Vec<u8> {

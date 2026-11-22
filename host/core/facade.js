@@ -165,16 +165,20 @@ function seedHostCommand(fs, name) {
  * `/bin` and `/usr/bin`. Runs synchronously on a ready store, or staged on the
  * volume's single ordered queue before compilation.
  */
+function volWrite(vfs, inst, path, contents) {
+  return inst.call(() => vfs.op({
+    tag: "write-file",
+    val: { path: utf8(path), data: utf8(contents), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
+  }));
+}
+
 function seedVolumeLayout(vfs, inst, { defaultLayout, cwd, processInfo, commandNames }) {
   const mkdir = (path) => {
     const r = inst.call(() => vfs.op({ tag: "mkdir", val: { path: utf8(path), recursive: true, mode: 0o755 } }));
     if (r.tag === "err") throw fsError(r.val.code, "mkdir", path);
   };
   const write = (path, contents) => {
-    const r = inst.call(() => vfs.op({
-      tag: "write-file",
-      val: { path: utf8(path), data: utf8(contents), offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
-    }));
+    const r = volWrite(vfs, inst, path, contents);
     if (r.tag === "err") throw fsError(r.val.code, "open", path);
   };
   // Atomicity: stat every system directory before creating any, mirroring
@@ -203,13 +207,8 @@ function seedVolumeStubs(vfs, inst, names) {
   for (const name of names) {
     if (!isValidStub(name)) continue;
     try {
-      const data = utf8(stubText(name));
-      for (const dir of ["/bin", "/usr/bin"]) {
-        inst.call(() => vfs.op({
-          tag: "write-file",
-          val: { path: utf8(`${dir}/${name}`), data, offset: 0n, truncate: true, mode: 0o644, mtimeMs: 0n },
-        }));
-      }
+      const text = stubText(name);
+      for (const dir of ["/bin", "/usr/bin"]) volWrite(vfs, inst, `${dir}/${name}`, text);
     } catch {
       /* stub writes are best-effort, as in `Shell::create` */
     }
@@ -220,7 +219,7 @@ function seedVolumeStubs(vfs, inst, names) {
  * Builds the facade classes for one loader.
  * @param {{ syncModule(): any, asyncModule(): Promise<any>, precompile(source?: unknown): Promise<void> }} loader
  */
-export function createFacade(loader) {
+export function createFacade(loader, { browser = false } = {}) {
   const InMemoryFs = createInMemoryFs(loader);
   const STATE = new WeakMap();
 
@@ -238,23 +237,22 @@ export function createFacade(loader) {
       if (!PROFILE_NAMES.includes(profile)) throw fail(`executionLimitProfile: unknown profile ${String(profile)}`);
       if (v.cwd !== undefined && typeof v.cwd !== "string") throw fail("cwd must be a string");
       const userEnv = v.env === undefined ? [] : stringRecord(v.env, "env");
-      if (v.files !== undefined && !isObject(v.files)) throw fail("files must be an object");
-      if (v.executionLimits !== undefined && !isObject(v.executionLimits)) throw fail("executionLimits must be an object");
-      const overrides = Object.assign(Object.create(null), v.executionLimits ?? {});
+      for (const k of ["files", "executionLimits", "network", "processInfo", "fs"]) {
+        if (v[k] !== undefined && !isObject(v[k])) throw fail(`${k} must be an object`);
+      }
+      const overrides = Object.assign(nullObject(), v.executionLimits ?? {});
       for (const alias of ["maxCallDepth", "maxCommandCount", "maxLoopIterations"]) {
         if (v[alias] !== undefined) {
           if (typeof v[alias] !== "number") throw fail(`${alias} must be a number`);
           overrides[alias] = v[alias];
         }
       }
-      for (const [name, check] of [["fetch", "function"], ["sleep", "function"], ["trace", "function"]]) {
-        if (v[name] !== undefined && typeof v[name] !== check) throw fail(`${name} must be a function`);
+      for (const name of ["fetch", "sleep", "trace"]) {
+        if (v[name] !== undefined && typeof v[name] !== "function") throw fail(`${name} must be a function`);
       }
-      if (v.network !== undefined && !isObject(v.network)) throw fail("network must be an object");
       if (v.commands !== undefined && (!Array.isArray(v.commands) || v.commands.some((c) => typeof c !== "string"))) throw fail("commands must be an array of strings");
       if (v.logger !== undefined && (!isObject(v.logger) || typeof v.logger.info !== "function" || typeof v.logger.debug !== "function")) throw fail("logger needs info and debug functions");
       if (v.coverage !== undefined && (!isObject(v.coverage) || typeof v.coverage.hit !== "function")) throw fail("coverage needs a hit function");
-      if (v.processInfo !== undefined && !isObject(v.processInfo)) throw fail("processInfo must be an object");
       if (v.customCommands !== undefined && !Array.isArray(v.customCommands)) throw fail("customCommands must be an array");
       const customs = v.customCommands ?? [];
       customs.forEach(checkCommand);
@@ -267,7 +265,6 @@ export function createFacade(loader) {
       const given = v.fs;
       const branded = given instanceof InMemoryFs && fsState(given) ? given : null;
       const userFs = branded ? null : (given ?? null);
-      if (given !== undefined && !isObject(given)) throw fail("fs must be an object");
       // Omitted/undefined means "separate"; any other value (including null) throws.
       const isolation = v.isolation === undefined ? "separate" : v.isolation;
       if (isolation !== "separate" && isolation !== "shared") throw fail('isolation must be "separate" or "shared"');
@@ -286,8 +283,7 @@ export function createFacade(loader) {
       const exported = new Set(["HOME", "PATH", "PWD", "OLDPWD", ...userEnv.map(([key]) => key)]);
       if (hasFiles && !branded) {
         const paths = new Set(Object.keys(v.files).map((path) => resolvePath(initialCwd, path)));
-        const systemDirs = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
-        const conflict = systemDirs.find((path) => paths.has(path));
+        const conflict = SYS_DIRS.find((path) => paths.has(path));
         if (conflict) throw new Error("EEXIST: file already exists, mkdir '" + conflict + "'");
       }
       const headroom = PROFILES[profile].headroom;
@@ -353,6 +349,7 @@ export function createFacade(loader) {
         trace: v.trace,
         coverage: v.coverage,
         logger: v.logger,
+        browser: Boolean(browser),
         hooks,
         shell: null,
         initialEnv: nullObject(envEntries),
@@ -495,13 +492,11 @@ export function createFacade(loader) {
       if (options === undefined) options = {};
       if (!isObject(options)) throw fail("exec options must be an object");
       const env = options.env === undefined ? [] : stringRecord(options.env, "env");
-      if (options.cwd !== undefined && typeof options.cwd !== "string") throw fail("cwd must be a string");
-      if (options.stdin !== undefined && typeof options.stdin !== "string") throw fail("stdin must be a string");
+      for (const k of ["cwd", "stdin"]) if (options[k] !== undefined && typeof options[k] !== "string") throw fail(`${k} must be a string`);
       if (options.stdinKind !== undefined && options.stdinKind !== "text" && options.stdinKind !== "bytes") throw fail('stdinKind must be "text" or "bytes"');
       if (options.args !== undefined && (!Array.isArray(options.args) || options.args.some((a) => typeof a !== "string"))) throw fail("args must be an array of strings");
       if (options.signal !== undefined && !(isObject(options.signal) && typeof options.signal.aborted === "boolean")) throw fail("signal must be an AbortSignal");
-      if (options.replaceEnv !== undefined && typeof options.replaceEnv !== "boolean") throw fail("replaceEnv must be a boolean");
-      if (options.rawScript !== undefined && typeof options.rawScript !== "boolean") throw fail("rawScript must be a boolean");
+      for (const k of ["replaceEnv", "rawScript"]) if (options[k] !== undefined && typeof options[k] !== "boolean") throw fail(`${k} must be a boolean`);
       void forSync;
       let stdin = new Uint8Array(0);
       if (options.stdin) stdin = options.stdinKind === "bytes" ? unsafeBytesFromLatin1(options.stdin) : utf8(options.stdin);
@@ -519,13 +514,19 @@ export function createFacade(loader) {
       };
     }
 
-    #log(B, command, result) {
-      const lg = B.logger;
-      if (!lg || command.trim() === "") return;
-      lg.info("exec", { command });
-      if (result.stdout) lg.debug("stdout", { output: result.stdout });
-      if (result.stderr) lg.info("stderr", { output: result.stderr });
-      lg.info("exit", { exitCode: result.exitCode });
+    #runLogged(B, command, o, sync) {
+      const lg = Boolean(B.logger) && !o.bypass && command.trim() !== "";
+      if (lg) B.logger.info("exec", { command });
+      const end = (r) => {
+        if (lg) {
+          if (r.stdout !== "") B.logger.debug("stdout", { output: r.stdout });
+          if (r.stderr !== "") B.logger.info("stderr", { output: r.stderr });
+          B.logger.info("exit", { exitCode: r.exitCode });
+        }
+        return r;
+      };
+      const gen = execLoop(B, command, o);
+      return sync ? end(runSync(gen)) : runAsync(gen).then(end);
     }
 
     async exec(commandLine, options) {
@@ -538,9 +539,7 @@ export function createFacade(loader) {
       if (B.volumeHolder) await B.volumeHolder.ensure();
       const inst = await B.holder.ensure();
       inst.check();
-      const result = await runAsync(execLoop(B, commandLine, o));
-      this.#log(B, commandLine, result);
-      return result;
+      return this.#runLogged(B, commandLine, o, false);
     }
 
     execSync(commandLine, options) {
@@ -553,17 +552,15 @@ export function createFacade(loader) {
       }
       const o = this.#normalize(B, options, true);
       B.holder.instance.check();
-      const result = runSync(execLoop(B, commandLine, o));
-      this.#log(B, commandLine, result);
-      return result;
+      return this.#runLogged(B, commandLine, o, true);
     }
 
     async #runChild(B, command, options, scope, parent) {
+      if (typeof command !== "string") throw fail("the command line must be a string");
       const o = this.#normalize(B, options ?? {}, false);
       o.signal = anySignal(scope.signal, o.signal);
       o.parent = parent;
-      const r = await runAsync(execLoop(B, command, o));
-      const { stdout, stderr, exitCode, stdoutKind } = r;
+      const { stdout, stderr, exitCode, stdoutKind } = await this.#runLogged(B, command, o, false);
       return stdoutKind === "bytes" ? { stdout, stderr, exitCode, stdoutKind } : { stdout, stderr, exitCode };
     }
 

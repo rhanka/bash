@@ -255,16 +255,32 @@ function cancel(x, reason) {
 }
 
 function drain(x) {
-  const { inst, fiber } = x;
-  for (;;) {
-    const b = inst.call(() => fiber.takeStdout(CHUNK));
-    if (b.length === 0) break;
-    x.out.push(b);
+  const { B, inst, fiber } = x;
+  const take = (fn, cb) => {
+    for (let v; (v = inst.call(fn)).length; ) cb(v);
+  };
+  take(() => fiber.takeStdout(CHUNK), (b) => x.out.push(b));
+  take(() => fiber.takeStderr(CHUNK), (b) => x.err.push(b));
+  if (B.coverage) {
+    const features = (inst.coverageFeatures ??= inst.call(() => inst.engine.coverageFeatures()));
+    take(() => fiber.takeCoverage(4096), (ids) => {
+      for (const id of ids) {
+        const f = features[id];
+        if (f !== undefined && !(B.browser && f.startsWith("cmd:flag:"))) B.coverage.hit(f);
+      }
+    });
   }
-  for (;;) {
-    const b = inst.call(() => fiber.takeStderr(CHUNK));
-    if (b.length === 0) break;
-    x.err.push(b);
+  if (B.trace) {
+    take(() => fiber.takeTrace(256), (evs) => {
+      for (const e of evs) {
+        const out = { category: e.category, name: e.name, durationMs: e.durationMs };
+        if (e.details.length) {
+          out.details = nullObject();
+          for (const d of e.details) out.details[d.key] = d.value.tag === "number" ? d.value.val : decodeUtf8(d.value.val);
+        }
+        B.trace(out);
+      }
+    });
   }
 }
 
@@ -385,6 +401,10 @@ function batchOpPath(op) {
 function* serve(x, pc) {
   const B = x.B;
   const req = pc.req;
+  if (req.tag === "trace-clock") {
+    const ns = B.hooks?.traceClockNs ? BigInt(B.hooks.traceClockNs()) : BigInt(Math.round(now() * 1e6));
+    return { outcome: { tag: "clock", val: { wallMs: 0n, monotonicNs: ns } } };
+  }
   B.hooks?.onHostCall?.(req);
   switch (req.tag) {
     case "custom-command": {

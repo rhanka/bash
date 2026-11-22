@@ -48,6 +48,9 @@ impl TryClone for ExecResult {
     }
 }
 
+pub const COVERAGE_BUF_CAP: usize = 4_096;
+pub const TRACE_BUF_CAP: usize = 256;
+
 /// A host request, owned (it leaves the kernel through the adapter).
 pub enum HostReq {
     FsBatch {
@@ -67,6 +70,7 @@ pub enum HostReq {
     },
     Sleep(u64),
     Clock,
+    TraceClock,
     Entropy(u32),
 }
 
@@ -83,12 +87,48 @@ pub enum Outcome<'a> {
     CommandExit(i32),
     /// Status of a fetch response.
     Fetched(u16),
-    Clock(i64),
+    Clock { wall_ms: i64, monotonic_ns: u64 },
     Completed,
     Denied,
     LimitExceeded(&'a str),
     NetFailed(&'static str),
     Failed(&'a [u8]),
+}
+
+pub enum TraceValue {
+    Number(f64),
+    Text(KBytes),
+}
+
+pub struct TraceDetail {
+    pub key: KString,
+    pub value: TraceValue,
+}
+
+pub struct TraceEvent {
+    pub category: KString,
+    pub name: KString,
+    pub duration_ms: f64,
+    pub details: KVec<TraceDetail>,
+}
+
+/// Exact counter & fuel-apportionment payload for `find` (`summary` + `searchPath`, EVOL Annex D.6).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FindTraceStats {
+    pub readdir_calls: u64,
+    pub stat_calls: u64,
+    pub eval_calls: u64,
+    pub node_count: u64,
+    pub batch_count: u64,
+    pub early_prunes: u64,
+    /// Fuel units spent in each phase; apportioned across `duration_ms` per EVOL Annex D.6:
+    /// `phase_ms = if total_fuel > 0 { duration_ms * (phase_fuel as f64 / total_fuel as f64) } else { 0.0 }`.
+    pub readdir_fuel: u64,
+    pub stat_fuel: u64,
+    pub eval_fuel: u64,
+    pub batch_fuel: u64,
+    pub total_fuel: u64,
+    pub results_found: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -249,6 +289,7 @@ pub struct Fiber {
     pub(crate) kept: KVec<KBytes>,
     bypass: Option<KString>,
     coverage: KVec<u16>,
+    trace: KVec<TraceEvent>,
 }
 
 /// Inputs borrowed while creating a fiber.
@@ -372,6 +413,7 @@ impl Fiber {
             params: KVec::new_in(&live),
             last_arg: None,
             coverage: KVec::new_in(&live),
+            trace: KVec::new_in(&live),
             shell,
             live,
             scratch,
@@ -601,6 +643,156 @@ impl Fiber {
         self.coverage.truncate(remain);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn trace_events(&self, max: usize) -> &[TraceEvent] {
+        &self.trace[..self.trace.len().min(max)]
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn consume_trace(&mut self, n: usize) {
+        let n = n.min(self.trace.len());
+        if n == 0 {
+            return;
+        }
+        let remain = self.trace.len() - n;
+        self.trace.as_mut_slice().rotate_left(n);
+        self.trace.truncate(remain);
+    }
+
+    pub fn coverage_enabled(&self) -> bool {
+        self.shell.coverage
+    }
+
+    pub fn trace_enabled(&self) -> bool {
+        self.shell.trace
+    }
+
+    /// True when either observability buffer has reached its slice cap.
+    pub fn should_yield_observability(&self) -> bool {
+        self.coverage.len() >= COVERAGE_BUF_CAP || self.trace.len() >= TRACE_BUF_CAP
+    }
+
+    /// Appends `id` when `shell.coverage` is true; whenever `coverage.len() >= COVERAGE_BUF_CAP`
+    /// (`4_096`), zeroes **both** `self.fuel` and `self.fuel_credit` so the next `take_fuel()` or
+    /// `tick()` checkpoint yields `Step::OutOfFuel` cleanly between VM opcodes for draining.
+    pub(crate) fn hit_coverage_id(&mut self, id: u16) -> Result<(), Fail> {
+        if !self.shell.coverage {
+            return Ok(());
+        }
+        self.coverage.try_push(id)?;
+        if self.coverage.len() >= COVERAGE_BUF_CAP {
+            self.fuel.set(0);
+            self.fuel_credit.set(0);
+        }
+        Ok(())
+    }
+
+    /// Looks up `coverage_id(feature)` and delegates to `hit_coverage_id`.
+    pub(crate) fn hit_coverage(&mut self, feature: &str) -> Result<(), Fail> {
+        if self.shell.coverage {
+            if let Some(id) = crate::cmd::coverage_id(feature) {
+                self.hit_coverage_id(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends `event` when `shell.trace` is true; whenever `trace.len() >= TRACE_BUF_CAP` (`256`),
+    /// zeroes **both** `self.fuel` and `self.fuel_credit` so the next `take_fuel()` or `tick()`
+    /// checkpoint yields `Step::OutOfFuel` cleanly for draining.
+    pub(crate) fn push_trace(&mut self, event: TraceEvent) -> Result<(), Fail> {
+        if !self.shell.trace {
+            return Ok(());
+        }
+        self.trace.try_push(event)?;
+        if self.trace.len() >= TRACE_BUF_CAP {
+            self.fuel.set(0);
+            self.fuel_credit.set(0);
+        }
+        Ok(())
+    }
+
+    /// Formats and pushes the two `find` trace events (`summary` then `searchPath`) for `raw_search_path`
+    /// using `start_ns` and `end_ns` (`duration_ms = (end_ns.saturating_sub(start_ns) as f64) / 1_000_000.0`).
+    pub(crate) fn emit_find_trace(
+        &mut self,
+        raw_search_path: &[u8],
+        start_ns: u64,
+        end_ns: u64,
+        stats: &FindTraceStats,
+    ) -> Result<(), Fail> {
+        if !self.shell.trace {
+            return Ok(());
+        }
+        let norm_path = if raw_search_path.is_empty() {
+            b".".as_slice()
+        } else if raw_search_path.len() > 1 && raw_search_path.ends_with(b"/") {
+            &raw_search_path[..raw_search_path.len() - 1]
+        } else {
+            raw_search_path
+        };
+        let duration_ms = (end_ns.saturating_sub(start_ns) as f64) / 1_000_000.0;
+        let apportion = |f: u64| -> f64 {
+            if stats.total_fuel > 0 {
+                duration_ms * (f as f64) / (stats.total_fuel as f64)
+            } else {
+                0.0
+            }
+        };
+        let readdir_ms = apportion(stats.readdir_fuel);
+        let stat_ms = apportion(stats.stat_fuel);
+        let eval_ms = apportion(stats.eval_fuel);
+        let batch_ms = apportion(stats.batch_fuel);
+        let other_ms = duration_ms - (readdir_ms + stat_ms + eval_ms + batch_ms);
+
+        let mut summary_details = KVec::with_capacity_in(11, &self.live)?;
+        let summary_nums = [
+            ("readdirCalls", stats.readdir_calls as f64),
+            ("readdirTimeMs", readdir_ms),
+            ("statCalls", stats.stat_calls as f64),
+            ("statTimeMs", stat_ms),
+            ("evalCalls", stats.eval_calls as f64),
+            ("evalTimeMs", eval_ms),
+            ("nodeCount", stats.node_count as f64),
+            ("batchCount", stats.batch_count as f64),
+            ("batchTimeMs", batch_ms),
+            ("earlyPrunes", stats.early_prunes as f64),
+            ("otherTimeMs", other_ms),
+        ];
+        for (key, value) in summary_nums {
+            summary_details.try_push(TraceDetail {
+                key: str_in(key, &self.live)?,
+                value: TraceValue::Number(value),
+            })?;
+        }
+        let summary = TraceEvent {
+            category: str_in("find", &self.live)?,
+            name: str_in("summary", &self.live)?,
+            duration_ms,
+            details: summary_details,
+        };
+
+        let mut path_details = KVec::with_capacity_in(2, &self.live)?;
+        path_details.try_push(TraceDetail {
+            key: str_in("path", &self.live)?,
+            value: TraceValue::Text(bytes_in(norm_path, &self.live)?),
+        })?;
+        path_details.try_push(TraceDetail {
+            key: str_in("resultsFound", &self.live)?,
+            value: TraceValue::Number(stats.results_found as f64),
+        })?;
+        let search_path = TraceEvent {
+            category: str_in("find", &self.live)?,
+            name: str_in("searchPath", &self.live)?,
+            duration_ms,
+            details: path_details,
+        };
+
+        self.push_trace(summary)?;
+        self.push_trace(search_path)?;
+        Ok(())
+    }
+
     pub fn push_call_data(
         &mut self,
         epoch: u64,
@@ -773,6 +965,9 @@ impl Fiber {
             State::Done => return self.done_step(),
             State::Pending(_) | State::Spin => return Step::OutOfFuel,
             State::Ready => {}
+        }
+        if self.coverage.len() >= COVERAGE_BUF_CAP * 2 || self.trace.len() >= TRACE_BUF_CAP * 2 {
+            return Step::OutOfFuel;
         }
         // A chained host call parked by `resume` on an empty fuel slice is re-emitted
         // on the next slice instead of being dropped.

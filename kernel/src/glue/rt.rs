@@ -1,22 +1,24 @@
 //! Runtime of the generated glue (EVOL D16): the few items `wit-bindgen` expects from its runtime path,
 //! written here so that no crate is needed. Everything goes through the global allocator, which is
 //! `kernel::mem`.
+use crate::fiber::TRACE_BUF_CAP;
 use crate::mem::abi::{alloc, dealloc, Layout};
 use crate::mem::{MemError, MemResult};
 
-// The largest implemented return (exec-oneshot) lowers three lists of records.
-static mut LOWERING: [Option<Cleanup>; 3] = [None, None, None];
+// `take_trace` lowers up to TRACE_BUF_CAP TraceEvents plus one outer list (257 lists).
+const LOWERING_SLOTS: usize = TRACE_BUF_CAP + 1;
+static mut LOWERING: [Option<Cleanup>; LOWERING_SLOTS] = [const { None }; LOWERING_SLOTS];
 
 /// True when no lowering slot is held: the quiescence a snapshot capture requires.
 pub(crate) fn lowering_clean() -> bool {
-    // SAFETY: the Wasm instance is single-threaded; reading the three option slots cannot race.
+    // SAFETY: the Wasm instance is single-threaded; reading the option slots cannot race.
     unsafe { &*(&raw const LOWERING) }.iter().all(Option::is_none)
 }
 
 /// Allocate the generated record arrays while the adapter can still report a refusal. Keep the
 /// actual blocks until `Cleanup::new` takes them, even if the ordinary heap is fragmented.
 pub fn prepare_lowering(lists: &[(usize, usize, usize)]) -> MemResult<()> {
-    let mut blocks = [None, None, None];
+    let mut blocks = [const { None }; LOWERING_SLOTS];
     assert!(lists.len() <= blocks.len());
     for (slot, &(count, stride, align)) in blocks.iter_mut().zip(lists) {
         let size = count.checked_mul(stride).ok_or(MemError::Overflow)?;

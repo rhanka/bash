@@ -248,7 +248,7 @@ test("coverage and command listings are revoked, and ctx.signal preserves the ca
   assert.notEqual(ctx.coverage, coverage);
   assert.throws(() => ctx.coverage.hit("late"), { name: "ExecutionAbortedError" });
   assert.throws(() => ctx.getRegisteredCommands(), { name: "ExecutionAbortedError" });
-  assert.deepEqual(hits, ["live"]);
+  assert.deepEqual(hits, ["bash:cmd:SimpleCommand", "live"]);
 });
 
 test("fast host calls yield for a timer abort and check elapsed time on promise resolution", async () => {
