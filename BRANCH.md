@@ -42,15 +42,31 @@ Deliver `kernel::regex` (Thompson NFA/PikeVM plus byte-capped lazy DFA, bounded 
   allowed paths. Impact: one table row, no behavior change. Rollback: delete the row.
 - Spec vs oracle notes observed during verification:
   1. Regex bracket `[!a]`: the committed `just-bash@3.6.0` oracle snapshot `test/cases/l8a/bracket-edge-cases.snap.json`
-     step 2 records `"!\nb\n"` for `grep -E -- '[!a]'` on `"!\na\nb\n"` (leading `!` negates in regex brackets,
+     step 3 (0-indexed step 2) records `"!\nb\n"` for `grep -E -- '[!a]'` on `"!\na\nb\n"` (leading `!` negates in regex brackets,
      whereas glob `[!a]` treats `!` as a literal member in `l8a/glob-brackets-negation.snap.json`). Implemented
-     to match the committed snapshots 30/30.
+     to match the committed snapshots 30/30 (`D1`); `spec/lots/L8a.md` is outside allowed paths and noted for follow-up.
   2. Gate 3 trap `([a-zA-Z]+)*$` on `"a".repeat(50_000) + "!"`: unanchored `(...)*$` matches the empty string
      at EOF (`exitCode: 0`, 1.66 ms); anchored `^([a-zA-Z]+)*$` fails to match (`exitCode: 1`, 1.22 ms). Both are
      covered in `test/l8a-redos.test.mjs` and native tests.
   3. Gate 6 nested extglob `!(!(a)|b)`: by exact bash De Morgan semantics (`!( (!a) | b ) = a & !b`), `"a"` is
      `true` and `"b"`/`"c"` are `false` (verified against GNU bash `-O extglob`). Both `!(!(a)|b)` and
-     `!(!(a|b))` (`"a"`/`"b"` `true`, `"c"` `false`) are covered in native unit tests.
+     `!(!(a|b))` (`"a"`/`"b"` `true`, `"c"` `false`) are covered in native and Wasm unit tests.
+- PR #22 adversarial review fixes (Findings 1–6):
+  1. **Blocker — nested `!(...)` exponential blow-up:** replaced recursive `GlobAst` with a flat post-order
+     `GlobNode` arena, iterative `parse_glob` with `O(N)` extglob parenthesis pre-pass, iterative `compile_nfa` +
+     maximal `!(...)`-free sub-NFAs, and an iterative packed-`u64`-bitset Reachability DP caching `(node_id, start_idx)`
+     once per `DpCtx` (shared across `strip_suffix` and `replace_glob`).
+  2. **Major — bounded backtracker nullable capture loops:** interned active capture slot slices (`slots[2..]`) in
+     `backref_at`, keeping `cap_id` unchanged when `Inst::Save` writes an identical offset and restoring `prev_cap_id`
+     on `RestoreSlot` so `(a*)*\1` and `((a?)+)*\1` succeed cleanly without `BacktrackLimitExceeded`.
+  3. **Major — stacked postfix quantifiers (S3 trap risk):** enforced `max_nesting_depth` on stacked quantifiers in
+     `parse_suffix`, replaced recursive `Ast` with a flat post-order `AstNode` arena (iterative `Drop`), bottom-up
+     `compute_min_insts`, and explicit-stack `compile_root` and `collect_factors`.
+  4. **Minor — dead branch in `find_all`:** removed redundant `zero_progress`/`empty_reported` branch.
+  5. **Minor — spec-vs-oracle prose:** clarified step numbering (`step 3 / 0-indexed step 2`) and added explicit
+     native/Wasm assertions for regex `[!a]` negation and `!(!(a)|b)` De Morgan semantics.
+  6. **Minor — two-dot diff artifact:** `feat/l8a-regex` branched before `spec/lots/L1d.md` and `spec/lots/L8b.md`
+     merged to `main` (`1f90267`); three-dot diff confirms zero overlap — rebase onto `main` before merge.
 
 ## Plan / Todo (lot-based)
 - [x] **Lot 0 — Baseline & constraints**
@@ -76,9 +92,9 @@ Deliver `kernel::regex` (Thompson NFA/PikeVM plus byte-capped lazy DFA, bounded 
 
 ## Points to confirm and report (spec section 9)
 1. **Core Wasm size delta:**
-   - `dist/js/kernel/kernel.core.wasm`: `247,498` -> `247,506` B raw (`+8 B`), `89,259` -> `89,282` B gzip (`+23 B`) (unreachable in production kernel until L4/L9 wire them).
-   - `dist/kernel.core.wasm`: `253,304` -> `253,312` B raw (`+8 B`), `91,965` -> `91,990` B gzip (`+25 B`).
-   - `dist/test/kernel-test.core.wasm` (both modules fully live via `__regex`/`__glob`): `275,536` -> `378,250` B raw (`+102,714 B`), `99,385` -> `137,512` B gzip (`+38,127 B`).
+   - `dist/js/kernel/kernel.core.wasm`: `247,498` -> `247,506` B raw (`+8 B`), `89,259` -> `89,273` B gzip (`+14 B`) (unreachable in production kernel until L4/L9 wire them).
+   - `dist/kernel.core.wasm`: `253,304` -> `253,312` B raw (`+8 B`), `91,965` -> `91,982` B gzip (`+17 B`).
+   - `dist/test/kernel-test.core.wasm` (both modules fully live via `__regex`/`__glob`): `275,536` -> `397,931` B raw (`+122,395 B`), `99,385` -> `143,163` B gzip (`+43,778 B`).
 2. **S9 blow-up timings and DFA cache cap:**
    - `ere (a+)+b` (50k `'a'` + `'!'`): `exitCode: 1`, `1.33 ms` (< 50 ms); scaling 50k/5k = `1.62x` (<= 15x).
    - `ere (a|a)*b` (50k `'a'` + `'!'`): `exitCode: 1`, `0.50 ms` (< 50 ms).
