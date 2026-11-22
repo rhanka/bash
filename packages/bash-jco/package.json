@@ -1,0 +1,30 @@
+{
+  "name": "@sentropic/bash-jco",
+  "version": "0.0.0",
+  "description": "Option D binding of @sentropic/bash: the same WASM-first bash sandbox over the pinned guarded jco glue.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/js/index.js"
+    },
+    "./browser": {
+      "types": "./types/browser.d.ts",
+      "default": "./dist/js/browser.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "types/",
+    "wit/",
+    "DIVERGENCES.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}
