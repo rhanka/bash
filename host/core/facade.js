@@ -241,62 +241,69 @@ export function createFacade(loader) {
       if (!isObject(options)) throw fail("options must be an object");
       for (const k of Object.keys(options)) if (!OPTION_NAMES.has(k)) throw fail(`unknown option ${k}`);
       const hooks = options[INTERNAL];
-      const profile = options.executionLimitProfile ?? DEFAULT_PROFILE;
+      // Single-read snapshot of every classified option: a hostile getter observes one read
+      // per property. Every later use reads `v`, never `options`, so the predicate classifies
+      // exactly the validated configuration (spec L2c 4.5).
+      const v = Object.create(null);
+      for (const k of OPTION_NAMES) v[k] = options[k];
+      const profile = v.executionLimitProfile ?? DEFAULT_PROFILE;
       if (!PROFILE_NAMES.includes(profile)) throw fail(`executionLimitProfile: unknown profile ${String(profile)}`);
-      if (options.cwd !== undefined && typeof options.cwd !== "string") throw fail("cwd must be a string");
-      const userEnv = options.env === undefined ? [] : stringRecord(options.env, "env");
-      if (options.files !== undefined && !isObject(options.files)) throw fail("files must be an object");
-      if (options.executionLimits !== undefined && !isObject(options.executionLimits)) throw fail("executionLimits must be an object");
-      const overrides = Object.assign(Object.create(null), options.executionLimits ?? {});
+      if (v.cwd !== undefined && typeof v.cwd !== "string") throw fail("cwd must be a string");
+      const userEnv = v.env === undefined ? [] : stringRecord(v.env, "env");
+      if (v.files !== undefined && !isObject(v.files)) throw fail("files must be an object");
+      if (v.executionLimits !== undefined && !isObject(v.executionLimits)) throw fail("executionLimits must be an object");
+      const overrides = Object.assign(Object.create(null), v.executionLimits ?? {});
       for (const alias of ["maxCallDepth", "maxCommandCount", "maxLoopIterations"]) {
-        if (options[alias] !== undefined) {
-          if (typeof options[alias] !== "number") throw fail(`${alias} must be a number`);
-          overrides[alias] = options[alias];
+        if (v[alias] !== undefined) {
+          if (typeof v[alias] !== "number") throw fail(`${alias} must be a number`);
+          overrides[alias] = v[alias];
         }
       }
       for (const [name, check] of [["fetch", "function"], ["sleep", "function"], ["trace", "function"]]) {
-        if (options[name] !== undefined && typeof options[name] !== check) throw fail(`${name} must be a function`);
+        if (v[name] !== undefined && typeof v[name] !== check) throw fail(`${name} must be a function`);
       }
-      if (options.network !== undefined && !isObject(options.network)) throw fail("network must be an object");
-      if (options.commands !== undefined && (!Array.isArray(options.commands) || options.commands.some((c) => typeof c !== "string"))) throw fail("commands must be an array of strings");
-      if (options.logger !== undefined && (!isObject(options.logger) || typeof options.logger.info !== "function" || typeof options.logger.debug !== "function")) throw fail("logger needs info and debug functions");
-      if (options.coverage !== undefined && (!isObject(options.coverage) || typeof options.coverage.hit !== "function")) throw fail("coverage needs a hit function");
-      if (options.processInfo !== undefined && !isObject(options.processInfo)) throw fail("processInfo must be an object");
-      if (options.customCommands !== undefined && !Array.isArray(options.customCommands)) throw fail("customCommands must be an array");
-      const customs = options.customCommands ?? [];
+      if (v.network !== undefined && !isObject(v.network)) throw fail("network must be an object");
+      if (v.commands !== undefined && (!Array.isArray(v.commands) || v.commands.some((c) => typeof c !== "string"))) throw fail("commands must be an array of strings");
+      if (v.logger !== undefined && (!isObject(v.logger) || typeof v.logger.info !== "function" || typeof v.logger.debug !== "function")) throw fail("logger needs info and debug functions");
+      if (v.coverage !== undefined && (!isObject(v.coverage) || typeof v.coverage.hit !== "function")) throw fail("coverage needs a hit function");
+      if (v.processInfo !== undefined && !isObject(v.processInfo)) throw fail("processInfo must be an object");
+      if (v.customCommands !== undefined && !Array.isArray(v.customCommands)) throw fail("customCommands must be an array");
+      const customs = v.customCommands ?? [];
       customs.forEach(checkCommand);
 
       // The filesystem and its instance. A branded volume is an `InMemoryFs` with
       // facade-private state; a prototype or a lookalike gives no synchronous
-      // kernel capability and stays on the host-adapter path.
-      const given = options.fs;
+      // kernel capability and stays on the host-adapter path. Every read below uses
+      // the single-read snapshot `v`, never `options`, so a hostile getter observes
+      // one read per property and the predicate classifies the validated config.
+      const given = v.fs;
       const branded = given instanceof InMemoryFs && fsState(given) ? given : null;
       const userFs = branded ? null : (given ?? null);
       if (given !== undefined && !isObject(given)) throw fail("fs must be an object");
       // Omitted/undefined means "separate"; any other value (including null) throws.
-      const isolation = options.isolation === undefined ? "separate" : options.isolation;
+      const isolation = v.isolation === undefined ? "separate" : v.isolation;
       if (isolation !== "separate" && isolation !== "shared") throw fail('isolation must be "separate" or "shared"');
       if (isolation === "shared" && given !== undefined && !branded) throw fail('isolation "shared" needs a kernel-backed InMemoryFs');
       const separate = branded && isolation === "separate";
       const volumeHolder = branded ? fsState(branded).holder : null;
       const effective = hooks?.ceilingBytes ?? Math.max(isolation === "shared" && volumeHolder ? volumeHolder.ceiling : 0, PROFILES[profile].ceiling);
       const limits = resolveLimits(profile, overrides, effective);
-      const hasFiles = options.files !== undefined;
-      const defaultLayout = !options.cwd && !options.files;
+      const hasFiles = v.files !== undefined;
+      const defaultLayout = !v.cwd && !v.files;
       const home = defaultLayout ? "/home/user" : "/";
-      const cwd = options.cwd || home;
+      const cwd = v.cwd || home;
       const initialCwd = resolvePath("/", cwd);
       const envEntries = initialEnvEntries(initialCwd, home, userEnv);
-      const commands = [...(options.commands ?? []), ...customs.map((c) => c.name)];
+      const commands = [...(v.commands ?? []), ...customs.map((c) => c.name)];
       const exported = new Set(["HOME", "PATH", "PWD", "OLDPWD", ...userEnv.map(([key]) => key)]);
       if (hasFiles && !branded) {
-        const paths = new Set(Object.keys(options.files).map((path) => resolvePath(initialCwd, path)));
+        const paths = new Set(Object.keys(v.files).map((path) => resolvePath(initialCwd, path)));
         const systemDirs = ["/bin", "/usr", "/usr/bin", "/dev", "/dev/fd", "/proc", "/proc/self", "/proc/self/fd"];
         const conflict = systemDirs.find((path) => paths.has(path));
         if (conflict) throw new Error("EEXIST: file already exists, mkdir '" + conflict + "'");
       }
       const headroom = PROFILES[profile].headroom;
-      const limit = stringLimit([...userEnv.flat(), ...commands, options.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
+      const limit = stringLimit([...userEnv.flat(), ...commands, v.cwd === undefined ? "" : initialCwd], limits.maxStringLength, headroom) ??
         stringLimit([...envEntries.flat(), ...commands, initialCwd, ...Object.keys(overrides)], Infinity, headroom,
           envEntries.length * 20 + commands.length * 8 + Object.keys(overrides).length * 16);
       if (limit) throw new RangeError(`shell configuration: ${limit} exceeded`);
@@ -304,7 +311,8 @@ export function createFacade(loader) {
       // Provenance and predicate for the Wasm-owned default snapshot (spec L2c 4.5-4.6): only
       // the default binding with the package's own production loader core may restore, and only
       // for a validated ordinary `contain` default. Any `fs`, explicit `isolation`, or host
-      // mount takes the ordinary path.
+      // mount takes the ordinary path. Eligibility is decided before any heavy work; the
+      // restorable path defers the shellConfig encoding to the fallback.
       const bindingRestore = loader.defaultBinding === true && loader.customized !== true;
       const restorable = bindingRestore && given === undefined && userFs === null && !separate && !branded && isDefaultSnapshotConfig({
         profile,
@@ -315,8 +323,8 @@ export function createFacade(loader) {
         hasHooks: hooks !== undefined && (hooks.kernel !== undefined ||
           hooks.moduleProvider !== undefined || hooks.ceilingBytes !== undefined ||
           hooks.snapshotCapture === true),
-        present: Object.fromEntries(Array.from(new Set([...PREDICATE_OPTIONS, "isolation"])).map((name) => [name, options[name] !== undefined])),
-        loggerPresent: options.logger !== undefined,
+        present: Object.fromEntries(Array.from(new Set([...PREDICATE_OPTIONS, "isolation"])).map((name) => [name, v[name] !== undefined])),
+        loggerPresent: v.logger !== undefined,
       });
       // A supplied volume keeps its contents: `files` only affects the default
       // cwd/layout choice. A separate shell gets a fresh execution holder and a
@@ -350,13 +358,13 @@ export function createFacade(loader) {
         headroom,
         profile,
         commands: new Map(),
-        commandNames: options.commands === undefined ? COMMAND_NAMES : COMMAND_NAMES.filter((name) => options.commands.includes(name)),
-        sleep: options.sleep,
-        fetch: options.fetch,
-        network: options.network,
-        trace: options.trace,
-        coverage: options.coverage,
-        logger: options.logger,
+        commandNames: v.commands === undefined ? COMMAND_NAMES : COMMAND_NAMES.filter((name) => v.commands.includes(name)),
+        sleep: v.sleep,
+        fetch: v.fetch,
+        network: v.network,
+        trace: v.trace,
+        coverage: v.coverage,
+        logger: v.logger,
         hooks,
         shell: null,
         initialEnv: nullObject(envEntries),
@@ -375,28 +383,31 @@ export function createFacade(loader) {
       };
       B.runChild = (command, o, scope, parent) => this.#runChild(B, command, o, scope, parent);
       STATE.set(this, B);
-      if (hasFiles && !branded && userFs === null) addFiles(rootFs, options.files, B.initialCwd);
-      seedHostLayout(userFs, defaultLayout, B.initialCwd, options.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
-      // A host mount at `/` shadows the kernel volume: `options.files` belong
+      if (hasFiles && !branded && userFs === null) addFiles(rootFs, v.files, B.initialCwd);
+      seedHostLayout(userFs, defaultLayout, B.initialCwd, v.processInfo, [...B.commandNames, ...customs.map((c) => c.name)]);
+      // A host mount at `/` shadows the kernel volume: `v.files` belong
       // in the host `fs`, never in the shadowed `rootFs`.
-      B.seeded = hasFiles && userFs !== null ? seedUserFiles(userFs, options.files, B.initialCwd) : null;
+      B.seeded = hasFiles && userFs !== null ? seedUserFiles(userFs, v.files, B.initialCwd) : null;
       for (const c of customs) this.#register(B, c, false);
-      const shellConfig = {
+      // The encoded shell configuration, built lazily from the single-read values: only the
+      // `0n` fallback of a restorable shell and the ordinary path pay this cost; the restore
+      // path discards it.
+      const buildShellConfig = () => ({
         limits: { profile, overrides: Object.entries(overrides).map(([name, value]) => ({ name, value: BigInt(value) })) },
-        grants: { customCommands: true, realSleep: typeof options.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
-        commands: options.commands?.slice(),
+        grants: { customCommands: true, realSleep: typeof v.sleep === "function", hostFs: userFs !== null || Boolean(separate) },
+        commands: v.commands?.slice(),
         customCommands: [...B.commands.keys()],
-        env: envEntries.map(([n, v]) => ({ name: utf8(n), value: utf8(v), exported: exported.has(n) })),
+        env: envEntries.map(([n, e]) => ({ name: utf8(n), value: utf8(e), exported: exported.has(n) })),
         cwd: utf8(B.initialCwd),
-        processInfo: options.processInfo ? { pid: options.processInfo.pid ?? 1, ppid: options.processInfo.ppid ?? 0, uid: options.processInfo.uid ?? 1000, gid: options.processInfo.gid ?? 1000 } : undefined,
+        processInfo: v.processInfo ? { pid: v.processInfo.pid ?? 1, ppid: v.processInfo.ppid ?? 0, uid: v.processInfo.uid ?? 1000, gid: v.processInfo.gid ?? 1000 } : undefined,
         defaultLayout,
-        trace: typeof options.trace === "function",
-        coverage: !!options.coverage,
-      };
+        trace: typeof v.trace === "function",
+        coverage: !!v.coverage,
+      });
       if (branded) {
         const st = fsState(branded);
         const layout = {
-          defaultLayout, cwd: B.initialCwd, processInfo: options.processInfo,
+          defaultLayout, cwd: B.initialCwd, processInfo: v.processInfo,
           commandNames: [...B.commandNames, ...customs.map((c) => c.name)],
         };
         st.holder.stage((volInst) => seedVolumeLayout(st.vfs, volInst, layout));
@@ -413,6 +424,7 @@ export function createFacade(loader) {
             B.shell = restored.shell;
             return;
           }
+          const shellConfig = buildShellConfig();
           inst.call(() => inst.engine.configure(BigInt(effective)));
           fsState(rootFs).vfs = inst.call(() => inst.engine.Vfs.create(BigInt(limits.maxFileSystemBytes)));
           B.shell = inst.call(() => inst.engine.Shell.create(fsState(rootFs).vfs, shellConfig));
@@ -420,6 +432,7 @@ export function createFacade(loader) {
         restoreFirst.restoreFirst = true;
         B.holder.stage(restoreFirst);
       } else {
+        const shellConfig = buildShellConfig();
         B.holder.stage((inst) => {
           const { vfs } = fsState(rootFs);
           if (userFs !== null || separate) inst.call(() => vfs.mountHost(utf8("/"), 1));
