@@ -15,52 +15,80 @@ export function stringLimit(strings, maxStringLength, headroom, overhead = 0) {
   if (total > Math.floor(headroom / 2)) return "headroom";
 }
 
+// Deduplicated quads: 23 distinct 4-tuples back the 45 rows, so the shipped table
+// carries each number once instead of repeating shared tuples.
+const Q = [
+  [64 * MIB, 8 * MIB, 8 * MIB, 4 * MIB],
+  [64, 64, 64, 64],
+  [100, 100, 100, 100],
+  [50, 50, 50, 50],
+  [100000, 10000, 100000, 25000],
+  [100000, 10000, 100000, 10000],
+  [10000000, 10000, 10000000, 10000],
+  [100000000, 100000, 100000000, 1000000],
+  [100000, 25000, 100000, 25000],
+  [1000, 256, 1000, 256],
+  [1000000, 100000, 1000000, 100000],
+  [256, 128, 256, 128],
+  [10000000, 1000000, 10000000, 1000000],
+  [4096, 1024, 4096, 1024],
+  [512 * MIB, 64 * MIB, 64 * MIB, 16 * MIB],
+  [512 * MIB, 32 * MIB, 64 * MIB, 16 * MIB],
+  [1024 * MIB, 128 * MIB, 128 * MIB, 32 * MIB],
+  [256 * MIB, 10 * MIB, 32 * MIB, 8 * MIB],
+  [64 * MIB, 10 * MIB, 16 * MIB, 4 * MIB],
+  [1000000, 100000, 100000, 100000],
+  [3600000, 30000, 60000, 10000],
+  [100, 25, 100, 25],
+  [0, 0, 0, 0],
+];
+
 const ROWS = [
-  ["maxSourceBytes", [64 * MIB, 8 * MIB, 8 * MIB, 4 * MIB]],
-  ["maxExecDepth", [64, 64, 64, 64]],
-  ["maxCallDepth", [100, 100, 100, 100]],
-  ["maxSubstitutionDepth", [50, 50, 50, 50]],
-  ["maxSourceDepth", [100, 100, 100, 100]],
-  ["maxCommandCount", [100000, 10000, 100000, 25000]],
-  ["maxLoopIterations", [100000, 10000, 100000, 25000]],
-  ["maxAwkIterations", [100000, 10000, 100000, 10000]],
-  ["maxSedIterations", [100000, 10000, 100000, 10000]],
-  ["maxJqIterations", [10000000, 10000, 10000000, 10000]],
-  ["maxWorkUnits", [100000000, 100000, 100000000, 1000000]],
-  ["maxQueryTokens", [100000, 25000, 100000, 25000]],
-  ["maxQueryDepth", [1000, 256, 1000, 256]],
-  ["maxQueryElements", [1000000, 100000, 1000000, 100000]],
-  ["maxAwkParserTokens", [100000, 25000, 100000, 25000]],
-  ["maxAwkParserDepth", [256, 128, 256, 128]],
-  ["maxAwkParserOperations", [1000000, 100000, 1000000, 100000]],
-  ["maxCsvRows", [1000000, 100000, 1000000, 100000]],
-  ["maxCsvCells", [10000000, 1000000, 10000000, 1000000]],
-  ["maxTraversalEntries", [1000000, 100000, 1000000, 100000]],
-  ["maxTraversalDepth", [1000, 256, 1000, 256]],
-  ["maxTraversalWork", [1000000, 100000, 1000000, 100000]],
-  ["maxGlobOperations", [1000000, 100000, 1000000, 100000]],
-  ["maxArrayElements", [1000000, 100000, 1000000, 100000]],
-  ["maxBraceExpansionResults", [100000, 10000, 100000, 10000]],
-  ["maxFileDescriptors", [4096, 1024, 4096, 1024]],
-  ["maxLiveBytes", [512 * MIB, 64 * MIB, 64 * MIB, 16 * MIB]],
-  ["maxInputBytes", [512 * MIB, 32 * MIB, 64 * MIB, 16 * MIB]],
-  ["maxFileSystemBytes", [1024 * MIB, 128 * MIB, 128 * MIB, 32 * MIB]],
-  ["maxOutputSize", [256 * MIB, 10 * MIB, 32 * MIB, 8 * MIB]],
-  ["maxStringLength", [64 * MIB, 10 * MIB, 16 * MIB, 4 * MIB]],
-  ["maxHeredocSize", [64 * MIB, 10 * MIB, 16 * MIB, 4 * MIB]],
-  ["maxArchiveBytes", [1024 * MIB, 128 * MIB, 128 * MIB, 32 * MIB]],
-  ["maxArchiveCompressedBytes", [512 * MIB, 64 * MIB, 64 * MIB, 16 * MIB]],
-  ["maxArchiveEntryBytes", [512 * MIB, 64 * MIB, 64 * MIB, 16 * MIB]],
-  ["maxArchiveEntries", [1000000, 100000, 100000, 100000]],
-  ["maxExecutionTimeMs", [3600000, 30000, 60000, 10000]],
-  ["maxExtensionCleanupTimeMs", [100, 25, 100, 25]],
-  ["maxDatabaseBytes", [0, 0, 0, 0]],
-  ["maxDatabaseResultBytes", [0, 0, 0, 0]],
-  ["maxWorkerMessageBytes", [0, 0, 0, 0]],
-  ["maxSqliteTimeoutMs", [0, 0, 0, 0]],
-  ["maxPythonTimeoutMs", [0, 0, 0, 0]],
-  ["maxJsTimeoutMs", [0, 0, 0, 0]],
-  ["maxJsBridgeRequests", [0, 0, 0, 0]],
+  ["maxSourceBytes", 0],
+  ["maxExecDepth", 1],
+  ["maxCallDepth", 2],
+  ["maxSubstitutionDepth", 3],
+  ["maxSourceDepth", 2],
+  ["maxCommandCount", 4],
+  ["maxLoopIterations", 4],
+  ["maxAwkIterations", 5],
+  ["maxSedIterations", 5],
+  ["maxJqIterations", 6],
+  ["maxWorkUnits", 7],
+  ["maxQueryTokens", 8],
+  ["maxQueryDepth", 9],
+  ["maxQueryElements", 10],
+  ["maxAwkParserTokens", 8],
+  ["maxAwkParserDepth", 11],
+  ["maxAwkParserOperations", 10],
+  ["maxCsvRows", 10],
+  ["maxCsvCells", 12],
+  ["maxTraversalEntries", 10],
+  ["maxTraversalDepth", 9],
+  ["maxTraversalWork", 10],
+  ["maxGlobOperations", 10],
+  ["maxArrayElements", 10],
+  ["maxBraceExpansionResults", 5],
+  ["maxFileDescriptors", 13],
+  ["maxLiveBytes", 14],
+  ["maxInputBytes", 15],
+  ["maxFileSystemBytes", 16],
+  ["maxOutputSize", 17],
+  ["maxStringLength", 18],
+  ["maxHeredocSize", 18],
+  ["maxArchiveBytes", 16],
+  ["maxArchiveCompressedBytes", 14],
+  ["maxArchiveEntryBytes", 14],
+  ["maxArchiveEntries", 19],
+  ["maxExecutionTimeMs", 20],
+  ["maxExtensionCleanupTimeMs", 21],
+  ["maxDatabaseBytes", 22],
+  ["maxDatabaseResultBytes", 22],
+  ["maxWorkerMessageBytes", 22],
+  ["maxSqliteTimeoutMs", 22],
+  ["maxPythonTimeoutMs", 22],
+  ["maxJsTimeoutMs", 22],
+  ["maxJsBridgeRequests", 22],
 ];
 
 /** Names of the limits accepted as overrides, in table order. */
@@ -85,13 +113,13 @@ export const DEFAULT_PROFILE = "contain";
 export function profileLimits(profile) {
   const c = COLUMN[profile];
   const out = Object.create(null);
-  for (const [name, v] of ROWS) out[name] = v[c];
+  for (const [name, qi] of ROWS) out[name] = Q[qi][c];
   return out;
 }
 
 /** The table rows (for the consistency test). */
 export function tableRows() {
-  return ROWS.map(([n, v]) => [n, [...v]]);
+  return ROWS.map(([n, qi]) => [n, [...Q[qi]]]);
 }
 
 /** Sum of the byte caps that must fit the ceiling: filesystem + live + output + headroom. */

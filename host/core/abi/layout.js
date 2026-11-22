@@ -23,14 +23,6 @@ const primitives = new Map([
 const definitions = new Map(descriptors.types);
 const compiled = new Map();
 
-function freeze(value) {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) freeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
-
 function discriminant(count) {
   if (count <= 0x100) return scalar("u8", 1);
   if (count <= 0x10000) return scalar("u16", 2);
@@ -106,18 +98,18 @@ function compile(ref, name) {
 }
 
 export function layout(ref) {
-  if (ref === null) return freeze(unit);
+  if (ref === null) return unit;
   if (compiled.has(ref)) return compiled.get(ref);
   const type = typeof ref === "string"
     ? primitives.get(ref) ?? compile(definitions.get(ref), ref)
     : compile(ref);
   // Only WIT's named types and primitives are cached. Fixture descriptors can have a caller lifetime.
-  if (typeof ref === "string") compiled.set(ref, freeze(type));
-  return freeze(type);
+  if (typeof ref === "string") compiled.set(ref, type);
+  return type;
 }
 
-export const resourceKinds = freeze(descriptors.engineTypes
-  .filter(([, type]) => type === "resource").map(([name]) => name));
+export const resourceKinds = descriptors.engineTypes
+  .filter(([, type]) => type === "resource").map(([name]) => name);
 
 const streamedResults = {
   "[method]fiber.read-call-input": 1,
@@ -126,7 +118,7 @@ const streamedResults = {
   "[method]fiber.take-coverage": 2,
 };
 
-export const functions = freeze(descriptors.functions.map(([name, fields, resultRef]) => {
+export const functions = descriptors.functions.map(([name, fields, resultRef]) => {
   const params = tuple(fields, name);
   const result = layout(resultRef);
   const indirectParams = params.flat.length > 16;
@@ -138,5 +130,5 @@ export const functions = freeze(descriptors.functions.map(([name, fields, result
     streamStride: streamedResults[name],
     coreParams: indirectParams ? ["i32"] : params.flat,
     coreResults: indirectResult ? ["i32"] : result.flat };
-}));
+});
 

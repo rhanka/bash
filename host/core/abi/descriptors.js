@@ -1,13 +1,5 @@
 // Generated from wit/sentropic-bash.wit by tools/abi-descriptors.mjs --emit.
-function freeze(value) {
-  if (value && typeof value === "object") {
-    for (const child of Object.values(value)) freeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
-
-export const descriptors = freeze({
+export const descriptors = {
   namespace: "sentropic:bash/engine@0.1.0-draft",
   types: [
     ["bytes",["list","u8"]],
@@ -123,4 +115,4 @@ export const descriptors = freeze({
     ["[method]fiber.take-coverage",[["self",["borrow","fiber"]],["max","u32"]],["list","u16"]],
     ["exec-oneshot",[["req","oneshot-req"]],["result","oneshot-result","kernel-error"]],
   ],
-});
+};

@@ -66,17 +66,11 @@ function definition(name, entries) {
 
 export function descriptorSource(graph) {
   return "// Generated from wit/sentropic-bash.wit by tools/abi-descriptors.mjs --emit.\n" +
-    "function freeze(value) {\n" +
-    "  if (value && typeof value === \"object\") {\n" +
-    "    for (const child of Object.values(value)) freeze(child);\n" +
-    "    Object.freeze(value);\n" +
-    "  }\n" +
-    "  return value;\n" +
-    "}\n\nexport const descriptors = freeze({\n" +
+    "export const descriptors = {\n" +
     "  namespace: " + JSON.stringify(graph.namespace) + ",\n" +
     definition("types", graph.types) + definition("engineTypes", graph.engineTypes) +
     definition("functions", graph.functions) +
-    "});\n";
+    "};\n";
 }
 
 if (process.argv[2] === "--emit" && import.meta.url === pathToFileURL(process.argv[1]).href) {
